@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-01-PLAN.md
-last_updated: "2026-03-10T15:46:14.069Z"
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-03-10T15:52:22.088Z"
 last_activity: 2026-03-10 — Completed plan 02-02 (list files + read content endpoints)
 progress:
   total_phases: 11
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 9
-  completed_plans: 7
+  completed_plans: 9
   percent: 15
 ---
 
@@ -53,6 +53,8 @@ Progress: [▓▓░░░░░░░░] 15%
 *Updated after each plan completion*
 | Phase 02 P03 | 7min | 2 tasks | 7 files |
 | Phase 03-vault-write-operations P01 | 4min | 2 tasks | 5 files |
+| Phase 03-vault-write-operations P02 | 4min | 1 tasks | 5 files |
+| Phase 03-vault-write-operations P03 | 5min | 1 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -84,6 +86,9 @@ Recent decisions affecting current work:
 - [Phase 03-01]: Atomic writes use crypto.randomUUID() temp files with fs.rename for conflict-safe writes
 - [Phase 03-01]: createNote uses fs.open(path, 'wx') for exclusive create to atomically detect conflicts (EEXIST -> 409)
 - [Phase 03-01]: resolveWritePath rejects empty paths (unlike resolvePath which maps empty to vault root)
+- [Phase 03-vault-write-operations]: deleteNote rejects directories via stat.isFile() check, throws FileNotFoundError for consistency
+- [Phase 03-vault-write-operations]: moveNote uses try/catch on fs.stat(dest) to detect ENOENT vs conflict atomically
+- [Phase 03-vault-write-operations]: updateMetadata uses null values as delete-key signal in shallow merge operation
 
 ### Pending Todos
 
@@ -95,6 +100,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T15:46:14.066Z
-Stopped at: Completed 03-01-PLAN.md
+Last session: 2026-03-10T15:52:12.348Z
+Stopped at: Completed 03-02-PLAN.md
 Resume file: None
