@@ -1,0 +1,1 @@
+ALTER TABLE `indexed_files` ADD `embedding_model_version` text;

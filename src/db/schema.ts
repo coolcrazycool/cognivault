@@ -8,6 +8,7 @@ export const indexedFiles = sqliteTable(
     mtime: integer('mtime').notNull(),
     size: integer('size').notNull(),
     indexedAt: text('indexed_at').notNull(),
+    embeddingModelVersion: text('embedding_model_version'),
   },
   (table) => [index('content_hash_idx').on(table.contentHash)],
 );

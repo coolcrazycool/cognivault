@@ -8,6 +8,13 @@
       "when": 1773160847328,
       "tag": "0000_familiar_photon",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1773166916411,
+      "tag": "0001_military_whiplash",
+      "breakpoints": true
     }
   ]
 }

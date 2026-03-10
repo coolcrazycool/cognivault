@@ -10,12 +10,11 @@ beforeAll(() => {
 // Mock the OpenAI module to avoid real API calls
 const mockEmbeddingsCreate = vi.fn();
 vi.mock('openai', () => {
+  class MockOpenAI {
+    embeddings = { create: mockEmbeddingsCreate };
+  }
   return {
-    default: vi.fn().mockImplementation(() => ({
-      embeddings: {
-        create: mockEmbeddingsCreate,
-      },
-    })),
+    default: MockOpenAI,
   };
 });
 
