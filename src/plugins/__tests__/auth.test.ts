@@ -1,9 +1,17 @@
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+// Create a real temp vault directory so vault plugin can initialize
+const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'auth-test-'));
+const vaultRoot = path.join(tmpDir, 'vault');
+await fs.mkdir(vaultRoot, { recursive: true });
+
 // Set env vars before any module imports that trigger config parsing
 process.env.COGNIVAULT_API_KEY = 'test-api-key';
-process.env.VAULT_PATH = '/tmp/test-vault';
+process.env.VAULT_PATH = vaultRoot;
 
 const { buildApp } = await import('../../app.js');
 
@@ -24,6 +32,7 @@ describe('auth plugin', () => {
 
   afterAll(async () => {
     await app.close();
+    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   it('rejects requests without Authorization header with 401', async () => {

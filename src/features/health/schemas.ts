@@ -11,6 +11,11 @@ export type HealthResponse = Static<typeof HealthResponseSchema>;
 export const ReadyResponseSchema = Type.Object({
   status: Type.Union([Type.Literal('ready'), Type.Literal('not_ready')]),
   timestamp: Type.String({ format: 'date-time' }),
+  checks: Type.Optional(
+    Type.Object({
+      vault: Type.Union([Type.Literal('ok'), Type.Literal('error')]),
+    }),
+  ),
 });
 
 export type ReadyResponse = Static<typeof ReadyResponseSchema>;

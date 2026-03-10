@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { VaultError } from '../../lib/vault.js';
-import { contentSchema, listFilesSchema, metadataSchema } from './schemas.js';
 import type { ContentQuery, ListFilesQuery, MetadataQuery } from './schemas.js';
+import { contentSchema, listFilesSchema, metadataSchema } from './schemas.js';
 
 function handleVaultError(err: unknown, reply: FastifyReply): void {
   if (err instanceof VaultError) {

@@ -24,13 +24,25 @@ export async function healthRoutes(fastify: FastifyInstance): Promise<void> {
       schema: readySchema,
     },
     async (_request, reply) => {
-      // Phase 1: always ready (no external deps checked yet)
-      // Future phases: check Qdrant connectivity, index state, etc.
-      const ready = true;
+      let vaultOk = false;
+
+      try {
+        if (fastify.vault) {
+          await fastify.vault.resolvePath('');
+          vaultOk = true;
+        }
+      } catch {
+        vaultOk = false;
+      }
+
+      const ready = vaultOk;
       const status = ready ? 'ready' : 'not_ready';
       return reply.status(ready ? 200 : 503).send({
         status,
         timestamp: new Date().toISOString(),
+        checks: {
+          vault: vaultOk ? 'ok' : 'error',
+        },
       });
     },
   );
