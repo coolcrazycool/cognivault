@@ -1,4 +1,3 @@
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -18,15 +17,22 @@ interface MockVaultEntry {
 function createMockVault(vaultRoot: string) {
   return {
     rootPath: vaultRoot,
-    async listFiles(opts?: { recursive?: boolean; ext?: string }): Promise<{ entries: MockVaultEntry[] }> {
-      const extFilter = opts?.ext ? (opts.ext.startsWith('.') ? opts.ext : `.${opts.ext}`) : undefined;
+    async listFiles(opts?: {
+      recursive?: boolean;
+      ext?: string;
+    }): Promise<{ entries: MockVaultEntry[] }> {
+      const extFilter = opts?.ext
+        ? opts.ext.startsWith('.')
+          ? opts.ext
+          : `.${opts.ext}`
+        : undefined;
 
       const results: MockVaultEntry[] = [];
 
       async function walk(dir: string): Promise<void> {
-        let entries: Awaited<ReturnType<typeof fs.readdir>>;
+        let entries: import('node:fs').Dirent<string>[];
         try {
-          entries = await fs.readdir(dir, { withFileTypes: true });
+          entries = await fs.readdir(dir, { withFileTypes: true, encoding: 'utf-8' });
         } catch {
           return;
         }
@@ -89,14 +95,6 @@ async function writeMd(dir: string, relPath: string, content: string): Promise<s
   return absPath;
 }
 
-function collectChanges(indexer: VaultIndexer): FileChangeEvent[][] {
-  const batches: FileChangeEvent[][] = [];
-  indexer.on('changes', (events) => {
-    batches.push(events);
-  });
-  return batches;
-}
-
 function waitForChanges(
   indexer: VaultIndexer,
   count: number,
@@ -104,7 +102,10 @@ function waitForChanges(
 ): Promise<FileChangeEvent[][]> {
   return new Promise((resolve, reject) => {
     const batches: FileChangeEvent[][] = [];
-    const timer = setTimeout(() => reject(new Error(`Timeout waiting for ${count} change batches`)), timeout);
+    const timer = setTimeout(
+      () => reject(new Error(`Timeout waiting for ${count} change batches`)),
+      timeout,
+    );
 
     indexer.on('changes', (events) => {
       batches.push(events);
@@ -192,13 +193,15 @@ describe('VaultIndexer', () => {
       const { indexer, db } = createTestIndexer({ vaultRoot, dbPath });
       const { indexedFiles } = await import('../../db/schema.js');
 
-      db.insert(indexedFiles).values({
-        path: 'stale.md',
-        contentHash: 'abc123',
-        mtime: Date.now(),
-        size: 100,
-        indexedAt: new Date().toISOString(),
-      }).run();
+      db.insert(indexedFiles)
+        .values({
+          path: 'stale.md',
+          contentHash: 'abc123',
+          mtime: Date.now(),
+          size: 100,
+          indexedAt: new Date().toISOString(),
+        })
+        .run();
 
       const batches = await new Promise<FileChangeEvent[][]>((resolve, reject) => {
         const collected: FileChangeEvent[][] = [];
@@ -206,7 +209,9 @@ describe('VaultIndexer', () => {
 
         indexer.on('changes', (events) => {
           collected.push(events);
-          const hasDeleted = collected.flat().some((e) => e.type === 'deleted' && e.path === 'stale.md');
+          const hasDeleted = collected
+            .flat()
+            .some((e) => e.type === 'deleted' && e.path === 'stale.md');
           if (hasDeleted) {
             clearTimeout(timer);
             indexer.stop();
@@ -220,7 +225,7 @@ describe('VaultIndexer', () => {
       const allEvents = batches.flat();
       const deletedEvents = allEvents.filter((e) => e.type === 'deleted');
       expect(deletedEvents).toHaveLength(1);
-      expect(deletedEvents[0].path).toBe('stale.md');
+      expect(deletedEvents[0]?.path).toBe('stale.md');
     });
 
     it('handles empty vault (no errors, no events)', async () => {
@@ -266,7 +271,12 @@ describe('VaultIndexer', () => {
 
   describe('Poll cycle change detection', () => {
     it('detects a new .md file and emits created event', async () => {
-      const { indexer } = createTestIndexer({ vaultRoot, dbPath, pollIntervalMs: 200, stabilityDelayMs: 50 });
+      const { indexer } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 200,
+        stabilityDelayMs: 50,
+      });
 
       // Start with empty vault
       await indexer.start();
@@ -289,7 +299,12 @@ describe('VaultIndexer', () => {
     it('detects a modified file (hash changed) and emits updated event', async () => {
       await writeMd(vaultRoot, 'existing.md', 'original content');
 
-      const { indexer } = createTestIndexer({ vaultRoot, dbPath, pollIntervalMs: 200, stabilityDelayMs: 50 });
+      const { indexer } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 200,
+        stabilityDelayMs: 50,
+      });
 
       await indexer.start();
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -303,14 +318,21 @@ describe('VaultIndexer', () => {
       indexer.stop();
 
       const allEvents = batches.flat();
-      const updatedEvents = allEvents.filter((e) => e.type === 'updated' && e.path === 'existing.md');
+      const updatedEvents = allEvents.filter(
+        (e) => e.type === 'updated' && e.path === 'existing.md',
+      );
       expect(updatedEvents.length).toBeGreaterThanOrEqual(1);
     });
 
     it('detects a deleted file and emits deleted event', async () => {
       await writeMd(vaultRoot, 'todelete.md', 'will be deleted');
 
-      const { indexer } = createTestIndexer({ vaultRoot, dbPath, pollIntervalMs: 200, stabilityDelayMs: 50 });
+      const { indexer } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 200,
+        stabilityDelayMs: 50,
+      });
 
       await indexer.start();
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -324,7 +346,9 @@ describe('VaultIndexer', () => {
       indexer.stop();
 
       const allEvents = batches.flat();
-      const deletedEvents = allEvents.filter((e) => e.type === 'deleted' && e.path === 'todelete.md');
+      const deletedEvents = allEvents.filter(
+        (e) => e.type === 'deleted' && e.path === 'todelete.md',
+      );
       expect(deletedEvents.length).toBeGreaterThanOrEqual(1);
     });
 
@@ -378,7 +402,12 @@ describe('VaultIndexer', () => {
       const content = 'unique content for move detection test';
       await writeMd(vaultRoot, 'original.md', content);
 
-      const { indexer } = createTestIndexer({ vaultRoot, dbPath, pollIntervalMs: 200, stabilityDelayMs: 50 });
+      const { indexer } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 200,
+        stabilityDelayMs: 50,
+      });
 
       await indexer.start();
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -397,8 +426,8 @@ describe('VaultIndexer', () => {
       expect(movedEvents.length).toBeGreaterThanOrEqual(1);
 
       const moveEvent = movedEvents[0];
-      expect(moveEvent.path).toBe('renamed.md');
-      expect(moveEvent.oldPath).toBe('original.md');
+      expect(moveEvent?.path).toBe('renamed.md');
+      expect(moveEvent?.oldPath).toBe('original.md');
     });
   });
 
@@ -409,7 +438,12 @@ describe('VaultIndexer', () => {
       // and ensure a file written "in progress" doesn't emit events
       // In practice, we'll test the checkStability logic indirectly:
       // by checking that only stable files get emitted
-      const { indexer } = createTestIndexer({ vaultRoot, dbPath, pollIntervalMs: 200, stabilityDelayMs: 100 });
+      const { indexer } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 200,
+        stabilityDelayMs: 100,
+      });
 
       await indexer.start();
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -419,7 +453,9 @@ describe('VaultIndexer', () => {
       // but may emit in subsequent cycles once stable
       let createdCount = 0;
       indexer.on('changes', (events) => {
-        createdCount += events.filter((e) => e.type === 'created' && e.path === 'unstable.md').length;
+        createdCount += events.filter(
+          (e) => e.type === 'created' && e.path === 'unstable.md',
+        ).length;
       });
 
       // Write and quickly overwrite - simulates instability
@@ -438,7 +474,12 @@ describe('VaultIndexer', () => {
     });
 
     it('accepts files whose hash is stable across both reads', async () => {
-      const { indexer } = createTestIndexer({ vaultRoot, dbPath, pollIntervalMs: 200, stabilityDelayMs: 50 });
+      const { indexer } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 200,
+        stabilityDelayMs: 50,
+      });
 
       await indexer.start();
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -454,13 +495,18 @@ describe('VaultIndexer', () => {
       const allEvents = batches.flat();
       const stableEvents = allEvents.filter((e) => e.path === 'stable.md');
       expect(stableEvents.length).toBeGreaterThanOrEqual(1);
-      expect(stableEvents[0].type).toBe('created');
+      expect(stableEvents[0]?.type).toBe('created');
     });
   });
 
   describe('Batch emission', () => {
     it('emits one changes event per poll cycle as an array of FileChangeEvent', async () => {
-      const { indexer } = createTestIndexer({ vaultRoot, dbPath, pollIntervalMs: 500, stabilityDelayMs: 50 });
+      const { indexer } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 500,
+        stabilityDelayMs: 50,
+      });
 
       const batchSizes: number[] = [];
       indexer.on('changes', (events) => {
@@ -479,7 +525,9 @@ describe('VaultIndexer', () => {
       // Should have emitted at least one batch from initial scan
       expect(batchSizes.length).toBeGreaterThanOrEqual(1);
       // Each batch is an array
-      batchSizes.forEach((size) => expect(size).toBeGreaterThan(0));
+      for (const size of batchSizes) {
+        expect(size).toBeGreaterThan(0);
+      }
     });
 
     it('chunks large batches into ~100 events per emission', async () => {
@@ -564,7 +612,12 @@ describe('VaultIndexer', () => {
       // We'll verify by watching that changes are sensible
       await writeMd(vaultRoot, 'guard-test.md', 'test');
 
-      const { indexer } = createTestIndexer({ vaultRoot, dbPath, pollIntervalMs: 50, stabilityDelayMs: 200 });
+      const { indexer } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 50,
+        stabilityDelayMs: 200,
+      });
 
       let changeCount = 0;
       indexer.on('changes', () => {
@@ -581,7 +634,12 @@ describe('VaultIndexer', () => {
     });
 
     it('listener errors do not crash the poller', async () => {
-      const { indexer } = createTestIndexer({ vaultRoot, dbPath, pollIntervalMs: 200, stabilityDelayMs: 50 });
+      const { indexer } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 200,
+        stabilityDelayMs: 50,
+      });
 
       let threwError = false;
       indexer.on('changes', () => {

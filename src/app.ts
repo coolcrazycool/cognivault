@@ -6,6 +6,7 @@ import { vaultRoutes } from './features/vault/routes.js';
 import authPlugin from './plugins/auth.js';
 import dbPlugin from './plugins/db.js';
 import errorHandler from './plugins/error-handler.js';
+import indexerPlugin from './plugins/indexer.js';
 import vaultPlugin from './plugins/vault.js';
 
 interface BuildAppOptions {
@@ -24,6 +25,7 @@ export async function buildApp(opts?: BuildAppOptions): Promise<FastifyInstance>
   // Plugins
   await app.register(vaultPlugin);
   await app.register(dbPlugin);
+  await app.register(indexerPlugin);
 
   // Feature routes
   await app.register(healthRoutes);
