@@ -342,7 +342,10 @@ describe('VaultManager', () => {
     it('creates a new file on disk and returns { path, created: true }', async () => {
       const result = await manager.createNote('notes/new-create.md', 'Hello world');
       expect(result).toEqual({ path: 'notes/new-create.md', created: true });
-      const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'new-create.md'), 'utf-8');
+      const diskContent = await fs.readFile(
+        path.join(vaultRoot, 'notes', 'new-create.md'),
+        'utf-8',
+      );
       expect(diskContent).toContain('Hello world');
     });
 
@@ -365,7 +368,10 @@ describe('VaultManager', () => {
     });
 
     it('writes YAML frontmatter when frontmatter object is provided', async () => {
-      await manager.createNote('notes/with-fm.md', 'Body text', { title: 'My Title', tags: ['a', 'b'] });
+      await manager.createNote('notes/with-fm.md', 'Body text', {
+        title: 'My Title',
+        tags: ['a', 'b'],
+      });
       const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'with-fm.md'), 'utf-8');
       expect(diskContent).toContain('title: My Title');
       expect(diskContent).toContain('Body text');
@@ -411,18 +417,29 @@ describe('VaultManager', () => {
       expect(diskContent).toContain('Original content');
       expect(diskContent).toContain('Appended text');
       // Appended text should come after
-      expect(diskContent.indexOf('Appended text')).toBeGreaterThan(diskContent.indexOf('Original content'));
+      expect(diskContent.indexOf('Appended text')).toBeGreaterThan(
+        diskContent.indexOf('Original content'),
+      );
     });
 
     it('prepends text before existing content', async () => {
       await fs.writeFile(path.join(vaultRoot, 'notes', 'prepend-me.md'), 'Original content\n');
-      const result = await manager.appendContent('notes/prepend-me.md', 'Prepended text', 'prepend');
+      const result = await manager.appendContent(
+        'notes/prepend-me.md',
+        'Prepended text',
+        'prepend',
+      );
       expect(result).toEqual({ path: 'notes/prepend-me.md', updated: true });
-      const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'prepend-me.md'), 'utf-8');
+      const diskContent = await fs.readFile(
+        path.join(vaultRoot, 'notes', 'prepend-me.md'),
+        'utf-8',
+      );
       expect(diskContent).toContain('Original content');
       expect(diskContent).toContain('Prepended text');
       // Prepended text should come before
-      expect(diskContent.indexOf('Prepended text')).toBeLessThan(diskContent.indexOf('Original content'));
+      expect(diskContent.indexOf('Prepended text')).toBeLessThan(
+        diskContent.indexOf('Original content'),
+      );
     });
 
     it('preserves frontmatter block when appending', async () => {
@@ -444,7 +461,10 @@ describe('VaultManager', () => {
         '---\ntitle: Test\n---\n\nOriginal body\n',
       );
       await manager.appendContent('notes/fm-prepend.md', 'New prepended text', 'prepend');
-      const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'fm-prepend.md'), 'utf-8');
+      const diskContent = await fs.readFile(
+        path.join(vaultRoot, 'notes', 'fm-prepend.md'),
+        'utf-8',
+      );
       expect(diskContent).toContain('title: Test');
       expect(diskContent).toContain('---');
       expect(diskContent).toContain('Original body');
@@ -454,9 +474,9 @@ describe('VaultManager', () => {
     });
 
     it('throws FileNotFoundError for nonexistent file', async () => {
-      await expect(
-        manager.appendContent('notes/missing.md', 'text', 'append'),
-      ).rejects.toThrow(FileNotFoundError);
+      await expect(manager.appendContent('notes/missing.md', 'text', 'append')).rejects.toThrow(
+        FileNotFoundError,
+      );
     });
   });
 });

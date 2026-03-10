@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import matter from 'gray-matter';
@@ -41,6 +42,13 @@ export class UnsupportedMediaTypeError extends VaultError {
   constructor(filePath: string) {
     super(`Unsupported media type: ${filePath}`, 'UNSUPPORTED_MEDIA_TYPE', 415);
     this.name = 'UnsupportedMediaTypeError';
+  }
+}
+
+export class FileExistsError extends VaultError {
+  constructor(filePath: string) {
+    super(`File already exists: ${filePath}`, 'FILE_EXISTS', 409);
+    this.name = 'FileExistsError';
   }
 }
 
@@ -291,5 +299,130 @@ export class VaultManager {
         warning: `Failed to parse frontmatter in ${filePath}`,
       };
     }
+  }
+
+  async resolveWritePath(relativePath: string): Promise<string> {
+    // Normalize: collapse double slashes, strip leading/trailing slashes
+    const normalized = relativePath.replace(/\/+/g, '/').replace(/^\//, '').replace(/\/$/, '');
+
+    // Empty path is not allowed for write operations
+    if (normalized === '') {
+      throw new PathTraversalError('Empty path is not allowed for write operations');
+    }
+
+    // Check each segment for traversal and dotfiles/dotfolders
+    const segments = normalized.split('/');
+    for (const segment of segments) {
+      // Traversal check first: '..' and '.' segments
+      if (segment === '.' || segment === '..') {
+        throw new PathTraversalError(`Path traversal detected: ${relativePath}`);
+      }
+      // Then dotfile/dotfolder check
+      if (segment.startsWith('.')) {
+        throw new DotfileAccessError(relativePath);
+      }
+    }
+
+    // Resolve absolute path (without requiring existence)
+    const resolved = path.resolve(this.rootPath, normalized);
+
+    // Check traversal: resolved must start with rootPath + sep, or equal rootPath
+    if (resolved !== this.rootPath && !resolved.startsWith(this.rootPath + path.sep)) {
+      throw new PathTraversalError(`Path traversal detected: ${relativePath}`);
+    }
+
+    return resolved;
+  }
+
+  private async atomicWrite(filePath: string, content: string): Promise<void> {
+    const dir = path.dirname(filePath);
+    const tmpPath = path.join(dir, `.${crypto.randomUUID()}.tmp`);
+
+    try {
+      await fs.writeFile(tmpPath, content, 'utf-8');
+      await fs.rename(tmpPath, filePath);
+    } catch (err: unknown) {
+      // Clean up temp file on error
+      try {
+        await fs.unlink(tmpPath);
+      } catch {
+        // Ignore cleanup errors
+      }
+      throw err;
+    }
+  }
+
+  async createNote(
+    filePath: string,
+    content: string,
+    frontmatter?: Record<string, unknown>,
+  ): Promise<{ path: string; created: true }> {
+    const resolved = await this.resolveWritePath(filePath);
+
+    // Auto-create parent directories
+    await fs.mkdir(path.dirname(resolved), { recursive: true });
+
+    // Use exclusive create to detect conflicts atomically
+    let fileHandle: fs.FileHandle | undefined;
+    try {
+      fileHandle = await fs.open(resolved, 'wx');
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new FileExistsError(filePath);
+      }
+      throw err;
+    } finally {
+      if (fileHandle) {
+        await fileHandle.close();
+      }
+    }
+
+    // Assemble content
+    let assembled: string;
+    if (frontmatter && Object.keys(frontmatter).length > 0) {
+      assembled = matter.stringify(content, frontmatter);
+    } else {
+      assembled = content + '\n';
+    }
+
+    // Write atomically
+    await this.atomicWrite(resolved, assembled);
+
+    return { path: filePath, created: true };
+  }
+
+  async updateContent(filePath: string, content: string): Promise<{ path: string; updated: true }> {
+    // resolvePath throws FileNotFoundError if file doesn't exist
+    const resolved = await this.resolvePath(filePath);
+
+    await this.atomicWrite(resolved, content + '\n');
+
+    return { path: filePath, updated: true };
+  }
+
+  async appendContent(
+    filePath: string,
+    text: string,
+    mode: 'append' | 'prepend',
+  ): Promise<{ path: string; updated: true }> {
+    // resolvePath throws FileNotFoundError if file doesn't exist
+    const resolved = await this.resolvePath(filePath);
+
+    const raw = await fs.readFile(resolved, 'utf-8');
+    const parsed = matter(raw);
+
+    let updatedContent: string;
+    if (mode === 'append') {
+      updatedContent = parsed.content.trimEnd() + '\n\n' + text;
+    } else {
+      updatedContent = text + '\n\n' + parsed.content.trimStart();
+    }
+
+    // Reassemble with frontmatter (matter.stringify preserves it)
+    const reassembled = matter.stringify(updatedContent, parsed.data);
+
+    await this.atomicWrite(resolved, reassembled);
+
+    return { path: filePath, updated: true };
   }
 }
