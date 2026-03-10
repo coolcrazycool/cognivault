@@ -117,12 +117,11 @@ Plans:
   2. Agent can perform lexical search that finds exact technical terms, acronyms, and short identifiers
   3. Agent can filter any search by tags, project, status, folder path, or note type
   4. Search results include chunk text, source note path, section_path, and relevance score
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 06-01: Semantic search endpoint via Qdrant ANN with metadata filters
-- [ ] 06-02: Lexical search via Qdrant BM25 sparse vectors (or SQLite FTS5 fallback)
-- [ ] 06-03: Search response schema with chunk text, path, section_path, score
+- [ ] 06-01-PLAN.md — Pipeline text payload + Qdrant full-text indexes for lexical search
+- [ ] 06-02-PLAN.md — Search feature module (semantic + lexical endpoints, schemas, service, tests)
 
 ### Phase 7: Hybrid Retrieval + Reranking
 **Goal**: Agents get high-precision results from combined semantic + lexical search with cross-encoder reranking
@@ -219,7 +218,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 3. Vault Write Operations | 3/3 | Complete   | 2026-03-10 |
 | 4. Index State + Change Detection | 3/3 | Complete   | 2026-03-10 |
 | 5. Markdown Indexing Pipeline | 3/3 | Complete   | 2026-03-10 |
-| 6. Semantic + Lexical Search | 0/3 | Not started | - |
+| 6. Semantic + Lexical Search | 0/2 | Not started | - |
 | 7. Hybrid Retrieval + Reranking | 0/3 | Not started | - |
 | 8. Context Pack Assembly | 0/3 | Not started | - |
 | 9. TOON + API Polish | 0/3 | Not started | - |
