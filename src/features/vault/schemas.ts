@@ -66,6 +66,49 @@ export const MetadataResponseSchema = Type.Object({
 
 export type MetadataResponse = Static<typeof MetadataResponseSchema>;
 
+// ── Create Note ──
+
+export const CreateNoteBodySchema = Type.Object({
+  path: Type.String({ minLength: 1 }),
+  content: Type.String(),
+  frontmatter: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+});
+
+export type CreateNoteBody = Static<typeof CreateNoteBodySchema>;
+
+export const CreateNoteResponseSchema = Type.Object({
+  path: Type.String(),
+  created: Type.Literal(true),
+});
+
+export type CreateNoteResponse = Static<typeof CreateNoteResponseSchema>;
+
+// ── Update Content ──
+
+export const UpdateContentBodySchema = Type.Object({
+  path: Type.String({ minLength: 1 }),
+  content: Type.String(),
+});
+
+export type UpdateContentBody = Static<typeof UpdateContentBodySchema>;
+
+export const UpdateContentResponseSchema = Type.Object({
+  path: Type.String(),
+  updated: Type.Literal(true),
+});
+
+export type UpdateContentResponse = Static<typeof UpdateContentResponseSchema>;
+
+// ── Append Content ──
+
+export const AppendContentBodySchema = Type.Object({
+  path: Type.String({ minLength: 1 }),
+  content: Type.String(),
+  mode: Type.Union([Type.Literal('append'), Type.Literal('prepend')]),
+});
+
+export type AppendContentBody = Static<typeof AppendContentBodySchema>;
+
 // ── Route schema objects ──
 
 export const listFilesSchema = {
@@ -90,6 +133,34 @@ export const metadataSchema = {
   querystring: MetadataQuerySchema,
   response: {
     200: MetadataResponseSchema,
+    403: ErrorResponseSchema,
+    404: ErrorResponseSchema,
+  },
+};
+
+export const createNoteSchema = {
+  body: CreateNoteBodySchema,
+  response: {
+    201: CreateNoteResponseSchema,
+    403: ErrorResponseSchema,
+    404: ErrorResponseSchema,
+    409: ErrorResponseSchema,
+  },
+};
+
+export const updateContentSchema = {
+  body: UpdateContentBodySchema,
+  response: {
+    200: UpdateContentResponseSchema,
+    403: ErrorResponseSchema,
+    404: ErrorResponseSchema,
+  },
+};
+
+export const appendContentSchema = {
+  body: AppendContentBodySchema,
+  response: {
+    200: UpdateContentResponseSchema,
     403: ErrorResponseSchema,
     404: ErrorResponseSchema,
   },

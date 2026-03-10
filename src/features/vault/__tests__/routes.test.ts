@@ -303,4 +303,240 @@ describe('vault routes', () => {
       expect(response.statusCode).toBe(401);
     });
   });
+
+  describe('POST /api/vault/content', () => {
+    it('creates a new note and returns 201', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'notes/new-post.md', content: 'Created via POST' },
+      });
+      expect(response.statusCode).toBe(201);
+      const body = response.json();
+      expect(body.path).toBe('notes/new-post.md');
+      expect(body.created).toBe(true);
+      // Verify file exists on disk
+      const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'new-post.md'), 'utf-8');
+      expect(diskContent).toContain('Created via POST');
+    });
+
+    it('returns 409 when file already exists', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'conflict.md'), 'existing');
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'notes/conflict.md', content: 'new content' },
+      });
+      expect(response.statusCode).toBe(409);
+      const body = response.json();
+      expect(body.error.code).toBe('FILE_EXISTS');
+    });
+
+    it('creates note with frontmatter YAML block', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: {
+          path: 'notes/with-frontmatter-post.md',
+          content: 'Body text',
+          frontmatter: { title: 'My Note', tags: ['test'] },
+        },
+      });
+      expect(response.statusCode).toBe(201);
+      const diskContent = await fs.readFile(
+        path.join(vaultRoot, 'notes', 'with-frontmatter-post.md'),
+        'utf-8',
+      );
+      expect(diskContent).toContain('title: My Note');
+      expect(diskContent).toContain('Body text');
+      expect(diskContent).toContain('---');
+    });
+
+    it('auto-creates intermediate directories', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'deep/nested/route/note.md', content: 'Deep note content' },
+      });
+      expect(response.statusCode).toBe(201);
+      const exists = await fs
+        .access(path.join(vaultRoot, 'deep', 'nested', 'route', 'note.md'))
+        .then(() => true)
+        .catch(() => false);
+      expect(exists).toBe(true);
+    });
+
+    it('returns 403 for path traversal', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: '../escape.md', content: 'bad content' },
+      });
+      expect(response.statusCode).toBe(403);
+      const body = response.json();
+      expect(body.error.code).toBe('PATH_TRAVERSAL');
+    });
+
+    it('returns 401 without auth header', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/content',
+        headers: { 'content-type': 'application/json' },
+        payload: { path: 'notes/unauth.md', content: 'content' },
+      });
+      expect(response.statusCode).toBe(401);
+    });
+  });
+
+  describe('PUT /api/vault/content', () => {
+    it('replaces note content and returns 200', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'update-route.md'), 'Old content\n');
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'notes/update-route.md', content: 'New content' },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.path).toBe('notes/update-route.md');
+      expect(body.updated).toBe(true);
+      const diskContent = await fs.readFile(
+        path.join(vaultRoot, 'notes', 'update-route.md'),
+        'utf-8',
+      );
+      expect(diskContent).toBe('New content\n');
+    });
+
+    it('returns 404 for nonexistent file', async () => {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'notes/nonexistent-put.md', content: 'content' },
+      });
+      expect(response.statusCode).toBe(404);
+      const body = response.json();
+      expect(body.error.code).toBe('NOT_FOUND');
+    });
+
+    it('returns 403 for path traversal', async () => {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: '../escape.md', content: 'bad' },
+      });
+      expect(response.statusCode).toBe(403);
+    });
+
+    it('returns 401 without auth header', async () => {
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/api/vault/content',
+        headers: { 'content-type': 'application/json' },
+        payload: { path: 'notes/hello.md', content: 'content' },
+      });
+      expect(response.statusCode).toBe(401);
+    });
+  });
+
+  describe('PATCH /api/vault/content', () => {
+    it('appends text after content and returns 200', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'patch-append.md'), 'Original\n');
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'notes/patch-append.md', content: 'Appended', mode: 'append' },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.updated).toBe(true);
+      const diskContent = await fs.readFile(
+        path.join(vaultRoot, 'notes', 'patch-append.md'),
+        'utf-8',
+      );
+      expect(diskContent).toContain('Original');
+      expect(diskContent).toContain('Appended');
+      expect(diskContent.indexOf('Appended')).toBeGreaterThan(diskContent.indexOf('Original'));
+    });
+
+    it('prepends text before content and returns 200', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'patch-prepend.md'), 'Original\n');
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'notes/patch-prepend.md', content: 'Prepended', mode: 'prepend' },
+      });
+      expect(response.statusCode).toBe(200);
+      const diskContent = await fs.readFile(
+        path.join(vaultRoot, 'notes', 'patch-prepend.md'),
+        'utf-8',
+      );
+      expect(diskContent).toContain('Original');
+      expect(diskContent).toContain('Prepended');
+      expect(diskContent.indexOf('Prepended')).toBeLessThan(diskContent.indexOf('Original'));
+    });
+
+    it('preserves frontmatter during append', async () => {
+      await fs.writeFile(
+        path.join(vaultRoot, 'notes', 'patch-fm-append.md'),
+        '---\ntitle: Keep Me\n---\n\nBody\n',
+      );
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'notes/patch-fm-append.md', content: 'Extra text', mode: 'append' },
+      });
+      expect(response.statusCode).toBe(200);
+      const diskContent = await fs.readFile(
+        path.join(vaultRoot, 'notes', 'patch-fm-append.md'),
+        'utf-8',
+      );
+      expect(diskContent).toContain('title: Keep Me');
+      expect(diskContent).toContain('---');
+      expect(diskContent).toContain('Body');
+      expect(diskContent).toContain('Extra text');
+    });
+
+    it('returns 404 for nonexistent file', async () => {
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'notes/nonexistent-patch.md', content: 'text', mode: 'append' },
+      });
+      expect(response.statusCode).toBe(404);
+      const body = response.json();
+      expect(body.error.code).toBe('NOT_FOUND');
+    });
+
+    it('returns 403 for path traversal', async () => {
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: '../escape.md', content: 'bad', mode: 'append' },
+      });
+      expect(response.statusCode).toBe(403);
+    });
+
+    it('returns 401 without auth header', async () => {
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/vault/content',
+        headers: { 'content-type': 'application/json' },
+        payload: { path: 'notes/hello.md', content: 'text', mode: 'append' },
+      });
+      expect(response.statusCode).toBe(401);
+    });
+  });
 });
