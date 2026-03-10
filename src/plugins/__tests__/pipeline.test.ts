@@ -1,8 +1,7 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import fp from 'fastify-plugin';
 import type { FastifyInstance } from 'fastify';
+import fp from 'fastify-plugin';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FileChangeEvent } from '../../lib/indexer.js';
-import type { EmbeddingProvider } from '../../lib/embedding.js';
 
 // Set required env vars before any imports that trigger config parsing
 beforeAll(() => {
@@ -13,120 +12,91 @@ beforeAll(() => {
   process.env.EMBEDDING_MODEL = 'text-embedding-3-small';
 });
 
-// ── Mock helpers ──
+// ── Enough content to produce at least one chunk (>=100 tokens) ──
+const RICH_CONTENT =
+  '# Test\n\nSome content for testing purposes with enough tokens to create a chunk in the markdown processor since we need at least 100 tokens per section to avoid merging. Adding more text here to ensure we have enough content for chunking to work correctly and produce at least one valid chunk output.';
 
-type MockFn = ReturnType<typeof vi.fn>;
-
-interface MockQdrant {
-  upsert: MockFn;
-  delete: MockFn;
-  setPayload: MockFn;
-}
-
-interface MockEmbedder extends EmbeddingProvider {
-  embed: MockFn;
-  dimensions: number;
-}
-
-interface MockVault {
-  readContent: MockFn;
-}
-
-interface MockDb {
-  update: MockFn;
-}
-
-// Creates a minimal Fastify app with mocked services wired as decorators
-async function buildTestApp(overrides?: {
-  vault?: Partial<MockVault>;
-  embedder?: Partial<MockEmbedder>;
-  qdrant?: Partial<MockQdrant>;
-  db?: Partial<MockDb>;
+// Creates a minimal Fastify app with mocked services wired as decorators.
+// Uses `unknown` casts to bypass Fastify's strict decorator type matching.
+async function buildTestApp(opts?: {
+  readContent?: ReturnType<typeof vi.fn>;
+  embed?: ReturnType<typeof vi.fn>;
+  upsert?: ReturnType<typeof vi.fn>;
+  qdrantDelete?: ReturnType<typeof vi.fn>;
+  setPayload?: ReturnType<typeof vi.fn>;
 }): Promise<{
   app: FastifyInstance;
-  mocks: { vault: MockVault; embedder: MockEmbedder; qdrant: MockQdrant; db: MockDb };
+  readContent: ReturnType<typeof vi.fn>;
+  embed: ReturnType<typeof vi.fn>;
+  upsert: ReturnType<typeof vi.fn>;
+  qdrantDelete: ReturnType<typeof vi.fn>;
+  setPayload: ReturnType<typeof vi.fn>;
+  dbUpdate: ReturnType<typeof vi.fn>;
 }> {
   const Fastify = (await import('fastify')).default;
 
-  // Default mock implementations
-  const mockVault: MockVault = {
-    readContent: vi.fn().mockResolvedValue({ content: '# Test\n\nSome content for testing purposes with enough tokens to create a chunk in the markdown processor since we need at least 100 tokens per section to avoid merging. Adding more text here to ensure we have enough content for chunking to work correctly and produce at least one valid chunk output.' }),
-    ...overrides?.vault,
-  };
+  const readContent = opts?.readContent ?? vi.fn().mockResolvedValue({ content: RICH_CONTENT });
+  const embed = opts?.embed ?? vi.fn().mockResolvedValue([[0.1, 0.2, 0.3]]);
+  const upsert = opts?.upsert ?? vi.fn().mockResolvedValue({});
+  const qdrantDelete = opts?.qdrantDelete ?? vi.fn().mockResolvedValue({});
+  const setPayload = opts?.setPayload ?? vi.fn().mockResolvedValue({});
 
-  const mockEmbedder: MockEmbedder = {
-    dimensions: 1536,
-    embed: vi.fn().mockResolvedValue([[0.1, 0.2, 0.3]]),
-    ...overrides?.embedder,
-  };
-
-  const mockQdrant: MockQdrant = {
-    upsert: vi.fn().mockResolvedValue({}),
-    delete: vi.fn().mockResolvedValue({}),
-    setPayload: vi.fn().mockResolvedValue({}),
-    ...overrides?.qdrant,
-  };
-
-  // Mock the db.update chain: db.update().set().where().run()
-  const mockRun = vi.fn();
-  const mockWhere = vi.fn().mockReturnValue({ run: mockRun });
-  const mockSet = vi.fn().mockReturnValue({ where: mockWhere });
-  const mockUpdate = vi.fn().mockReturnValue({ set: mockSet });
-  const mockDb: MockDb = {
-    update: mockUpdate,
-    ...overrides?.db,
-  };
+  // Build the db.update chain mock
+  const dbRun = vi.fn();
+  const dbWhere = vi.fn().mockReturnValue({ run: dbRun });
+  const dbSet = vi.fn().mockReturnValue({ where: dbWhere });
+  const dbUpdate = vi.fn().mockReturnValue({ set: dbSet });
 
   const app = Fastify({ logger: false });
 
-  // Register mock services as named plugins with fp() so they satisfy dependency checks
+  // Register all dependencies as a single plugin to avoid fp name conflicts
   await app.register(
     fp(
       async (f) => {
-        f.decorate('vault', mockVault);
-        f.decorate('embedder', mockEmbedder);
-        f.decorate('qdrant', mockQdrant);
-        f.decorate('db', mockDb);
+        f.decorate('vault', { readContent } as unknown as FastifyInstance['vault']);
+        f.decorate('embedder', {
+          dimensions: 1536,
+          embed,
+        } as unknown as FastifyInstance['embedder']);
+        f.decorate('qdrant', {
+          upsert,
+          delete: qdrantDelete,
+          setPayload,
+        } as unknown as FastifyInstance['qdrant']);
+        f.decorate('db', { update: dbUpdate } as unknown as FastifyInstance['db']);
         f.decorate('indexer', {
           on: vi.fn(),
           removeListener: vi.fn(),
-        });
+        } as unknown as FastifyInstance['indexer']);
       },
       { name: 'vault' },
     ),
   );
 
-  await app.register(
-    fp(async (f) => { f; }, { name: 'db' }),
-  );
-  await app.register(
-    fp(async (f) => { f; }, { name: 'embedder' }),
-  );
-  await app.register(
-    fp(async (f) => { f; }, { name: 'qdrant' }),
-  );
-  await app.register(
-    fp(async (f) => { f; }, { name: 'indexer' }),
-  );
+  // Satisfy fp dependency checks with empty plugins
+  for (const name of ['db', 'embedder', 'qdrant', 'indexer'] as const) {
+    await app.register(fp(async (_f) => {}, { name }));
+  }
 
   const { default: pipelinePlugin } = await import('../pipeline.js');
   await app.register(pipelinePlugin);
   await app.ready();
 
-  return { app, mocks: { vault: mockVault, embedder: mockEmbedder, qdrant: mockQdrant, db: mockDb } };
+  return { app, readContent, embed, upsert, qdrantDelete, setPayload, dbUpdate };
 }
 
-// Helper: emit a batch of changes directly to the pipeline's listener
+// Helper: invoke the 'changes' listener the pipeline registered on indexer.on
 async function emitChanges(app: FastifyInstance, events: FileChangeEvent[]): Promise<void> {
-  // The pipeline registers a listener via indexer.on('changes', handler)
-  // We capture it from the mock and call it directly
-  const indexer = app.indexer as unknown as { on: MockFn; removeListener: MockFn };
-  const onCall = indexer.on.mock.calls.find((c: unknown[]) => c[0] === 'changes');
+  type IndexerMock = { on: ReturnType<typeof vi.fn>; removeListener: ReturnType<typeof vi.fn> };
+  const indexer = app.indexer as unknown as IndexerMock;
+  const onCall = indexer.on.mock.calls.find((c: unknown[]) => c[0] === 'changes') as
+    | [string, (events: FileChangeEvent[]) => void]
+    | undefined;
   if (!onCall) throw new Error('Pipeline did not register changes listener');
-  const handler = onCall[1] as (events: FileChangeEvent[]) => void;
+  const handler = onCall[1];
   handler(events);
-  // Allow queue microtasks to settle
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Let queue microtasks settle
+  await new Promise<void>((resolve) => setTimeout(resolve, 50));
 }
 
 describe('pipeline plugin', () => {
@@ -134,9 +104,11 @@ describe('pipeline plugin', () => {
     vi.clearAllMocks();
   });
 
+  // ── created events ──────────────────────────────────────────────────────
+
   describe('created event', () => {
     it('reads file content, embeds chunks, and upserts to Qdrant with correct payload', async () => {
-      const { app, mocks } = await buildTestApp();
+      const { app, readContent, embed, upsert, qdrantDelete } = await buildTestApp();
 
       const event: FileChangeEvent = {
         path: 'notes/my-note.md',
@@ -146,67 +118,40 @@ describe('pipeline plugin', () => {
 
       await emitChanges(app, [event]);
 
-      expect(mocks.vault.readContent).toHaveBeenCalledWith('notes/my-note.md');
-      expect(mocks.embedder.embed).toHaveBeenCalled();
-      expect(mocks.qdrant.upsert).toHaveBeenCalledWith(
+      expect(readContent).toHaveBeenCalledWith('notes/my-note.md');
+      expect(embed).toHaveBeenCalled();
+      expect(upsert).toHaveBeenCalledWith(
         'cognivault',
         expect.objectContaining({ points: expect.any(Array) }),
       );
 
-      const upsertCall = mocks.qdrant.upsert.mock.calls[0];
-      const points = upsertCall[1].points as Array<{
-        id: string;
-        vector: number[];
-        payload: Record<string, unknown>;
-      }>;
+      type UpsertPayload = { id: string; vector: number[]; payload: Record<string, unknown> };
+      const upsertCall = upsert.mock.calls[0] as [string, { points: UpsertPayload[] }] | undefined;
+      expect(upsertCall).toBeDefined();
+      if (!upsertCall) return;
+
+      const points = upsertCall[1].points;
       expect(points.length).toBeGreaterThan(0);
 
       const firstPoint = points[0];
-      expect(firstPoint.id).toMatch(/^[0-9a-f-]{36}$/); // UUID format
+      expect(firstPoint).toBeDefined();
+      if (!firstPoint) return;
+
+      expect(firstPoint.id).toMatch(/^[0-9a-f-]{36}$/i);
       expect(firstPoint.vector).toEqual([0.1, 0.2, 0.3]);
-      expect(firstPoint.payload.path).toBe('notes/my-note.md');
-      expect(firstPoint.payload.title).toBe('my-note');
-      expect(firstPoint.payload.chunk_index).toBe(0);
-      expect(firstPoint.payload.content_hash).toBe('abc123');
-      expect(firstPoint.payload.section_path).toBeDefined();
-      expect(firstPoint.payload.tags).toEqual([]);
-      expect(firstPoint.payload.project).toBeNull();
-      expect(firstPoint.payload.status).toBeNull();
-      expect(firstPoint.payload.type).toBeNull();
-      expect(typeof firstPoint.payload.extra_metadata).toBe('string');
-
-      await app.close();
-    });
-
-    it('sets embedding_model_version in indexed_files after successful embed', async () => {
-      const { app, mocks } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'notes/my-note.md',
-        type: 'created',
-        contentHash: 'abc123',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(mocks.db.update).toHaveBeenCalled();
-
-      await app.close();
-    });
-
-    it('deletes stale vectors after upsert (chunk_index >= new count)', async () => {
-      const { app, mocks } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'notes/my-note.md',
-        type: 'created',
-        contentHash: 'abc123',
-      };
-
-      await emitChanges(app, [event]);
+      expect(firstPoint.payload['path']).toBe('notes/my-note.md');
+      expect(firstPoint.payload['title']).toBe('my-note');
+      expect(firstPoint.payload['chunk_index']).toBe(0);
+      expect(firstPoint.payload['content_hash']).toBe('abc123');
+      expect(firstPoint.payload['section_path']).toBeDefined();
+      expect(firstPoint.payload['tags']).toEqual([]);
+      expect(firstPoint.payload['project']).toBeNull();
+      expect(firstPoint.payload['status']).toBeNull();
+      expect(firstPoint.payload['type']).toBeNull();
+      expect(typeof firstPoint.payload['extra_metadata']).toBe('string');
 
       // Stale cleanup should have been called
-      expect(mocks.qdrant.delete).toHaveBeenCalledWith(
+      expect(qdrantDelete).toHaveBeenCalledWith(
         'cognivault',
         expect.objectContaining({
           filter: expect.objectContaining({
@@ -221,10 +166,27 @@ describe('pipeline plugin', () => {
       await app.close();
     });
 
+    it('sets embedding_model_version in indexed_files after successful embed', async () => {
+      const { app, dbUpdate } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'notes/my-note.md',
+        type: 'created',
+        contentHash: 'abc123',
+      };
+
+      await emitChanges(app, [event]);
+
+      expect(dbUpdate).toHaveBeenCalled();
+
+      await app.close();
+    });
+
     it('includes tags array from frontmatter', async () => {
-      const content = '---\ntags:\n  - ai\n  - research\n---\n\n# My Note\n\nContent with enough tokens here to ensure chunking works properly and produces at least one chunk with sufficient token count to not be merged into another section.';
-      const { app, mocks } = await buildTestApp({
-        vault: { readContent: vi.fn().mockResolvedValue({ content }) },
+      const content =
+        '---\ntags:\n  - ai\n  - research\n---\n\n# My Note\n\nContent with enough tokens here to ensure chunking works properly and produces at least one chunk with sufficient token count to not be merged into another section.';
+      const { app, upsert } = await buildTestApp({
+        readContent: vi.fn().mockResolvedValue({ content }),
       });
 
       const event: FileChangeEvent = {
@@ -235,22 +197,23 @@ describe('pipeline plugin', () => {
 
       await emitChanges(app, [event]);
 
-      if (mocks.qdrant.upsert.mock.calls.length > 0) {
-        const points = mocks.qdrant.upsert.mock.calls[0][1].points as Array<{
-          payload: Record<string, unknown>;
-        }>;
-        if (points.length > 0) {
-          expect(points[0].payload.tags).toEqual(['ai', 'research']);
+      type UpsertPayload = { payload: Record<string, unknown> };
+      const call = upsert.mock.calls[0] as [string, { points: UpsertPayload[] }] | undefined;
+      if (call) {
+        const pt = call[1].points[0];
+        if (pt) {
+          expect(pt.payload['tags']).toEqual(['ai', 'research']);
         }
       }
 
       await app.close();
     });
 
-    it('normalizes string tags to array', async () => {
-      const content = '---\ntags: ai\nproject: cognivault\nstatus: active\ntype: note\n---\n\n# My Note\n\nContent with enough tokens here to ensure chunking works properly and produces at least one chunk with sufficient token count to not be merged into another section.';
-      const { app, mocks } = await buildTestApp({
-        vault: { readContent: vi.fn().mockResolvedValue({ content }) },
+    it('normalizes string tags to array and maps project/status/type from frontmatter', async () => {
+      const content =
+        '---\ntags: ai\nproject: cognivault\nstatus: active\ntype: note\n---\n\n# My Note\n\nContent with enough tokens here to ensure chunking works properly and produces at least one chunk with sufficient token count to not be merged into another section.';
+      const { app, upsert } = await buildTestApp({
+        readContent: vi.fn().mockResolvedValue({ content }),
       });
 
       const event: FileChangeEvent = {
@@ -261,15 +224,15 @@ describe('pipeline plugin', () => {
 
       await emitChanges(app, [event]);
 
-      if (mocks.qdrant.upsert.mock.calls.length > 0) {
-        const points = mocks.qdrant.upsert.mock.calls[0][1].points as Array<{
-          payload: Record<string, unknown>;
-        }>;
-        if (points.length > 0) {
-          expect(points[0].payload.tags).toEqual(['ai']);
-          expect(points[0].payload.project).toBe('cognivault');
-          expect(points[0].payload.status).toBe('active');
-          expect(points[0].payload.type).toBe('note');
+      type UpsertPayload = { payload: Record<string, unknown> };
+      const call = upsert.mock.calls[0] as [string, { points: UpsertPayload[] }] | undefined;
+      if (call) {
+        const pt = call[1].points[0];
+        if (pt) {
+          expect(pt.payload['tags']).toEqual(['ai']);
+          expect(pt.payload['project']).toBe('cognivault');
+          expect(pt.payload['status']).toBe('active');
+          expect(pt.payload['type']).toBe('note');
         }
       }
 
@@ -277,9 +240,10 @@ describe('pipeline plugin', () => {
     });
 
     it('stores remaining frontmatter fields in extra_metadata as JSON string', async () => {
-      const content = '---\ntags: [ai]\ncustom_field: hello\nanother: 42\n---\n\n# My Note\n\nContent with enough tokens here to ensure chunking works properly and produces at least one chunk with sufficient token count to not be merged into another section.';
-      const { app, mocks } = await buildTestApp({
-        vault: { readContent: vi.fn().mockResolvedValue({ content }) },
+      const content =
+        '---\ntags: [ai]\ncustom_field: hello\nanother: 42\n---\n\n# My Note\n\nContent with enough tokens here to ensure chunking works properly and produces at least one chunk with sufficient token count to not be merged into another section.';
+      const { app, upsert } = await buildTestApp({
+        readContent: vi.fn().mockResolvedValue({ content }),
       });
 
       const event: FileChangeEvent = {
@@ -290,16 +254,19 @@ describe('pipeline plugin', () => {
 
       await emitChanges(app, [event]);
 
-      if (mocks.qdrant.upsert.mock.calls.length > 0) {
-        const points = mocks.qdrant.upsert.mock.calls[0][1].points as Array<{
-          payload: Record<string, unknown>;
-        }>;
-        if (points.length > 0) {
-          const extraMetadata = JSON.parse(points[0].payload.extra_metadata as string) as Record<string, unknown>;
-          expect(extraMetadata.custom_field).toBe('hello');
-          expect(extraMetadata.another).toBe(42);
-          // Standard fields should NOT be in extra_metadata
-          expect(extraMetadata.tags).toBeUndefined();
+      type UpsertPayload = { payload: Record<string, unknown> };
+      const call = upsert.mock.calls[0] as [string, { points: UpsertPayload[] }] | undefined;
+      if (call) {
+        const pt = call[1].points[0];
+        if (pt) {
+          const extraMetadata = JSON.parse(pt.payload['extra_metadata'] as string) as Record<
+            string,
+            unknown
+          >;
+          expect(extraMetadata['custom_field']).toBe('hello');
+          expect(extraMetadata['another']).toBe(42);
+          // Standard fields must NOT appear in extra_metadata
+          expect(extraMetadata['tags']).toBeUndefined();
         }
       }
 
@@ -307,9 +274,11 @@ describe('pipeline plugin', () => {
     });
   });
 
+  // ── updated events ──────────────────────────────────────────────────────
+
   describe('updated event', () => {
     it('re-embeds and upserts, then cleans stale vectors', async () => {
-      const { app, mocks } = await buildTestApp();
+      const { app, readContent, embed, upsert, qdrantDelete } = await buildTestApp();
 
       const event: FileChangeEvent = {
         path: 'notes/my-note.md',
@@ -319,25 +288,27 @@ describe('pipeline plugin', () => {
 
       await emitChanges(app, [event]);
 
-      expect(mocks.vault.readContent).toHaveBeenCalledWith('notes/my-note.md');
-      expect(mocks.embedder.embed).toHaveBeenCalled();
-      expect(mocks.qdrant.upsert).toHaveBeenCalled();
+      expect(readContent).toHaveBeenCalledWith('notes/my-note.md');
+      expect(embed).toHaveBeenCalled();
+      expect(upsert).toHaveBeenCalled();
 
-      // Stale cleanup
-      const deleteCalls = mocks.qdrant.delete.mock.calls as Array<[string, { filter: { must: Array<{ key: string; match?: unknown; range?: unknown }> } }]>;
-      const staleCleanup = deleteCalls.find((call) => {
-        const filter = call[1].filter;
-        return filter.must.some((c) => c.key === 'chunk_index' && c.range !== undefined);
-      });
+      // Verify stale cleanup (chunk_index range filter)
+      type DeleteArg = { filter: { must: Array<{ key: string; range?: unknown }> } };
+      const deleteCalls = qdrantDelete.mock.calls as [string, DeleteArg][];
+      const staleCleanup = deleteCalls.find((call) =>
+        call[1].filter.must.some((c) => c.key === 'chunk_index' && c.range !== undefined),
+      );
       expect(staleCleanup).toBeDefined();
 
       await app.close();
     });
   });
 
+  // ── deleted events ──────────────────────────────────────────────────────
+
   describe('deleted event', () => {
     it('deletes all vectors for the path from Qdrant', async () => {
-      const { app, mocks } = await buildTestApp();
+      const { app, readContent, embed, upsert, qdrantDelete } = await buildTestApp();
 
       const event: FileChangeEvent = {
         path: 'notes/to-delete.md',
@@ -347,9 +318,11 @@ describe('pipeline plugin', () => {
 
       await emitChanges(app, [event]);
 
-      expect(mocks.vault.readContent).not.toHaveBeenCalled();
-      expect(mocks.embedder.embed).not.toHaveBeenCalled();
-      expect(mocks.qdrant.delete).toHaveBeenCalledWith(
+      expect(readContent).not.toHaveBeenCalled();
+      expect(embed).not.toHaveBeenCalled();
+      expect(upsert).not.toHaveBeenCalled();
+
+      expect(qdrantDelete).toHaveBeenCalledWith(
         'cognivault',
         expect.objectContaining({
           filter: expect.objectContaining({
@@ -359,16 +332,20 @@ describe('pipeline plugin', () => {
           }),
         }),
       );
+
       // For deleted events, no chunk_index filter — just path filter
-      const deleteCall = mocks.qdrant.delete.mock.calls[0] as [string, { filter: { must: Array<{ key: string }> } }];
-      const hasChunkIndexFilter = deleteCall[1].filter.must.some((c) => c.key === 'chunk_index');
-      expect(hasChunkIndexFilter).toBe(false);
+      type DeleteArg = { filter: { must: Array<{ key: string }> } };
+      const deleteCall = qdrantDelete.mock.calls[0] as [string, DeleteArg] | undefined;
+      if (deleteCall) {
+        const hasChunkIndexFilter = deleteCall[1].filter.must.some((c) => c.key === 'chunk_index');
+        expect(hasChunkIndexFilter).toBe(false);
+      }
 
       await app.close();
     });
 
     it('does not call embed or upsert for deleted events', async () => {
-      const { app, mocks } = await buildTestApp();
+      const { app, upsert, embed } = await buildTestApp();
 
       const event: FileChangeEvent = {
         path: 'notes/to-delete.md',
@@ -378,16 +355,18 @@ describe('pipeline plugin', () => {
 
       await emitChanges(app, [event]);
 
-      expect(mocks.qdrant.upsert).not.toHaveBeenCalled();
-      expect(mocks.embedder.embed).not.toHaveBeenCalled();
+      expect(upsert).not.toHaveBeenCalled();
+      expect(embed).not.toHaveBeenCalled();
 
       await app.close();
     });
   });
 
+  // ── moved events ────────────────────────────────────────────────────────
+
   describe('moved event', () => {
     it('updates path and title in Qdrant payload without re-embedding', async () => {
-      const { app, mocks } = await buildTestApp();
+      const { app, embed, upsert, setPayload } = await buildTestApp();
 
       const event: FileChangeEvent = {
         path: 'notes/new-location.md',
@@ -398,9 +377,9 @@ describe('pipeline plugin', () => {
 
       await emitChanges(app, [event]);
 
-      expect(mocks.embedder.embed).not.toHaveBeenCalled();
-      expect(mocks.qdrant.upsert).not.toHaveBeenCalled();
-      expect(mocks.qdrant.setPayload).toHaveBeenCalledWith(
+      expect(embed).not.toHaveBeenCalled();
+      expect(upsert).not.toHaveBeenCalled();
+      expect(setPayload).toHaveBeenCalledWith(
         'cognivault',
         expect.objectContaining({
           payload: expect.objectContaining({
@@ -421,7 +400,7 @@ describe('pipeline plugin', () => {
     });
 
     it('updates title in payload when moved to new filename', async () => {
-      const { app, mocks } = await buildTestApp();
+      const { app, setPayload } = await buildTestApp();
 
       const event: FileChangeEvent = {
         path: 'notes/new-name.md',
@@ -432,18 +411,23 @@ describe('pipeline plugin', () => {
 
       await emitChanges(app, [event]);
 
-      const setPayloadCall = mocks.qdrant.setPayload.mock.calls[0] as [string, { payload: Record<string, unknown> }];
-      expect(setPayloadCall[1].payload.title).toBe('new-name');
+      type SetPayloadArg = { payload: Record<string, unknown> };
+      const call = setPayload.mock.calls[0] as [string, SetPayloadArg] | undefined;
+      if (call) {
+        expect(call[1].payload['title']).toBe('new-name');
+      }
 
       await app.close();
     });
   });
 
+  // ── frontmatter-only notes ───────────────────────────────────────────────
+
   describe('frontmatter-only notes', () => {
     it('skips embedding but still cleans stale vectors', async () => {
       const content = '---\ntags: [ai]\ntitle: My Note\n---\n';
-      const { app, mocks } = await buildTestApp({
-        vault: { readContent: vi.fn().mockResolvedValue({ content }) },
+      const { app, embed, upsert, qdrantDelete } = await buildTestApp({
+        readContent: vi.fn().mockResolvedValue({ content }),
       });
 
       const event: FileChangeEvent = {
@@ -454,27 +438,24 @@ describe('pipeline plugin', () => {
 
       await emitChanges(app, [event]);
 
-      // No embedding should happen for empty body
-      expect(mocks.embedder.embed).not.toHaveBeenCalled();
-      expect(mocks.qdrant.upsert).not.toHaveBeenCalled();
-
-      // Stale cleanup should still run
-      expect(mocks.qdrant.delete).toHaveBeenCalled();
+      expect(embed).not.toHaveBeenCalled();
+      expect(upsert).not.toHaveBeenCalled();
+      expect(qdrantDelete).toHaveBeenCalled();
 
       await app.close();
     });
   });
 
+  // ── partial failure handling ─────────────────────────────────────────────
+
   describe('partial failure handling', () => {
     it('processes other events when one event fails', async () => {
-      // First call fails, second succeeds
-      const readContent = vi.fn()
+      const readContent = vi
+        .fn()
         .mockRejectedValueOnce(new Error('File read error'))
-        .mockResolvedValueOnce({ content: '# Note\n\nContent with enough tokens here to ensure chunking works properly and produces at least one chunk with sufficient token count to not be merged into another section.' });
+        .mockResolvedValueOnce({ content: RICH_CONTENT });
 
-      const { app, mocks } = await buildTestApp({
-        vault: { readContent },
-      });
+      const { app, upsert } = await buildTestApp({ readContent });
 
       const events: FileChangeEvent[] = [
         { path: 'notes/error-note.md', type: 'created', contentHash: 'err1' },
@@ -483,20 +464,23 @@ describe('pipeline plugin', () => {
 
       await emitChanges(app, events);
 
-      // The second note should still be processed despite first failing
-      expect(mocks.qdrant.upsert).toHaveBeenCalled();
-      const upsertCallPaths = mocks.qdrant.upsert.mock.calls.map(
-        (call: Array<[string, { points: Array<{ payload: { path: string } }> }]>) => (call as unknown as [string, { points: Array<{ payload: { path: string } }> }])[1].points[0]?.payload?.path,
+      expect(upsert).toHaveBeenCalled();
+
+      type UpsertArg = { points: Array<{ payload: { path: string } }> };
+      const upsertPaths = (upsert.mock.calls as [string, UpsertArg][]).map(
+        (call) => call[1].points[0]?.payload.path,
       );
-      expect(upsertCallPaths).toContain('notes/ok-note.md');
+      expect(upsertPaths).toContain('notes/ok-note.md');
 
       await app.close();
     });
   });
 
+  // ── deterministic chunk IDs ──────────────────────────────────────────────
+
   describe('deterministic chunk IDs', () => {
     it('generates UUID v5 IDs deterministically from path and chunk_index', async () => {
-      const { app, mocks } = await buildTestApp();
+      const { app, upsert } = await buildTestApp();
 
       const event: FileChangeEvent = {
         path: 'notes/my-note.md',
@@ -504,30 +488,39 @@ describe('pipeline plugin', () => {
         contentHash: 'abc123',
       };
 
+      // First run
       await emitChanges(app, [event]);
 
-      // Run again — should produce same UUIDs
-      vi.clearAllMocks();
-      mocks.vault.readContent = vi.fn().mockResolvedValue({ content: '# Test\n\nSome content for testing purposes with enough tokens to create a chunk in the markdown processor since we need at least 100 tokens per section to avoid merging. Adding more text here to ensure we have enough content for chunking to work correctly and produce at least one valid chunk output.' });
-      mocks.embedder.embed = vi.fn().mockResolvedValue([[0.1, 0.2, 0.3]]);
-      mocks.qdrant.upsert = vi.fn().mockResolvedValue({});
-      mocks.qdrant.delete = vi.fn().mockResolvedValue({});
+      type UpsertArg = { points: Array<{ id: string }> };
+      const firstCall = upsert.mock.calls[0] as [string, UpsertArg] | undefined;
+      expect(firstCall).toBeDefined();
+      const firstId = firstCall?.[1].points[0]?.id;
+      expect(firstId).toBeDefined();
+      // UUID v5 has version nibble = 5
+      expect(firstId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
 
+      // Second run with same inputs — IDs must be identical
+      upsert.mockClear();
       await emitChanges(app, [event]);
 
-      const firstCallPoints = (mocks.qdrant.upsert.mock.calls[0] as [string, { points: Array<{ id: string }> }])[1].points;
-      // Should have UUIDs — just verify format since we cleared mocks
-      expect(firstCallPoints[0].id).toMatch(/^[0-9a-f-]{36}$/);
+      const secondCall = upsert.mock.calls[0] as [string, UpsertArg] | undefined;
+      const secondId = secondCall?.[1].points[0]?.id;
+      expect(secondId).toBe(firstId);
 
       await app.close();
     });
   });
 
+  // ── plugin lifecycle ─────────────────────────────────────────────────────
+
   describe('plugin lifecycle', () => {
     it('registers changes listener on indexer.on', async () => {
       const { app } = await buildTestApp();
 
-      const indexer = app.indexer as unknown as { on: MockFn };
+      type IndexerMock = { on: ReturnType<typeof vi.fn> };
+      const indexer = app.indexer as unknown as IndexerMock;
       const onChangesCall = indexer.on.mock.calls.find((c: unknown[]) => c[0] === 'changes');
       expect(onChangesCall).toBeDefined();
 
@@ -537,7 +530,8 @@ describe('pipeline plugin', () => {
     it('removes changes listener on app close', async () => {
       const { app } = await buildTestApp();
 
-      const indexer = app.indexer as unknown as { on: MockFn; removeListener: MockFn };
+      type IndexerMock = { removeListener: ReturnType<typeof vi.fn> };
+      const indexer = app.indexer as unknown as IndexerMock;
       await app.close();
 
       expect(indexer.removeListener).toHaveBeenCalledWith('changes', expect.any(Function));
