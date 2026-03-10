@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import matter from 'gray-matter';
 
 // ── Error classes ──
 
@@ -157,15 +158,118 @@ export class VaultManager {
     return resolved;
   }
 
-  // Stub methods -- implementation in Plan 02/03
-  async listFiles(_options?: ListOptions): Promise<{ entries: VaultEntry[] }> {
-    throw new Error('Not implemented');
+  private static readonly TEXT_EXTENSIONS = new Set([
+    '.md',
+    '.markdown',
+    '.txt',
+    '.json',
+    '.yaml',
+    '.yml',
+    '.css',
+    '.js',
+    '.ts',
+    '.html',
+    '.xml',
+    '.csv',
+    '.svg',
+    '.canvas',
+    '.excalidraw',
+  ]);
+
+  private static hasDotSegment(relativePath: string): boolean {
+    return relativePath.split('/').some((segment) => segment.startsWith('.'));
   }
 
-  async readContent(_filePath: string): Promise<ContentResult> {
-    throw new Error('Not implemented');
+  async listFiles(options?: ListOptions): Promise<{ entries: VaultEntry[] }> {
+    const targetPath = await this.resolvePath(options?.path ?? '');
+
+    // Verify it's a directory
+    const stat = await fs.stat(targetPath);
+    if (!stat.isDirectory()) {
+      throw new FileNotFoundError(options?.path ?? '');
+    }
+
+    const dirEntries = await fs.readdir(targetPath, {
+      withFileTypes: true,
+      recursive: options?.recursive ?? false,
+    });
+
+    // Normalize extension filter
+    let extFilter: string | undefined;
+    if (options?.ext) {
+      extFilter = options.ext.startsWith('.') ? options.ext : `.${options.ext}`;
+    }
+
+    const entries: VaultEntry[] = [];
+
+    for (const entry of dirEntries) {
+      // Skip symlinks
+      if (entry.isSymbolicLink()) {
+        continue;
+      }
+
+      // Derive vault-relative path
+      const parentDir = entry.parentPath ?? targetPath;
+      const absolutePath = path.join(parentDir, entry.name);
+      const relativePath = path.relative(this.rootPath, absolutePath);
+
+      // Skip dotfiles/dotfolders
+      if (VaultManager.hasDotSegment(relativePath)) {
+        continue;
+      }
+
+      // Apply extension filter (only to files)
+      if (extFilter && entry.isFile()) {
+        if (path.extname(entry.name) !== extFilter) {
+          continue;
+        }
+      }
+
+      // Skip directories when ext filter is active
+      if (extFilter && entry.isDirectory()) {
+        continue;
+      }
+
+      entries.push({
+        name: entry.name,
+        path: relativePath,
+        type: entry.isDirectory() ? 'directory' : 'file',
+      });
+    }
+
+    // Sort alphabetically by path (lexicographic for consistency)
+    entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+
+    return { entries };
   }
 
+  async readContent(filePath: string): Promise<ContentResult> {
+    const resolved = await this.resolvePath(filePath);
+
+    // Check if text file by extension allowlist
+    const ext = path.extname(resolved).toLowerCase();
+    if (!VaultManager.TEXT_EXTENSIONS.has(ext)) {
+      throw new UnsupportedMediaTypeError(filePath);
+    }
+
+    const raw = await fs.readFile(resolved, 'utf-8');
+
+    // For non-markdown files, return raw content
+    if (ext !== '.md' && ext !== '.markdown') {
+      return { path: filePath, content: raw.trim() };
+    }
+
+    // Parse frontmatter for markdown files
+    try {
+      const parsed = matter(raw);
+      return { path: filePath, content: parsed.content.trim() };
+    } catch {
+      // If gray-matter fails, return raw content
+      return { path: filePath, content: raw.trim() };
+    }
+  }
+
+  // Stub -- implementation in Plan 03
   async readMetadata(_filePath: string): Promise<MetadataResult> {
     throw new Error('Not implemented');
   }
