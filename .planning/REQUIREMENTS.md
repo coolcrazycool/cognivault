@@ -110,56 +110,56 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FILE-01 | — | Pending |
-| FILE-02 | — | Pending |
-| FILE-03 | — | Pending |
-| FILE-04 | — | Pending |
-| FILE-05 | — | Pending |
-| FILE-06 | — | Pending |
-| FILE-07 | — | Pending |
-| FILE-08 | — | Pending |
-| FILE-09 | — | Pending |
-| FILE-10 | — | Pending |
-| IDX-01 | — | Pending |
-| IDX-02 | — | Pending |
-| IDX-03 | — | Pending |
-| IDX-04 | — | Pending |
-| IDX-05 | — | Pending |
-| IDX-06 | — | Pending |
-| IDX-07 | — | Pending |
-| IDX-08 | — | Pending |
-| IDX-09 | — | Pending |
-| IDX-10 | — | Pending |
-| IDX-11 | — | Pending |
-| IDX-12 | — | Pending |
-| IDX-13 | — | Pending |
-| RET-01 | — | Pending |
-| RET-02 | — | Pending |
-| RET-03 | — | Pending |
-| RET-04 | — | Pending |
-| RET-05 | — | Pending |
-| RET-06 | — | Pending |
-| RET-07 | — | Pending |
-| CTX-01 | — | Pending |
-| CTX-02 | — | Pending |
-| CTX-03 | — | Pending |
-| CTX-04 | — | Pending |
-| API-01 | — | Pending |
-| API-02 | — | Pending |
-| API-03 | — | Pending |
-| API-04 | — | Pending |
-| INF-01 | — | Pending |
-| INF-02 | — | Pending |
-| INF-03 | — | Pending |
-| INF-04 | — | Pending |
-| INF-05 | — | Pending |
-| INF-06 | — | Pending |
+| FILE-01 | Phase 2 | Pending |
+| FILE-02 | Phase 2 | Pending |
+| FILE-03 | Phase 3 | Pending |
+| FILE-04 | Phase 3 | Pending |
+| FILE-05 | Phase 3 | Pending |
+| FILE-06 | Phase 3 | Pending |
+| FILE-07 | Phase 3 | Pending |
+| FILE-08 | Phase 2 | Pending |
+| FILE-09 | Phase 3 | Pending |
+| FILE-10 | Phase 2 | Pending |
+| IDX-01 | Phase 4 | Pending |
+| IDX-02 | Phase 4 | Pending |
+| IDX-03 | Phase 5 | Pending |
+| IDX-04 | Phase 5 | Pending |
+| IDX-05 | Phase 5 | Pending |
+| IDX-06 | Phase 4 | Pending |
+| IDX-07 | Phase 5 | Pending |
+| IDX-08 | Phase 10 | Pending |
+| IDX-09 | Phase 10 | Pending |
+| IDX-10 | Phase 10 | Pending |
+| IDX-11 | Phase 10 | Pending |
+| IDX-12 | Phase 10 | Pending |
+| IDX-13 | Phase 11 | Pending |
+| RET-01 | Phase 6 | Pending |
+| RET-02 | Phase 6 | Pending |
+| RET-03 | Phase 7 | Pending |
+| RET-04 | Phase 7 | Pending |
+| RET-05 | Phase 6 | Pending |
+| RET-06 | Phase 6 | Pending |
+| RET-07 | Phase 7 | Pending |
+| CTX-01 | Phase 8 | Pending |
+| CTX-02 | Phase 8 | Pending |
+| CTX-03 | Phase 8 | Pending |
+| CTX-04 | Phase 8 | Pending |
+| API-01 | Phase 9 | Pending |
+| API-02 | Phase 9 | Pending |
+| API-03 | Phase 9 | Pending |
+| API-04 | Phase 1 | Pending |
+| INF-01 | Phase 1 | Pending |
+| INF-02 | Phase 9 | Pending |
+| INF-03 | Phase 11 | Pending |
+| INF-04 | Phase 11 | Pending |
+| INF-05 | Phase 11 | Pending |
+| INF-06 | Phase 1 | Pending |
 
 **Coverage:**
 - v1 requirements: 44 total
-- Mapped to phases: 0
-- Unmapped: 44
+- Mapped to phases: 44
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-10*
-*Last updated: 2026-03-10 after initial definition*
+*Last updated: 2026-03-10 after roadmap creation*
