@@ -80,15 +80,11 @@ export class VaultManager {
   }
 
   async initialize(): Promise<void> {
-    let stat;
+    let stat: Awaited<ReturnType<typeof fs.stat>> | undefined;
     try {
       stat = await fs.stat(this.rootPath);
     } catch {
-      throw new VaultError(
-        `Vault path does not exist: ${this.rootPath}`,
-        'VAULT_INIT_ERROR',
-        500,
-      );
+      throw new VaultError(`Vault path does not exist: ${this.rootPath}`, 'VAULT_INIT_ERROR', 500);
     }
 
     if (!stat.isDirectory()) {
@@ -105,10 +101,7 @@ export class VaultManager {
 
   async resolvePath(relativePath: string): Promise<string> {
     // Normalize: collapse double slashes, strip leading/trailing slashes
-    const normalized = relativePath
-      .replace(/\/+/g, '/')
-      .replace(/^\//, '')
-      .replace(/\/$/, '');
+    const normalized = relativePath.replace(/\/+/g, '/').replace(/^\//, '').replace(/\/$/, '');
 
     // Empty path resolves to vault root
     if (normalized === '') {
@@ -137,7 +130,7 @@ export class VaultManager {
     }
 
     // Check if path exists
-    let lstatResult;
+    let lstatResult: Awaited<ReturnType<typeof fs.lstat>> | undefined;
     try {
       lstatResult = await fs.lstat(resolved);
     } catch (err: unknown) {

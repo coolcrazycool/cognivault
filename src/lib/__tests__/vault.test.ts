@@ -91,11 +91,15 @@ describe('VaultManager', () => {
     });
 
     it('rejects dotfile access .obsidian/workspace.json', async () => {
-      await expect(manager.resolvePath('.obsidian/workspace.json')).rejects.toThrow(DotfileAccessError);
+      await expect(manager.resolvePath('.obsidian/workspace.json')).rejects.toThrow(
+        DotfileAccessError,
+      );
     });
 
     it('rejects dotfolder in middle of path', async () => {
-      await expect(manager.resolvePath('folder/.hidden/file.md')).rejects.toThrow(DotfileAccessError);
+      await expect(manager.resolvePath('folder/.hidden/file.md')).rejects.toThrow(
+        DotfileAccessError,
+      );
     });
 
     it('normalizes double slashes', async () => {
