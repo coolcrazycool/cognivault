@@ -51,12 +51,12 @@ Plans:
   2. Agent can read full note content by path, receiving markdown body
   3. Agent can read frontmatter metadata as structured key-value data from any note
   4. Any request with a path that traverses outside the vault boundary is rejected with 403
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 02-01: Vault manager with path resolution and traversal protection
-- [ ] 02-02: List and read file endpoints
-- [ ] 02-03: Frontmatter read endpoint
+- [ ] 02-01-PLAN.md -- VaultManager class with path security, Fastify plugin, TypeBox schemas
+- [ ] 02-02-PLAN.md -- List files and read content endpoints with integration tests
+- [ ] 02-03-PLAN.md -- Frontmatter metadata endpoint and readiness vault check
 
 ### Phase 3: Vault Write Operations
 **Goal**: Agents can create, modify, and organize notes through the REST API
