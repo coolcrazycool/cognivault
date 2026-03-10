@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import matter from 'gray-matter';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
@@ -408,6 +409,72 @@ describe('VaultManager', () => {
     });
   });
 
+  describe('updateMetadata()', () => {
+    it('adds new field and preserves existing fields', async () => {
+      await fs.writeFile(
+        path.join(vaultRoot, 'notes', 'meta-add.md'),
+        '---\ntitle: Original\ntags:\n  - a\n  - b\n---\n\nBody content here.',
+      );
+      const result = await manager.updateMetadata('notes/meta-add.md', { status: 'done' });
+      expect(result.path).toBe('notes/meta-add.md');
+      expect(result.metadata.title).toBe('Original');
+      expect(result.metadata.tags).toEqual(['a', 'b']);
+      expect(result.metadata.status).toBe('done');
+    });
+
+    it('updates existing field value', async () => {
+      await fs.writeFile(
+        path.join(vaultRoot, 'notes', 'meta-update.md'),
+        '---\ntitle: Old Title\n---\n\nBody.',
+      );
+      const result = await manager.updateMetadata('notes/meta-update.md', { title: 'New Title' });
+      expect(result.metadata.title).toBe('New Title');
+    });
+
+    it('removes field when value is null', async () => {
+      await fs.writeFile(
+        path.join(vaultRoot, 'notes', 'meta-remove.md'),
+        '---\ntitle: Test\ntags:\n  - x\n  - y\n---\n\nBody.',
+      );
+      const result = await manager.updateMetadata('notes/meta-remove.md', { tags: null });
+      expect(result.metadata.title).toBe('Test');
+      expect(result.metadata.tags).toBeUndefined();
+    });
+
+    it('creates frontmatter block on file with no frontmatter', async () => {
+      await fs.writeFile(
+        path.join(vaultRoot, 'notes', 'meta-nofm.md'),
+        '# Just Markdown\n\nNo frontmatter here.',
+      );
+      const result = await manager.updateMetadata('notes/meta-nofm.md', { status: 'new' });
+      expect(result.metadata.status).toBe('new');
+      const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'meta-nofm.md'), 'utf-8');
+      expect(diskContent).toContain('status: new');
+      expect(diskContent).toContain('---');
+    });
+
+    it('preserves note body content exactly', async () => {
+      const originalBody = '# Heading\n\nParagraph one.\n\nParagraph two.';
+      await fs.writeFile(
+        path.join(vaultRoot, 'notes', 'meta-body-preserve.md'),
+        `---\ntitle: Keep Body\n---\n\n${originalBody}`,
+      );
+      await manager.updateMetadata('notes/meta-body-preserve.md', { status: 'done' });
+      const diskContent = await fs.readFile(
+        path.join(vaultRoot, 'notes', 'meta-body-preserve.md'),
+        'utf-8',
+      );
+      const parsed = matter(diskContent);
+      expect(parsed.content.trim()).toBe(originalBody);
+    });
+
+    it('throws FileNotFoundError for missing file', async () => {
+      await expect(manager.updateMetadata('notes/missing-meta.md', {})).rejects.toThrow(
+        FileNotFoundError,
+      );
+    });
+  });
+
   describe('appendContent()', () => {
     it('appends text after existing content', async () => {
       await fs.writeFile(path.join(vaultRoot, 'notes', 'append-me.md'), 'Original content\n');
@@ -477,6 +544,92 @@ describe('VaultManager', () => {
       await expect(manager.appendContent('notes/missing.md', 'text', 'append')).rejects.toThrow(
         FileNotFoundError,
       );
+    });
+  });
+
+  describe('deleteNote()', () => {
+    it('removes the file from disk and returns { path, deleted: true }', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'to-delete.md'), 'delete me');
+      const result = await manager.deleteNote('notes/to-delete.md');
+      expect(result).toEqual({ path: 'notes/to-delete.md', deleted: true });
+      const exists = await fs
+        .access(path.join(vaultRoot, 'notes', 'to-delete.md'))
+        .then(() => true)
+        .catch(() => false);
+      expect(exists).toBe(false);
+    });
+
+    it('throws FileNotFoundError for nonexistent file', async () => {
+      await expect(manager.deleteNote('notes/missing-delete.md')).rejects.toThrow(
+        FileNotFoundError,
+      );
+    });
+
+    it('throws PathTraversalError for traversal attempts', async () => {
+      await expect(manager.deleteNote('../escape.md')).rejects.toThrow(PathTraversalError);
+    });
+
+    it('throws FileNotFoundError when target is a directory (not a file)', async () => {
+      await expect(manager.deleteNote('notes')).rejects.toThrow(FileNotFoundError);
+    });
+  });
+
+  describe('moveNote()', () => {
+    it('moves a file and returns { from, to }', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'move-source.md'), 'content to move');
+      const result = await manager.moveNote('notes/move-source.md', 'notes/move-dest.md');
+      expect(result).toEqual({ from: 'notes/move-source.md', to: 'notes/move-dest.md' });
+      // Source removed
+      const srcExists = await fs
+        .access(path.join(vaultRoot, 'notes', 'move-source.md'))
+        .then(() => true)
+        .catch(() => false);
+      expect(srcExists).toBe(false);
+      // Destination created with content
+      const dstContent = await fs.readFile(path.join(vaultRoot, 'notes', 'move-dest.md'), 'utf-8');
+      expect(dstContent).toBe('content to move');
+    });
+
+    it('throws FileNotFoundError when source does not exist', async () => {
+      await expect(manager.moveNote('notes/nonexistent.md', 'notes/dest.md')).rejects.toThrow(
+        FileNotFoundError,
+      );
+    });
+
+    it('throws FileExistsError when destination already exists', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'move-conflict-src.md'), 'src');
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'move-conflict-dst.md'), 'dst');
+      await expect(
+        manager.moveNote('notes/move-conflict-src.md', 'notes/move-conflict-dst.md'),
+      ).rejects.toThrow(FileExistsError);
+    });
+
+    it('auto-creates intermediate directories at destination', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'move-deep-src.md'), 'deep content');
+      const result = await manager.moveNote('notes/move-deep-src.md', 'moved/deep/nested/dest.md');
+      expect(result.to).toBe('moved/deep/nested/dest.md');
+      const dstContent = await fs.readFile(
+        path.join(vaultRoot, 'moved', 'deep', 'nested', 'dest.md'),
+        'utf-8',
+      );
+      expect(dstContent).toBe('deep content');
+    });
+
+    it('throws FileNotFoundError when source is a directory', async () => {
+      await expect(manager.moveNote('notes', 'notes-moved')).rejects.toThrow(FileNotFoundError);
+    });
+
+    it('throws PathTraversalError for traversal in source', async () => {
+      await expect(manager.moveNote('../escape.md', 'notes/dest.md')).rejects.toThrow(
+        PathTraversalError,
+      );
+    });
+
+    it('throws PathTraversalError for traversal in destination', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'move-trav-src.md'), 'content');
+      await expect(
+        manager.moveNote('notes/move-trav-src.md', '../outside/dest.md'),
+      ).rejects.toThrow(PathTraversalError);
     });
   });
 });

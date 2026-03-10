@@ -539,4 +539,216 @@ describe('vault routes', () => {
       expect(response.statusCode).toBe(401);
     });
   });
+
+  describe('DELETE /api/vault/content', () => {
+    it('deletes a file and returns 200 with { path, deleted: true }', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'delete-route.md'), 'to delete');
+      const response = await app.inject({
+        method: 'DELETE',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'notes/delete-route.md' },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.path).toBe('notes/delete-route.md');
+      expect(body.deleted).toBe(true);
+      const exists = await fs
+        .access(path.join(vaultRoot, 'notes', 'delete-route.md'))
+        .then(() => true)
+        .catch(() => false);
+      expect(exists).toBe(false);
+    });
+
+    it('returns 404 when file does not exist', async () => {
+      const response = await app.inject({
+        method: 'DELETE',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'notes/nonexistent-delete.md' },
+      });
+      expect(response.statusCode).toBe(404);
+      const body = response.json();
+      expect(body.error.code).toBe('NOT_FOUND');
+    });
+
+    it('returns 403 for path traversal', async () => {
+      const response = await app.inject({
+        method: 'DELETE',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: '../escape.md' },
+      });
+      expect(response.statusCode).toBe(403);
+      const body = response.json();
+      expect(body.error.code).toBe('PATH_TRAVERSAL');
+    });
+
+    it('returns 401 without auth header', async () => {
+      const response = await app.inject({
+        method: 'DELETE',
+        url: '/api/vault/content',
+        headers: { 'content-type': 'application/json' },
+        payload: { path: 'notes/hello.md' },
+      });
+      expect(response.statusCode).toBe(401);
+    });
+  });
+
+  describe('PATCH /api/vault/metadata', () => {
+    it('returns 200 with merged metadata after updating a field', async () => {
+      await fs.writeFile(
+        path.join(vaultRoot, 'notes', 'meta-patch.md'),
+        '---\ntitle: Original\ntags:\n  - a\n  - b\n---\n\nBody content.',
+      );
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/vault/metadata',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'notes/meta-patch.md', metadata: { status: 'done' } },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.path).toBe('notes/meta-patch.md');
+      expect(body.metadata.title).toBe('Original');
+      expect(body.metadata.tags).toEqual(['a', 'b']);
+      expect(body.metadata.status).toBe('done');
+    });
+
+    it('removes a field when value is null', async () => {
+      await fs.writeFile(
+        path.join(vaultRoot, 'notes', 'meta-patch-null.md'),
+        '---\ntitle: Test\ntags:\n  - x\n---\n\nBody.',
+      );
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/vault/metadata',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'notes/meta-patch-null.md', metadata: { tags: null } },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.metadata.title).toBe('Test');
+      expect(body.metadata.tags).toBeUndefined();
+    });
+
+    it('returns 404 when file does not exist', async () => {
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/vault/metadata',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: 'notes/nonexistent-meta-patch.md', metadata: { status: 'done' } },
+      });
+      expect(response.statusCode).toBe(404);
+      const body = response.json();
+      expect(body.error.code).toBe('NOT_FOUND');
+    });
+
+    it('returns 403 for path traversal', async () => {
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/vault/metadata',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { path: '../../etc/passwd', metadata: { status: 'done' } },
+      });
+      expect(response.statusCode).toBe(403);
+      const body = response.json();
+      expect(body.error.code).toBe('PATH_TRAVERSAL');
+    });
+
+    it('returns 401 without auth header', async () => {
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/vault/metadata',
+        headers: { 'content-type': 'application/json' },
+        payload: { path: 'notes/hello.md', metadata: { status: 'done' } },
+      });
+      expect(response.statusCode).toBe(401);
+    });
+  });
+
+  describe('POST /api/vault/move', () => {
+    it('moves a note and returns 200 with { from, to }', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'move-from-route.md'), 'content to move');
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/move',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { from: 'notes/move-from-route.md', to: 'notes/move-to-route.md' },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.from).toBe('notes/move-from-route.md');
+      expect(body.to).toBe('notes/move-to-route.md');
+      const dstContent = await fs.readFile(
+        path.join(vaultRoot, 'notes', 'move-to-route.md'),
+        'utf-8',
+      );
+      expect(dstContent).toBe('content to move');
+    });
+
+    it('returns 409 when destination already exists', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'move-conflict-from.md'), 'src');
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'move-conflict-to.md'), 'dst');
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/move',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { from: 'notes/move-conflict-from.md', to: 'notes/move-conflict-to.md' },
+      });
+      expect(response.statusCode).toBe(409);
+      const body = response.json();
+      expect(body.error.code).toBe('FILE_EXISTS');
+    });
+
+    it('returns 404 when source does not exist', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/move',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { from: 'notes/nonexistent-move.md', to: 'notes/any-dest.md' },
+      });
+      expect(response.statusCode).toBe(404);
+      const body = response.json();
+      expect(body.error.code).toBe('NOT_FOUND');
+    });
+
+    it('auto-creates intermediate directories at destination', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'move-auto-dir-src.md'), 'auto dir');
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/move',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { from: 'notes/move-auto-dir-src.md', to: 'deep/move/auto/dest.md' },
+      });
+      expect(response.statusCode).toBe(200);
+      const exists = await fs
+        .access(path.join(vaultRoot, 'deep', 'move', 'auto', 'dest.md'))
+        .then(() => true)
+        .catch(() => false);
+      expect(exists).toBe(true);
+    });
+
+    it('returns 403 for path traversal in from', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/move',
+        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        payload: { from: '../escape.md', to: 'notes/dest.md' },
+      });
+      expect(response.statusCode).toBe(403);
+      const body = response.json();
+      expect(body.error.code).toBe('PATH_TRAVERSAL');
+    });
+
+    it('returns 401 without auth header', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/move',
+        headers: { 'content-type': 'application/json' },
+        payload: { from: 'notes/hello.md', to: 'notes/world.md' },
+      });
+      expect(response.statusCode).toBe(401);
+    });
+  });
 });
