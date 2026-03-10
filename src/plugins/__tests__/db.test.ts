@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -36,9 +37,9 @@ describe('db plugin', () => {
   });
 
   it('db can execute queries', () => {
-    // Use drizzle's raw SQL interface to run a simple query
-    const result = app.db.run({ sql: 'SELECT 1', params: [] });
-    expect(result).toBeDefined();
+    // Use drizzle raw sql helper to verify the connection works
+    const result = app.db.get<{ one: number }>(sql`SELECT 1 as one`);
+    expect(result?.one).toBe(1);
   });
 
   it('auto-creates data directory', async () => {

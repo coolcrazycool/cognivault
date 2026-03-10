@@ -4,6 +4,7 @@ import Fastify from 'fastify';
 import { healthRoutes } from './features/health/routes.js';
 import { vaultRoutes } from './features/vault/routes.js';
 import authPlugin from './plugins/auth.js';
+import dbPlugin from './plugins/db.js';
 import errorHandler from './plugins/error-handler.js';
 import vaultPlugin from './plugins/vault.js';
 
@@ -22,6 +23,7 @@ export async function buildApp(opts?: BuildAppOptions): Promise<FastifyInstance>
 
   // Plugins
   await app.register(vaultPlugin);
+  await app.register(dbPlugin);
 
   // Feature routes
   await app.register(healthRoutes);
