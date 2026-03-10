@@ -24,6 +24,7 @@
     "@sinclair/typebox": "^0.34.48",
     "fastify": "^5.8.2",
     "fastify-plugin": "^5.1.0",
+    "gray-matter": "^4.0.3",
     "zod": "^4.3.6"
   },
   "devDependencies": {
