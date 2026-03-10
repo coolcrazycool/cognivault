@@ -218,7 +218,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 1. Project Skeleton | 3/3 | Complete   | 2026-03-10 |
 | 2. Vault Read Operations | 3/3 | Complete   | 2026-03-10 |
 | 3. Vault Write Operations | 3/3 | Complete   | 2026-03-10 |
-| 4. Index State + Change Detection | 1/3 | In Progress|  |
+| 4. Index State + Change Detection | 2/3 | In Progress|  |
 | 5. Markdown Indexing Pipeline | 0/4 | Not started | - |
 | 6. Semantic + Lexical Search | 0/3 | Not started | - |
 | 7. Hybrid Retrieval + Reranking | 0/3 | Not started | - |

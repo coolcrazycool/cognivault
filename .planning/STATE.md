@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 04-01-PLAN.md (SQLite + Drizzle ORM infrastructure)
-last_updated: "2026-03-10T16:48:07.471Z"
+stopped_at: Completed 04-02-PLAN.md (VaultIndexer change detection engine)
+last_updated: "2026-03-10T17:01:01.243Z"
 last_activity: 2026-03-10 — Completed plan 02-02 (list files + read content endpoints)
 progress:
   total_phases: 11
   completed_phases: 3
   total_plans: 12
-  completed_plans: 10
+  completed_plans: 11
   percent: 15
 ---
 
@@ -56,6 +56,7 @@ Progress: [▓▓░░░░░░░░] 15%
 | Phase 03-vault-write-operations P02 | 4min | 1 tasks | 5 files |
 | Phase 03-vault-write-operations P03 | 5min | 1 tasks | 5 files |
 | Phase 04-index-state-+-change-detection P01 | 7min | 2 tasks | 13 files |
+| Phase 04-index-state-+-change-detection P02 | 578 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -95,6 +96,9 @@ Recent decisions affecting current work:
 - [Phase 04-01]: getMigrationsFolder() uses import.meta.url chain for ESM-safe project root resolution
 - [Phase 04-01]: WAL test uses real temp file DB (not :memory:) since in-memory SQLite always reports 'memory' journal mode
 - [Phase 04-01]: dbPlugin dependencies: ['vault'] enforces registration order (vault -> db)
+- [Phase 04-02]: isIndexing set to false before emitting events so listeners observe final state correctly
+- [Phase 04-02]: p-limit moved from devDependencies to dependencies (used in production indexer code)
+- [Phase 04-02]: vaultRoot accessed via cast on VaultManager instance (rootPath is private but accessible at runtime)
 
 ### Pending Todos
 
@@ -106,6 +110,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T16:48:07.469Z
-Stopped at: Completed 04-01-PLAN.md (SQLite + Drizzle ORM infrastructure)
+Last session: 2026-03-10T17:01:01.241Z
+Stopped at: Completed 04-02-PLAN.md (VaultIndexer change detection engine)
 Resume file: None

@@ -23,11 +23,11 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Indexing
 
 - [x] **IDX-01**: Service performs full initial index of all markdown files on startup
-- [ ] **IDX-02**: Service detects file changes via filesystem polling with content hashing
+- [x] **IDX-02**: Service detects file changes via filesystem polling with content hashing
 - [ ] **IDX-03**: Service chunks markdown by heading/section boundaries preserving hierarchy
 - [ ] **IDX-04**: Each chunk carries section_path metadata (e.g. "Note Title > H2 > H3")
 - [ ] **IDX-05**: Service extracts and indexes frontmatter fields into Qdrant payload
-- [ ] **IDX-06**: Service handles created/updated/moved/deleted files incrementally
+- [x] **IDX-06**: Service handles created/updated/moved/deleted files incrementally
 - [ ] **IDX-07**: Service removes stale vectors when notes are deleted or chunks change
 - [ ] **IDX-08**: Service extracts and indexes text from PDF files
 - [ ] **IDX-09**: Service parses and indexes Canvas JSON node content
@@ -121,11 +121,11 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FILE-09 | Phase 3 | Complete |
 | FILE-10 | Phase 2 | Complete |
 | IDX-01 | Phase 4 | Complete |
-| IDX-02 | Phase 4 | Pending |
+| IDX-02 | Phase 4 | Complete |
 | IDX-03 | Phase 5 | Pending |
 | IDX-04 | Phase 5 | Pending |
 | IDX-05 | Phase 5 | Pending |
-| IDX-06 | Phase 4 | Pending |
+| IDX-06 | Phase 4 | Complete |
 | IDX-07 | Phase 5 | Pending |
 | IDX-08 | Phase 10 | Pending |
 | IDX-09 | Phase 10 | Pending |
