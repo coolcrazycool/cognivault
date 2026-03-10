@@ -38,14 +38,10 @@ created: 2026-03-10
 
 | Task ID | Plan | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------|-------------------|-------------|--------|
-| 05-01-01 | 01 | 1 | IDX-03 | unit | `pnpm test -- --run src/lib/__tests__/chunker.test.ts` | ❌ W0 | ⬜ pending |
-| 05-01-02 | 01 | 1 | IDX-04 | unit | `pnpm test -- --run src/lib/__tests__/chunker.test.ts` | ❌ W0 | ⬜ pending |
-| 05-01-03 | 01 | 1 | IDX-05 | unit | `pnpm test -- --run src/lib/__tests__/chunker.test.ts` | ❌ W0 | ⬜ pending |
-| 05-02-01 | 02 | 1 | IDX-03 | unit | `pnpm test -- --run src/lib/__tests__/embedding.test.ts` | ❌ W0 | ⬜ pending |
-| 05-03-01 | 03 | 1 | IDX-07 | unit | `pnpm test -- --run src/plugins/__tests__/qdrant.test.ts` | ❌ W0 | ⬜ pending |
-| 05-04-01 | 04 | 2 | IDX-07 | unit | `pnpm test -- --run src/plugins/__tests__/pipeline.test.ts` | ❌ W0 | ⬜ pending |
-| 05-04-02 | 04 | 2 | IDX-07 | unit | `pnpm test -- --run src/plugins/__tests__/pipeline.test.ts` | ❌ W0 | ⬜ pending |
-| 05-04-03 | 04 | 2 | IDX-07 | unit | `pnpm test -- --run src/plugins/__tests__/pipeline.test.ts` | ❌ W0 | ⬜ pending |
+| 05-01-01 | 01 | 1 | IDX-03, IDX-04 | unit | `pnpm test -- --run src/lib/__tests__/chunker.test.ts` | ❌ W0 | ⬜ pending |
+| 05-02-01 | 02 | 1 | IDX-05 | unit | `pnpm test -- --run src/lib/__tests__/embedding.test.ts` | ❌ W0 | ⬜ pending |
+| 05-02-02 | 02 | 1 | IDX-05 | unit | `pnpm test -- --run src/plugins/__tests__/qdrant.test.ts` | ❌ W0 | ⬜ pending |
+| 05-03-01 | 03 | 2 | IDX-05, IDX-07 | unit | `pnpm test -- --run src/plugins/__tests__/pipeline.test.ts` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
