@@ -12,6 +12,8 @@ tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vault-routes-test-'));
 vaultRoot = path.join(tmpDir, 'vault');
 await fs.mkdir(vaultRoot, { recursive: true });
 await fs.mkdir(path.join(vaultRoot, 'notes'), { recursive: true });
+await fs.mkdir(path.join(vaultRoot, 'notes', 'daily'), { recursive: true });
+await fs.mkdir(path.join(vaultRoot, '.obsidian'), { recursive: true });
 
 // Metadata test fixtures
 await fs.writeFile(
@@ -35,13 +37,24 @@ await fs.writeFile(
   '---\n: invalid\n  broken:\n    - [unclosed\n---\n# Content',
 );
 
+// List/content test fixtures
+await fs.writeFile(
+  path.join(vaultRoot, 'notes', 'hello.md'),
+  '---\ntitle: Hello\n---\n\n# Hello World\n\nBody here.',
+);
+await fs.writeFile(path.join(vaultRoot, 'notes', 'plain.md'), '# Plain note');
+await fs.writeFile(path.join(vaultRoot, 'notes', 'daily', 'monday.md'), '# Monday');
+await fs.writeFile(path.join(vaultRoot, '.obsidian', 'workspace.json'), '{}');
+const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+await fs.writeFile(path.join(vaultRoot, 'image.png'), pngHeader);
+
 // Set env vars before importing app
 process.env.COGNIVAULT_API_KEY = 'test-api-key';
 process.env.VAULT_PATH = vaultRoot;
 
 const { buildApp } = await import('../../../app.js');
 
-describe('vault metadata routes', () => {
+describe('vault routes', () => {
   let app: FastifyInstance;
 
   beforeAll(async () => {
@@ -52,6 +65,146 @@ describe('vault metadata routes', () => {
   afterAll(async () => {
     await app.close();
     await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  describe('GET /api/vault/files', () => {
+    it('returns 200 with entries at vault root', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/vault/files',
+        headers: { authorization: 'Bearer test-api-key' },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.entries).toBeDefined();
+      expect(Array.isArray(body.entries)).toBe(true);
+      const names = body.entries.map((e: { name: string }) => e.name);
+      expect(names).toContain('notes');
+    });
+
+    it('returns entries in a subfolder', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/vault/files?path=notes',
+        headers: { authorization: 'Bearer test-api-key' },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      const names = body.entries.map((e: { name: string }) => e.name);
+      expect(names).toContain('hello.md');
+      expect(names).toContain('daily');
+    });
+
+    it('returns nested entries with recursive=true', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/vault/files?recursive=true',
+        headers: { authorization: 'Bearer test-api-key' },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      const paths = body.entries.map((e: { path: string }) => e.path);
+      expect(paths).toContain('notes/daily/monday.md');
+    });
+
+    it('filters by extension', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/vault/files?ext=md&recursive=true',
+        headers: { authorization: 'Bearer test-api-key' },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      for (const entry of body.entries) {
+        if (entry.type === 'file') {
+          expect(entry.name).toMatch(/\.md$/);
+        }
+      }
+    });
+
+    it('returns 403 for path traversal', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/vault/files?path=../../etc',
+        headers: { authorization: 'Bearer test-api-key' },
+      });
+      expect(response.statusCode).toBe(403);
+      const body = response.json();
+      expect(body.error.code).toBe('PATH_TRAVERSAL');
+    });
+
+    it('returns 401 without auth header', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/vault/files',
+      });
+      expect(response.statusCode).toBe(401);
+    });
+  });
+
+  describe('GET /api/vault/content', () => {
+    it('returns 200 with content for markdown file', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/vault/content?path=notes/hello.md',
+        headers: { authorization: 'Bearer test-api-key' },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.path).toBe('notes/hello.md');
+      expect(body.content).toBe('# Hello World\n\nBody here.');
+      expect(body.content).not.toContain('---');
+    });
+
+    it('returns 404 for nonexistent file', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/vault/content?path=nonexistent.md',
+        headers: { authorization: 'Bearer test-api-key' },
+      });
+      expect(response.statusCode).toBe(404);
+      const body = response.json();
+      expect(body.error.code).toBe('NOT_FOUND');
+    });
+
+    it('returns 415 for binary file', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/vault/content?path=image.png',
+        headers: { authorization: 'Bearer test-api-key' },
+      });
+      expect(response.statusCode).toBe(415);
+      const body = response.json();
+      expect(body.error.code).toBe('UNSUPPORTED_MEDIA_TYPE');
+    });
+
+    it('returns 403 for path traversal', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/vault/content?path=../../etc/passwd',
+        headers: { authorization: 'Bearer test-api-key' },
+      });
+      expect(response.statusCode).toBe(403);
+      const body = response.json();
+      expect(body.error.code).toBe('PATH_TRAVERSAL');
+    });
+
+    it('returns 400 when path query param is missing', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/vault/content',
+        headers: { authorization: 'Bearer test-api-key' },
+      });
+      expect(response.statusCode).toBe(400);
+    });
+
+    it('returns 401 without auth header', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/vault/content?path=notes/hello.md',
+      });
+      expect(response.statusCode).toBe(401);
+    });
   });
 
   describe('GET /api/vault/metadata', () => {
