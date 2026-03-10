@@ -26,7 +26,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **IDX-02**: Service detects file changes via filesystem polling with content hashing
 - [ ] **IDX-03**: Service chunks markdown by heading/section boundaries preserving hierarchy
 - [ ] **IDX-04**: Each chunk carries section_path metadata (e.g. "Note Title > H2 > H3")
-- [ ] **IDX-05**: Service extracts and indexes frontmatter fields into Qdrant payload
+- [x] **IDX-05**: Service extracts and indexes frontmatter fields into Qdrant payload
 - [x] **IDX-06**: Service handles created/updated/moved/deleted files incrementally
 - [ ] **IDX-07**: Service removes stale vectors when notes are deleted or chunks change
 - [ ] **IDX-08**: Service extracts and indexes text from PDF files
@@ -124,7 +124,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | IDX-02 | Phase 4 | Complete |
 | IDX-03 | Phase 5 | Pending |
 | IDX-04 | Phase 5 | Pending |
-| IDX-05 | Phase 5 | Pending |
+| IDX-05 | Phase 5 | Complete |
 | IDX-06 | Phase 4 | Complete |
 | IDX-07 | Phase 5 | Pending |
 | IDX-08 | Phase 10 | Pending |

@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 5 context gathered
-last_updated: "2026-03-10T17:59:52.006Z"
+stopped_at: Completed 05-02-PLAN.md
+last_updated: "2026-03-10T18:26:02.917Z"
 last_activity: 2026-03-10 — Completed plan 02-02 (list files + read content endpoints)
 progress:
   total_phases: 11
   completed_phases: 4
-  total_plans: 12
-  completed_plans: 12
+  total_plans: 15
+  completed_plans: 13
   percent: 15
 ---
 
@@ -58,6 +58,7 @@ Progress: [▓▓░░░░░░░░] 15%
 | Phase 04-index-state-+-change-detection P01 | 7min | 2 tasks | 13 files |
 | Phase 04-index-state-+-change-detection P02 | 578 | 2 tasks | 6 files |
 | Phase 04-index-state-+-change-detection P03 | 5min | 1 tasks | 3 files |
+| Phase 05-markdown-indexing-pipeline P02 | 4min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -102,6 +103,9 @@ Recent decisions affecting current work:
 - [Phase 04-02]: vaultRoot accessed via cast on VaultManager instance (rootPath is private but accessible at runtime)
 - [Phase 04-03]: DB health check uses drizzle sql SELECT 1 via fastify.db.get() — synchronous, minimal overhead
 - [Phase 04-03]: Readiness indexing field is informational only — 200 returned even when indexing:true; Docker probe always passes when vault+db ok
+- [Phase 05-02]: embedding plugin named 'embedder' (not 'embedding') to match qdrant plugin dependency declaration
+- [Phase 05-02]: Qdrant idempotent init: skip collection AND indexes if collection already exists
+- [Phase 05-02]: Class mock syntax required for OpenAI mock in vitest — arrow function mocks not constructable with new
 
 ### Pending Todos
 
@@ -113,6 +117,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T17:59:52.002Z
-Stopped at: Phase 5 context gathered
-Resume file: .planning/phases/05-markdown-indexing-pipeline/05-CONTEXT.md
+Last session: 2026-03-10T18:26:02.915Z
+Stopped at: Completed 05-02-PLAN.md
+Resume file: None
