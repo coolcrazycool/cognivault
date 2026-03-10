@@ -22,7 +22,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Indexing
 
-- [ ] **IDX-01**: Service performs full initial index of all markdown files on startup
+- [x] **IDX-01**: Service performs full initial index of all markdown files on startup
 - [ ] **IDX-02**: Service detects file changes via filesystem polling with content hashing
 - [ ] **IDX-03**: Service chunks markdown by heading/section boundaries preserving hierarchy
 - [ ] **IDX-04**: Each chunk carries section_path metadata (e.g. "Note Title > H2 > H3")
@@ -120,7 +120,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FILE-08 | Phase 2 | Complete |
 | FILE-09 | Phase 3 | Complete |
 | FILE-10 | Phase 2 | Complete |
-| IDX-01 | Phase 4 | Pending |
+| IDX-01 | Phase 4 | Complete |
 | IDX-02 | Phase 4 | Pending |
 | IDX-03 | Phase 5 | Pending |
 | IDX-04 | Phase 5 | Pending |

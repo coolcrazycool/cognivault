@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 4 context gathered
-last_updated: "2026-03-10T16:20:41.716Z"
+stopped_at: Completed 04-01-PLAN.md (SQLite + Drizzle ORM infrastructure)
+last_updated: "2026-03-10T16:48:07.471Z"
 last_activity: 2026-03-10 — Completed plan 02-02 (list files + read content endpoints)
 progress:
   total_phases: 11
   completed_phases: 3
-  total_plans: 9
-  completed_plans: 9
+  total_plans: 12
+  completed_plans: 10
   percent: 15
 ---
 
@@ -55,6 +55,7 @@ Progress: [▓▓░░░░░░░░] 15%
 | Phase 03-vault-write-operations P01 | 4min | 2 tasks | 5 files |
 | Phase 03-vault-write-operations P02 | 4min | 1 tasks | 5 files |
 | Phase 03-vault-write-operations P03 | 5min | 1 tasks | 5 files |
+| Phase 04-index-state-+-change-detection P01 | 7min | 2 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -90,6 +91,10 @@ Recent decisions affecting current work:
 - [Phase 03-vault-write-operations]: moveNote uses try/catch on fs.stat(dest) to detect ENOENT vs conflict atomically
 - [Phase 03-vault-write-operations]: updateMetadata uses null values as delete-key signal in shallow merge operation
 - [Phase 03-03]: Shallow merge for PATCH /metadata: spread existing, null-deletes keys, others set; matter.stringify preserves body
+- [Phase 04-01]: WAL pragma set on sqlite instance BEFORE drizzle() initialization for correct WAL activation
+- [Phase 04-01]: getMigrationsFolder() uses import.meta.url chain for ESM-safe project root resolution
+- [Phase 04-01]: WAL test uses real temp file DB (not :memory:) since in-memory SQLite always reports 'memory' journal mode
+- [Phase 04-01]: dbPlugin dependencies: ['vault'] enforces registration order (vault -> db)
 
 ### Pending Todos
 
@@ -101,6 +106,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T16:20:41.713Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-index-state-+-change-detection/04-CONTEXT.md
+Last session: 2026-03-10T16:48:07.469Z
+Stopped at: Completed 04-01-PLAN.md (SQLite + Drizzle ORM infrastructure)
+Resume file: None
