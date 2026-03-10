@@ -4,17 +4,23 @@ import type {
   AppendContentBody,
   ContentQuery,
   CreateNoteBody,
+  DeleteNoteBody,
   ListFilesQuery,
   MetadataQuery,
+  MoveNoteBody,
   UpdateContentBody,
+  UpdateMetadataBody,
 } from './schemas.js';
 import {
   appendContentSchema,
   contentSchema,
   createNoteSchema,
+  deleteNoteSchema,
   listFilesSchema,
   metadataSchema,
+  moveNoteSchema,
   updateContentSchema,
+  updateMetadataSchema,
 } from './schemas.js';
 
 function handleVaultError(err: unknown, reply: FastifyReply): void {
@@ -104,6 +110,48 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
       try {
         const { path, content, mode } = request.body;
         const result = await fastify.vault.appendContent(path, content, mode);
+        return result;
+      } catch (err: unknown) {
+        handleVaultError(err, reply);
+      }
+    },
+  );
+
+  fastify.delete<{ Body: DeleteNoteBody }>(
+    '/content',
+    { schema: deleteNoteSchema },
+    async (request, reply) => {
+      try {
+        const { path } = request.body;
+        const result = await fastify.vault.deleteNote(path);
+        return result;
+      } catch (err: unknown) {
+        handleVaultError(err, reply);
+      }
+    },
+  );
+
+  fastify.post<{ Body: MoveNoteBody }>(
+    '/move',
+    { schema: moveNoteSchema },
+    async (request, reply) => {
+      try {
+        const { from, to } = request.body;
+        const result = await fastify.vault.moveNote(from, to);
+        return result;
+      } catch (err: unknown) {
+        handleVaultError(err, reply);
+      }
+    },
+  );
+
+  fastify.patch<{ Body: UpdateMetadataBody }>(
+    '/metadata',
+    { schema: updateMetadataSchema },
+    async (request, reply) => {
+      try {
+        const { path, metadata } = request.body;
+        const result = await fastify.vault.updateMetadata(path, metadata);
         return result;
       } catch (err: unknown) {
         handleVaultError(err, reply);

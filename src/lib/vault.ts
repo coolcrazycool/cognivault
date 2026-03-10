@@ -77,6 +77,11 @@ export interface MetadataResult {
   warning?: string;
 }
 
+export interface UpdateMetadataResult {
+  path: string;
+  metadata: Record<string, unknown>;
+}
+
 // ── VaultManager ──
 
 export class VaultManager {
@@ -398,6 +403,83 @@ export class VaultManager {
     await this.atomicWrite(resolved, content + '\n');
 
     return { path: filePath, updated: true };
+  }
+
+  async deleteNote(filePath: string): Promise<{ path: string; deleted: true }> {
+    const resolved = await this.resolvePath(filePath);
+
+    // Verify it's a file, not a directory
+    const stat = await fs.stat(resolved);
+    if (!stat.isFile()) {
+      throw new FileNotFoundError(filePath);
+    }
+
+    await fs.unlink(resolved);
+
+    return { path: filePath, deleted: true as const };
+  }
+
+  async moveNote(from: string, to: string): Promise<{ from: string; to: string }> {
+    // Source must exist and be a file
+    const sourceResolved = await this.resolvePath(from);
+    const sourceStat = await fs.stat(sourceResolved);
+    if (!sourceStat.isFile()) {
+      throw new FileNotFoundError(from);
+    }
+
+    // Validate destination path
+    const destResolved = await this.resolveWritePath(to);
+
+    // Check destination existence — throw if already exists
+    try {
+      await fs.stat(destResolved);
+      throw new FileExistsError(to);
+    } catch (err: unknown) {
+      if (err instanceof FileExistsError) {
+        throw err;
+      }
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw err;
+      }
+      // ENOENT means destination does not exist — proceed
+    }
+
+    // Auto-create intermediate directories at destination
+    await fs.mkdir(path.dirname(destResolved), { recursive: true });
+
+    await fs.rename(sourceResolved, destResolved);
+
+    return { from, to };
+  }
+
+  async updateMetadata(
+    filePath: string,
+    updates: Record<string, unknown>,
+  ): Promise<UpdateMetadataResult> {
+    // resolvePath throws FileNotFoundError if file doesn't exist
+    const resolved = await this.resolvePath(filePath);
+
+    const raw = await fs.readFile(resolved, 'utf-8');
+    const parsed = matter(raw);
+
+    // Shallow merge: start from existing frontmatter
+    const merged: Record<string, unknown> = { ...parsed.data };
+
+    // Apply updates: null values delete the key, others set the value
+    for (const [key, value] of Object.entries(updates)) {
+      if (value === null) {
+        delete merged[key];
+      } else {
+        merged[key] = value;
+      }
+    }
+
+    // Reassemble: preserve the note body, replace frontmatter
+    const reassembled = matter.stringify(parsed.content, merged);
+
+    await this.atomicWrite(resolved, reassembled);
+
+    return { path: filePath, metadata: merged };
   }
 
   async appendContent(

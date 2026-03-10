@@ -165,3 +165,80 @@ export const appendContentSchema = {
     404: ErrorResponseSchema,
   },
 };
+
+// ── Delete Note ──
+
+export const DeleteNoteBodySchema = Type.Object({
+  path: Type.String({ minLength: 1 }),
+});
+
+export type DeleteNoteBody = Static<typeof DeleteNoteBodySchema>;
+
+export const DeleteNoteResponseSchema = Type.Object({
+  path: Type.String(),
+  deleted: Type.Literal(true),
+});
+
+export type DeleteNoteResponse = Static<typeof DeleteNoteResponseSchema>;
+
+// ── Move Note ──
+
+export const MoveNoteBodySchema = Type.Object({
+  from: Type.String({ minLength: 1 }),
+  to: Type.String({ minLength: 1 }),
+});
+
+export type MoveNoteBody = Static<typeof MoveNoteBodySchema>;
+
+export const MoveNoteResponseSchema = Type.Object({
+  from: Type.String(),
+  to: Type.String(),
+});
+
+export type MoveNoteResponse = Static<typeof MoveNoteResponseSchema>;
+
+// ── Route schema objects for delete and move ──
+
+export const deleteNoteSchema = {
+  body: DeleteNoteBodySchema,
+  response: {
+    200: DeleteNoteResponseSchema,
+    403: ErrorResponseSchema,
+    404: ErrorResponseSchema,
+  },
+};
+
+export const moveNoteSchema = {
+  body: MoveNoteBodySchema,
+  response: {
+    200: MoveNoteResponseSchema,
+    403: ErrorResponseSchema,
+    404: ErrorResponseSchema,
+    409: ErrorResponseSchema,
+  },
+};
+
+// ── Update Metadata ──
+
+export const UpdateMetadataBodySchema = Type.Object({
+  path: Type.String({ minLength: 1 }),
+  metadata: Type.Record(Type.String(), Type.Union([Type.Unknown(), Type.Null()])),
+});
+
+export type UpdateMetadataBody = Static<typeof UpdateMetadataBodySchema>;
+
+export const UpdateMetadataResponseSchema = Type.Object({
+  path: Type.String(),
+  metadata: Type.Record(Type.String(), Type.Unknown()),
+});
+
+export type UpdateMetadataResponse = Static<typeof UpdateMetadataResponseSchema>;
+
+export const updateMetadataSchema = {
+  body: UpdateMetadataBodySchema,
+  response: {
+    200: UpdateMetadataResponseSchema,
+    403: ErrorResponseSchema,
+    404: ErrorResponseSchema,
+  },
+};
