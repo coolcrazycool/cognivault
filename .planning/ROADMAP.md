@@ -84,12 +84,12 @@ Plans:
   2. Filesystem poller detects created, modified, moved, and deleted files within 10-15 seconds
   3. Poller uses two-pass stability check so partially-written files (Obsidian Sync) are not processed
   4. SQLite tracks file path, content hash, mtime, and embedding model version per indexed file
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 04-01: SQLite schema with Drizzle ORM, WAL mode, index state tables
-- [ ] 04-02: Filesystem poller with content hashing and two-pass stability check
-- [ ] 04-03: Change event emission for created/updated/moved/deleted files
+- [ ] 04-01-PLAN.md — SQLite schema with Drizzle ORM, DB client, Fastify plugin, config extension
+- [ ] 04-02-PLAN.md — VaultIndexer with scan, poll, stability check, move detection, event emission
+- [ ] 04-03-PLAN.md — Readiness endpoint extension with DB health and indexing status
 
 ### Phase 5: Markdown Indexing Pipeline
 **Goal**: Markdown files are chunked, embedded, and stored in Qdrant with rich metadata
