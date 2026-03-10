@@ -38,11 +38,10 @@ created: 2026-03-10
 
 | Task ID | Plan | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------|-------------------|-------------|--------|
-| 06-01-01 | 01 | 1 | RET-01 | unit (inject) | `pnpm test -- --run src/features/search/__tests__/routes.test.ts` | ❌ W0 | ⬜ pending |
-| 06-01-02 | 01 | 1 | RET-05 | unit (inject) | `pnpm test -- --run src/features/search/__tests__/routes.test.ts` | ❌ W0 | ⬜ pending |
-| 06-02-01 | 02 | 1 | RET-02 | unit (inject) | `pnpm test -- --run src/features/search/__tests__/routes.test.ts` | ❌ W0 | ⬜ pending |
-| 06-02-02 | 02 | 1 | RET-05 | unit (inject) | `pnpm test -- --run src/features/search/__tests__/routes.test.ts` | ❌ W0 | ⬜ pending |
-| 06-03-01 | 03 | 1 | RET-06 | unit (inject) | `pnpm test -- --run src/features/search/__tests__/routes.test.ts` | ❌ W0 | ⬜ pending |
+| 06-01-T1 | 01 | 1 | RET-06 | type + unit | `pnpm test -- --run src/plugins/__tests__/pipeline.test.ts 2>/dev/null; pnpm typecheck` | TBD | ⬜ pending |
+| 06-01-T2 | 01 | 1 | RET-06 | unit | `pnpm test -- --run src/plugins/__tests__/pipeline.test.ts 2>/dev/null` | TBD | ⬜ pending |
+| 06-02-T1 | 02 | 2 | RET-01, RET-02, RET-05, RET-06 | unit (inject) | `pnpm test -- --run src/features/search/__tests__/routes.test.ts` | ❌ W0 | ⬜ pending |
+| 06-02-T2 | 02 | 2 | (wiring) | integration | `pnpm check` | ✅ | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
