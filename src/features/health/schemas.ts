@@ -11,11 +11,11 @@ export type HealthResponse = Static<typeof HealthResponseSchema>;
 export const ReadyResponseSchema = Type.Object({
   status: Type.Union([Type.Literal('ready'), Type.Literal('not_ready')]),
   timestamp: Type.String({ format: 'date-time' }),
-  checks: Type.Optional(
-    Type.Object({
-      vault: Type.Union([Type.Literal('ok'), Type.Literal('error')]),
-    }),
-  ),
+  checks: Type.Object({
+    vault: Type.Union([Type.Literal('ok'), Type.Literal('error')]),
+    db: Type.Union([Type.Literal('ok'), Type.Literal('error')]),
+  }),
+  indexing: Type.Boolean(),
 });
 
 export type ReadyResponse = Static<typeof ReadyResponseSchema>;

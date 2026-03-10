@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { healthSchema, readySchema } from './schemas.js';
 
@@ -35,14 +36,29 @@ export async function healthRoutes(fastify: FastifyInstance): Promise<void> {
         vaultOk = false;
       }
 
-      const ready = vaultOk;
+      let dbOk = false;
+      try {
+        if (fastify.db) {
+          fastify.db.get(sql`SELECT 1`);
+          dbOk = true;
+        }
+      } catch {
+        dbOk = false;
+      }
+
+      const indexing = fastify.indexer?.isIndexing ?? false;
+
+      const ready = vaultOk && dbOk;
       const status = ready ? 'ready' : 'not_ready';
+
       return reply.status(ready ? 200 : 503).send({
         status,
         timestamp: new Date().toISOString(),
         checks: {
           vault: vaultOk ? 'ok' : 'error',
+          db: dbOk ? 'ok' : 'error',
         },
+        indexing,
       });
     },
   );
