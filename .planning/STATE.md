@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 05-02-PLAN.md
-last_updated: "2026-03-10T18:26:02.917Z"
-last_activity: 2026-03-10 — Completed plan 02-02 (list files + read content endpoints)
+stopped_at: Completed 05-01-PLAN.md (heading-aware markdown chunker)
+last_updated: "2026-03-10T21:30:00.000Z"
+last_activity: 2026-03-10 — Completed plan 05-01 (heading-aware markdown chunker)
 progress:
   total_phases: 11
   completed_phases: 4
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-03-10)
 
 ## Current Position
 
-Phase: 2 of 11 (Vault Read Operations)
-Plan: 2 of 3 in current phase
+Phase: 5 of 11 (Markdown Indexing Pipeline)
+Plan: 1 of 4 in current phase
 Status: In progress
-Last activity: 2026-03-10 — Completed plan 02-02 (list files + read content endpoints)
+Last activity: 2026-03-10 — Completed plan 05-01 (heading-aware markdown chunker)
 
 Progress: [▓▓░░░░░░░░] 15%
 
@@ -103,6 +103,10 @@ Recent decisions affecting current work:
 - [Phase 04-02]: vaultRoot accessed via cast on VaultManager instance (rootPath is private but accessible at runtime)
 - [Phase 04-03]: DB health check uses drizzle sql SELECT 1 via fastify.db.get() — synchronous, minimal overhead
 - [Phase 04-03]: Readiness indexing field is informational only — 200 returned even when indexing:true; Docker probe always passes when vault+db ok
+- [Phase 05-01]: H1 headings are transparent — they create section boundaries but are NOT added to section_path (H2+ build the hierarchical path)
+- [Phase 05-01]: js-tiktoken exports getEncoding (camelCase), not get_encoding (snake_case) as documented in some resources
+- [Phase 05-01]: Test content for heading-boundary tests must be >=100 tokens per section to prevent short-merge from collapsing expected separate chunks
+- [Phase 05-01]: Short sections merge into the immediately preceding pending bucket; short sections with no preceding peer become standalone chunks
 - [Phase 05-02]: embedding plugin named 'embedder' (not 'embedding') to match qdrant plugin dependency declaration
 - [Phase 05-02]: Qdrant idempotent init: skip collection AND indexes if collection already exists
 - [Phase 05-02]: Class mock syntax required for OpenAI mock in vitest — arrow function mocks not constructable with new
