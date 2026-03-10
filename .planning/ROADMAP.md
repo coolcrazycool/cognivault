@@ -101,13 +101,12 @@ Plans:
   3. Frontmatter fields (tags, project, status, type) are extracted and stored in Qdrant payload per chunk
   4. When a note is edited, old vectors are deleted and new vectors are upserted (no stale duplicates)
   5. When a note is deleted, all its vectors are removed from Qdrant
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 05-01: Markdown-aware chunker with heading boundaries and section_path
-- [ ] 05-02: Embedding pipeline with OpenAI batching and backpressure (p-queue)
-- [ ] 05-03: Qdrant collection setup, upsert with deterministic IDs, payload schema
-- [ ] 05-04: Stale vector cleanup on edit, delete, and rename
+- [ ] 05-01-PLAN.md — Heading-aware markdown chunker with section_path (TDD)
+- [ ] 05-02-PLAN.md — Config extension, EmbeddingProvider, Qdrant plugin with collection init
+- [ ] 05-03-PLAN.md — Pipeline plugin wiring indexer events to chunk/embed/upsert with stale cleanup
 
 ### Phase 6: Semantic + Lexical Search
 **Goal**: Agents can search vault content by meaning or by exact terms with metadata filtering
@@ -219,7 +218,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 2. Vault Read Operations | 3/3 | Complete   | 2026-03-10 |
 | 3. Vault Write Operations | 3/3 | Complete   | 2026-03-10 |
 | 4. Index State + Change Detection | 3/3 | Complete   | 2026-03-10 |
-| 5. Markdown Indexing Pipeline | 0/4 | Not started | - |
+| 5. Markdown Indexing Pipeline | 0/3 | Not started | - |
 | 6. Semantic + Lexical Search | 0/3 | Not started | - |
 | 7. Hybrid Retrieval + Reranking | 0/3 | Not started | - |
 | 8. Context Pack Assembly | 0/3 | Not started | - |
