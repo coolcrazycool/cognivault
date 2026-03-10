@@ -35,12 +35,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Health endpoint returns service status; readiness endpoint confirms service is ready to accept work
   3. Requests without valid API key are rejected with 401; requests with valid key succeed
   4. Project has TypeScript compilation, ESM module resolution, and a working test runner
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 01-01: Fastify scaffold, TypeScript config, ESM setup, test runner
-- [ ] 01-02: Health/readiness endpoints and API key authentication
-- [ ] 01-03: Dockerfile, docker-compose with Qdrant sidecar
+- [ ] 01-01-PLAN.md -- Project init, tooling, Fastify app factory, config, error handler
+- [ ] 01-02-PLAN.md -- Health/readiness endpoints and API key auth plugin with tests
+- [ ] 01-03-PLAN.md -- Dockerfile, docker-compose with Qdrant sidecar, end-to-end verification
 
 ### Phase 2: Vault Read Operations
 **Goal**: Agents can browse and read vault contents safely through the REST API
