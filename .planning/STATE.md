@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-03-10T15:52:22.088Z"
+stopped_at: Completed 03-03-PLAN.md
+last_updated: "2026-03-10T15:52:34.307Z"
 last_activity: 2026-03-10 — Completed plan 02-02 (list files + read content endpoints)
 progress:
   total_phases: 11
@@ -89,6 +89,7 @@ Recent decisions affecting current work:
 - [Phase 03-vault-write-operations]: deleteNote rejects directories via stat.isFile() check, throws FileNotFoundError for consistency
 - [Phase 03-vault-write-operations]: moveNote uses try/catch on fs.stat(dest) to detect ENOENT vs conflict atomically
 - [Phase 03-vault-write-operations]: updateMetadata uses null values as delete-key signal in shallow merge operation
+- [Phase 03-03]: Shallow merge for PATCH /metadata: spread existing, null-deletes keys, others set; matter.stringify preserves body
 
 ### Pending Todos
 
@@ -100,6 +101,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T15:52:12.348Z
-Stopped at: Completed 03-02-PLAN.md
+Last session: 2026-03-10T15:52:34.304Z
+Stopped at: Completed 03-03-PLAN.md
 Resume file: None
