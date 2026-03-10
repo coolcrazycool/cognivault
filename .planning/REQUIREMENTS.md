@@ -9,8 +9,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### File Operations
 
-- [ ] **FILE-01**: Agent can list files and folders in vault with path filtering
-- [ ] **FILE-02**: Agent can read note content by path
+- [x] **FILE-01**: Agent can list files and folders in vault with path filtering
+- [x] **FILE-02**: Agent can read note content by path
 - [ ] **FILE-03**: Agent can create new note with content and optional frontmatter
 - [ ] **FILE-04**: Agent can update note content (full replace)
 - [ ] **FILE-05**: Agent can append or prepend content to existing note
@@ -110,8 +110,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FILE-01 | Phase 2 | Pending |
-| FILE-02 | Phase 2 | Pending |
+| FILE-01 | Phase 2 | Complete |
+| FILE-02 | Phase 2 | Complete |
 | FILE-03 | Phase 3 | Pending |
 | FILE-04 | Phase 3 | Pending |
 | FILE-05 | Phase 3 | Pending |

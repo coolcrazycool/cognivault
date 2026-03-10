@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: in-progress
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-03-10T14:44:50.000Z"
-last_activity: 2026-03-10 — Completed plan 02-01 (VaultManager core + schemas)
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-03-10T14:53:45.000Z"
+last_activity: 2026-03-10 — Completed plan 02-02 (list files + read content endpoints)
 progress:
   total_phases: 11
   completed_phases: 1
   total_plans: 6
-  completed_plans: 4
-  percent: 12
+  completed_plans: 5
+  percent: 15
 ---
 
 # Project State
@@ -21,33 +21,33 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-10)
 
 **Core value:** AI agents can find and retrieve the right knowledge from an Obsidian vault in under one second, with high precision across mixed Russian/English content, exact technical terms, and freeform metadata.
-**Current focus:** Phase 2 - Vault Read Operations (plan 1 of 3 complete)
+**Current focus:** Phase 2 - Vault Read Operations (plan 2 of 3 complete)
 
 ## Current Position
 
 Phase: 2 of 11 (Vault Read Operations)
-Plan: 1 of 3 in current phase
+Plan: 2 of 3 in current phase
 Status: In progress
-Last activity: 2026-03-10 — Completed plan 02-01 (VaultManager core + schemas)
+Last activity: 2026-03-10 — Completed plan 02-02 (list files + read content endpoints)
 
-Progress: [▓░░░░░░░░░] 12%
+Progress: [▓▓░░░░░░░░] 15%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 4
+- Total plans completed: 5
 - Average duration: 5min
-- Total execution time: 0.3 hours
+- Total execution time: 0.4 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01-project-skeleton | 3 | 14min | 5min |
-| 02-vault-read-operations | 1 | 4min | 4min |
+| 02-vault-read-operations | 2 | 10min | 5min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (3min), 01-02 (3min), 01-03 (8min), 02-01 (4min)
+- Last 5 plans: 01-02 (3min), 01-03 (8min), 02-01 (4min), 02-02 (6min)
 - Trend: stable
 
 *Updated after each plan completion*
@@ -73,6 +73,9 @@ Recent decisions affecting current work:
 - [02-01]: Used realpath for both rootPath and resolved paths to handle macOS /var -> /private/var
 - [02-01]: Traversal check runs before dotfile check so ../paths throw PathTraversalError
 - [02-01]: Explicit FS type annotations to satisfy Biome noImplicitAnyLet rule
+- [02-02]: Lexicographic sort instead of localeCompare for consistent cross-locale ordering
+- [02-02]: Extension filter excludes directories from results (files only when ext specified)
+- [02-02]: Shared handleVaultError helper in routes.ts for DRY error mapping
 
 ### Pending Todos
 
@@ -84,6 +87,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T14:44:50.000Z
-Stopped at: Completed 02-01-PLAN.md
-Resume file: .planning/phases/02-vault-read-operations/02-02-PLAN.md
+Last session: 2026-03-10T14:53:45.000Z
+Stopped at: Completed 02-02-PLAN.md
+Resume file: .planning/phases/02-vault-read-operations/02-03-PLAN.md
