@@ -269,8 +269,27 @@ export class VaultManager {
     }
   }
 
-  // Stub -- implementation in Plan 03
-  async readMetadata(_filePath: string): Promise<MetadataResult> {
-    throw new Error('Not implemented');
+  async readMetadata(filePath: string): Promise<MetadataResult> {
+    const resolved = await this.resolvePath(filePath);
+    const raw = await fs.readFile(resolved, 'utf-8');
+
+    try {
+      const parsed = matter(raw);
+      const metadata: Record<string, unknown> = { ...parsed.data };
+
+      // Normalize tags: string -> array
+      if (typeof metadata.tags === 'string') {
+        metadata.tags = [metadata.tags];
+      }
+
+      // If no frontmatter was found, gray-matter returns empty data
+      return { path: filePath, metadata };
+    } catch {
+      return {
+        path: filePath,
+        metadata: {},
+        warning: `Failed to parse frontmatter in ${filePath}`,
+      };
+    }
   }
 }
