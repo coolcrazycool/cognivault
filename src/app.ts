@@ -2,8 +2,10 @@ import type { TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
 import type { FastifyInstance } from 'fastify';
 import Fastify from 'fastify';
 import { healthRoutes } from './features/health/routes.js';
+import { vaultRoutes } from './features/vault/routes.js';
 import authPlugin from './plugins/auth.js';
 import errorHandler from './plugins/error-handler.js';
+import vaultPlugin from './plugins/vault.js';
 
 interface BuildAppOptions {
   logger?: boolean | object;
@@ -18,8 +20,12 @@ export async function buildApp(opts?: BuildAppOptions): Promise<FastifyInstance>
   await app.register(errorHandler);
   await app.register(authPlugin);
 
+  // Plugins
+  await app.register(vaultPlugin);
+
   // Feature routes
   await app.register(healthRoutes);
+  await app.register(vaultRoutes, { prefix: '/api/vault' });
 
   return app;
 }
