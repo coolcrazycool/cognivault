@@ -1,14 +1,18 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDatabase } from '../client.js';
-import { indexedFiles } from '../schema.js';
 import type { IndexedFile, NewIndexedFile } from '../schema.js';
+import { indexedFiles } from '../schema.js';
 
 describe('Drizzle schema and DB client', () => {
   let db: ReturnType<typeof createDatabase>['db'];
   let sqlite: ReturnType<typeof createDatabase>['sqlite'];
 
   beforeAll(() => {
+    // Use :memory: for most tests — WAL mode is tested separately with a file DB
     const result = createDatabase(':memory:');
     db = result.db;
     sqlite = result.sqlite;
@@ -24,9 +28,19 @@ describe('Drizzle schema and DB client', () => {
       expect(sqlite).toBeDefined();
     });
 
-    it('enables WAL journal mode', () => {
-      const result = sqlite.prepare('PRAGMA journal_mode').get() as { journal_mode: string };
-      expect(result.journal_mode).toBe('wal');
+    it('enables WAL journal mode for file-based databases', () => {
+      // WAL mode is not applicable to :memory: databases (always returns 'memory')
+      // Test with a real temp file to verify the PRAGMA is applied
+      const tmpDir = mkdtempSync(join(tmpdir(), 'cognivault-wal-test-'));
+      const dbPath = join(tmpDir, 'test.db');
+      try {
+        const { sqlite: fileSqlite } = createDatabase(dbPath);
+        const result = fileSqlite.prepare('PRAGMA journal_mode').get() as { journal_mode: string };
+        expect(result.journal_mode).toBe('wal');
+        fileSqlite.close();
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
 
     it('creates indexed_files table', () => {
@@ -46,9 +60,11 @@ describe('Drizzle schema and DB client', () => {
 
   describe('indexed_files table columns', () => {
     it('has path, content_hash, mtime, size, indexed_at columns', () => {
-      const cols = sqlite
-        .prepare('PRAGMA table_info(indexed_files)')
-        .all() as Array<{ name: string; notnull: number; pk: number }>;
+      const cols = sqlite.prepare('PRAGMA table_info(indexed_files)').all() as Array<{
+        name: string;
+        notnull: number;
+        pk: number;
+      }>;
       const colNames = cols.map((c) => c.name);
       expect(colNames).toContain('path');
       expect(colNames).toContain('content_hash');
@@ -58,17 +74,21 @@ describe('Drizzle schema and DB client', () => {
     });
 
     it('path column is primary key', () => {
-      const cols = sqlite
-        .prepare('PRAGMA table_info(indexed_files)')
-        .all() as Array<{ name: string; notnull: number; pk: number }>;
+      const cols = sqlite.prepare('PRAGMA table_info(indexed_files)').all() as Array<{
+        name: string;
+        notnull: number;
+        pk: number;
+      }>;
       const pathCol = cols.find((c) => c.name === 'path');
       expect(pathCol?.pk).toBe(1);
     });
 
     it('content_hash, mtime, size, indexed_at are NOT NULL', () => {
-      const cols = sqlite
-        .prepare('PRAGMA table_info(indexed_files)')
-        .all() as Array<{ name: string; notnull: number; pk: number }>;
+      const cols = sqlite.prepare('PRAGMA table_info(indexed_files)').all() as Array<{
+        name: string;
+        notnull: number;
+        pk: number;
+      }>;
       for (const name of ['content_hash', 'mtime', 'size', 'indexed_at']) {
         const col = cols.find((c) => c.name === name);
         expect(col?.notnull, `${name} should be NOT NULL`).toBe(1);

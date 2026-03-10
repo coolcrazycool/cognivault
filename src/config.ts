@@ -7,6 +7,9 @@ const configSchema = z.object({
   COGNIVAULT_API_KEY: z.string().min(1, 'COGNIVAULT_API_KEY is required'),
   VAULT_PATH: z.string().min(1, 'VAULT_PATH is required'),
   QDRANT_URL: z.string().url().default('http://localhost:6333'),
+  COGNIVAULT_DATA_DIR: z.string().default('./.cognivault'),
+  POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
+  STABILITY_DELAY_MS: z.coerce.number().int().positive().default(2000),
 });
 
 export type Config = z.infer<typeof configSchema>;
