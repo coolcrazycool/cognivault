@@ -18,7 +18,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [ ] **FILE-07**: Agent can rename or move note to new path
 - [ ] **FILE-08**: Agent can read frontmatter metadata from any note
 - [ ] **FILE-09**: Agent can update frontmatter fields without corrupting note content
-- [ ] **FILE-10**: Service rejects paths that traverse outside vault boundary
+- [x] **FILE-10**: Service rejects paths that traverse outside vault boundary
 
 ### Indexing
 
@@ -119,7 +119,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FILE-07 | Phase 3 | Pending |
 | FILE-08 | Phase 2 | Pending |
 | FILE-09 | Phase 3 | Pending |
-| FILE-10 | Phase 2 | Pending |
+| FILE-10 | Phase 2 | Complete |
 | IDX-01 | Phase 4 | Pending |
 | IDX-02 | Phase 4 | Pending |
 | IDX-03 | Phase 5 | Pending |
