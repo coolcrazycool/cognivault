@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
   DotfileAccessError,
+  FileExistsError,
   FileNotFoundError,
   PathTraversalError,
   UnsupportedMediaTypeError,
@@ -297,6 +298,165 @@ describe('VaultManager', () => {
       expect(err.code).toBe('FORBIDDEN');
       expect(err.statusCode).toBe(403);
       expect(err).toBeInstanceOf(VaultError);
+    });
+
+    it('FileExistsError has correct code and status', () => {
+      const err = new FileExistsError('test');
+      expect(err.code).toBe('FILE_EXISTS');
+      expect(err.statusCode).toBe(409);
+      expect(err).toBeInstanceOf(VaultError);
+    });
+  });
+
+  describe('resolveWritePath()', () => {
+    it('returns absolute path without requiring file to exist', async () => {
+      const resolved = await manager.resolveWritePath('notes/new-nonexistent.md');
+      expect(resolved).toBe(path.join(vaultRoot, 'notes', 'new-nonexistent.md'));
+    });
+
+    it('resolves path for deeply nested nonexistent file', async () => {
+      const resolved = await manager.resolveWritePath('a/b/c/d.md');
+      expect(resolved).toBe(path.join(vaultRoot, 'a', 'b', 'c', 'd.md'));
+    });
+
+    it('throws PathTraversalError for traversal with ..', async () => {
+      await expect(manager.resolveWritePath('../escape.md')).rejects.toThrow(PathTraversalError);
+    });
+
+    it('throws PathTraversalError for empty path', async () => {
+      await expect(manager.resolveWritePath('')).rejects.toThrow(PathTraversalError);
+    });
+
+    it('throws DotfileAccessError for dotfile path', async () => {
+      await expect(manager.resolveWritePath('.hidden/file.md')).rejects.toThrow(DotfileAccessError);
+    });
+
+    it('throws DotfileAccessError for dot segment in path', async () => {
+      await expect(manager.resolveWritePath('folder/.hidden/file.md')).rejects.toThrow(
+        DotfileAccessError,
+      );
+    });
+  });
+
+  describe('createNote()', () => {
+    it('creates a new file on disk and returns { path, created: true }', async () => {
+      const result = await manager.createNote('notes/new-create.md', 'Hello world');
+      expect(result).toEqual({ path: 'notes/new-create.md', created: true });
+      const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'new-create.md'), 'utf-8');
+      expect(diskContent).toContain('Hello world');
+    });
+
+    it('throws FileExistsError when file already exists', async () => {
+      // Create the file first
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'existing-for-create.md'), 'existing');
+      await expect(manager.createNote('notes/existing-for-create.md', 'content')).rejects.toThrow(
+        FileExistsError,
+      );
+    });
+
+    it('auto-creates intermediate directories', async () => {
+      const result = await manager.createNote('deep/nested/auto/note.md', 'Deep content');
+      expect(result.created).toBe(true);
+      const diskContent = await fs.readFile(
+        path.join(vaultRoot, 'deep', 'nested', 'auto', 'note.md'),
+        'utf-8',
+      );
+      expect(diskContent).toContain('Deep content');
+    });
+
+    it('writes YAML frontmatter when frontmatter object is provided', async () => {
+      await manager.createNote('notes/with-fm.md', 'Body text', { title: 'My Title', tags: ['a', 'b'] });
+      const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'with-fm.md'), 'utf-8');
+      expect(diskContent).toContain('title: My Title');
+      expect(diskContent).toContain('Body text');
+      expect(diskContent).toContain('---');
+    });
+
+    it('writes content with trailing newline and no frontmatter block when no frontmatter provided', async () => {
+      await manager.createNote('notes/no-fm.md', 'Plain content');
+      const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'no-fm.md'), 'utf-8');
+      expect(diskContent).toBe('Plain content\n');
+      expect(diskContent).not.toContain('---');
+    });
+
+    it('throws PathTraversalError for traversal attempts', async () => {
+      await expect(manager.createNote('../escape.md', 'content')).rejects.toThrow(
+        PathTraversalError,
+      );
+    });
+  });
+
+  describe('updateContent()', () => {
+    it('replaces file content and returns { path, updated: true }', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'update-me.md'), 'Old content');
+      const result = await manager.updateContent('notes/update-me.md', 'New content');
+      expect(result).toEqual({ path: 'notes/update-me.md', updated: true });
+      const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'update-me.md'), 'utf-8');
+      expect(diskContent).toBe('New content\n');
+    });
+
+    it('throws FileNotFoundError for nonexistent file', async () => {
+      await expect(manager.updateContent('notes/missing.md', 'content')).rejects.toThrow(
+        FileNotFoundError,
+      );
+    });
+  });
+
+  describe('appendContent()', () => {
+    it('appends text after existing content', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'append-me.md'), 'Original content\n');
+      const result = await manager.appendContent('notes/append-me.md', 'Appended text', 'append');
+      expect(result).toEqual({ path: 'notes/append-me.md', updated: true });
+      const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'append-me.md'), 'utf-8');
+      expect(diskContent).toContain('Original content');
+      expect(diskContent).toContain('Appended text');
+      // Appended text should come after
+      expect(diskContent.indexOf('Appended text')).toBeGreaterThan(diskContent.indexOf('Original content'));
+    });
+
+    it('prepends text before existing content', async () => {
+      await fs.writeFile(path.join(vaultRoot, 'notes', 'prepend-me.md'), 'Original content\n');
+      const result = await manager.appendContent('notes/prepend-me.md', 'Prepended text', 'prepend');
+      expect(result).toEqual({ path: 'notes/prepend-me.md', updated: true });
+      const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'prepend-me.md'), 'utf-8');
+      expect(diskContent).toContain('Original content');
+      expect(diskContent).toContain('Prepended text');
+      // Prepended text should come before
+      expect(diskContent.indexOf('Prepended text')).toBeLessThan(diskContent.indexOf('Original content'));
+    });
+
+    it('preserves frontmatter block when appending', async () => {
+      await fs.writeFile(
+        path.join(vaultRoot, 'notes', 'fm-append.md'),
+        '---\ntitle: Test\n---\n\nOriginal body\n',
+      );
+      await manager.appendContent('notes/fm-append.md', 'New appended text', 'append');
+      const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'fm-append.md'), 'utf-8');
+      expect(diskContent).toContain('title: Test');
+      expect(diskContent).toContain('---');
+      expect(diskContent).toContain('Original body');
+      expect(diskContent).toContain('New appended text');
+    });
+
+    it('preserves frontmatter block when prepending', async () => {
+      await fs.writeFile(
+        path.join(vaultRoot, 'notes', 'fm-prepend.md'),
+        '---\ntitle: Test\n---\n\nOriginal body\n',
+      );
+      await manager.appendContent('notes/fm-prepend.md', 'New prepended text', 'prepend');
+      const diskContent = await fs.readFile(path.join(vaultRoot, 'notes', 'fm-prepend.md'), 'utf-8');
+      expect(diskContent).toContain('title: Test');
+      expect(diskContent).toContain('---');
+      expect(diskContent).toContain('Original body');
+      expect(diskContent).toContain('New prepended text');
+      // Frontmatter should still be at the start
+      expect(diskContent.startsWith('---')).toBe(true);
+    });
+
+    it('throws FileNotFoundError for nonexistent file', async () => {
+      await expect(
+        manager.appendContent('notes/missing.md', 'text', 'append'),
+      ).rejects.toThrow(FileNotFoundError);
     });
   });
 });
