@@ -1,14 +1,17 @@
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { buildApp } from '../../app.js';
+
+// Set env vars before any module imports that trigger config parsing
+process.env.COGNIVAULT_API_KEY = 'test-api-key';
+process.env.VAULT_PATH = '/tmp/test-vault';
+
+const { buildApp } = await import('../../app.js');
 
 describe('auth plugin', () => {
   let app: FastifyInstance;
   const API_KEY = 'test-api-key';
 
   beforeAll(async () => {
-    process.env.COGNIVAULT_API_KEY = API_KEY;
-    process.env.VAULT_PATH = '/tmp/test-vault';
     app = await buildApp({ logger: false });
 
     // Register a test-only protected route (no skipAuth config)
