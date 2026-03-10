@@ -12,7 +12,7 @@ CogniVault is built bottom-up following hard data flow dependencies: vault abstr
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Project Skeleton** - Fastify scaffold, Docker, health endpoints, API key auth
+- [x] **Phase 1: Project Skeleton** - Fastify scaffold, Docker, health endpoints, API key auth (completed 2026-03-10)
 - [ ] **Phase 2: Vault Read Operations** - Vault manager, path safety, list/read files, frontmatter read
 - [ ] **Phase 3: Vault Write Operations** - Create, update, append, delete, rename, frontmatter write
 - [ ] **Phase 4: Index State + Change Detection** - SQLite state tracking, filesystem polling, content hashing
@@ -215,7 +215,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Project Skeleton | 0/3 | Not started | - |
+| 1. Project Skeleton | 3/3 | Complete   | 2026-03-10 |
 | 2. Vault Read Operations | 0/3 | Not started | - |
 | 3. Vault Write Operations | 0/3 | Not started | - |
 | 4. Index State + Change Detection | 0/3 | Not started | - |
