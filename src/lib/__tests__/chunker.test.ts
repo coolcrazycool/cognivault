@@ -1,11 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import type { ChunkOptions } from '../chunker.js';
 import {
   chunkMarkdown,
-  normalizeObsidianSyntax,
-  MIN_CHUNK_TOKENS,
   MAX_CHUNK_TOKENS,
+  MIN_CHUNK_TOKENS,
+  normalizeObsidianSyntax,
 } from '../chunker.js';
-import type { ChunkOptions } from '../chunker.js';
 
 // Helper to generate a long paragraph to exceed MAX_CHUNK_TOKENS
 function generateLongParagraph(words: number): string {
@@ -26,9 +26,7 @@ describe('normalizeObsidianSyntax', () => {
   });
 
   it('strips ![[embed]] embeds', () => {
-    expect(normalizeObsidianSyntax('Before ![[embedded-note]] after')).toBe(
-      'Before  after',
-    );
+    expect(normalizeObsidianSyntax('Before ![[embedded-note]] after')).toBe('Before  after');
   });
 
   it('keeps callout text as-is', () => {
@@ -72,13 +70,16 @@ describe('chunkMarkdown - frontmatter handling', () => {
 
 describe('chunkMarkdown - IDX-03: heading boundary splitting', () => {
   it('splits at H1 and H2 heading boundaries', () => {
-    const body = '# H1\n\nParagraph 1\n\n## H2\n\nParagraph 2';
+    // Use content >= MIN_CHUNK_TOKENS per section so each stays as its own chunk
+    const para1 = generateLongParagraph(110); // ~110 tokens
+    const para2 = generateLongParagraph(110);
+    const body = `# H1\n\n${para1}\n\n## H2\n\n${para2}`;
     const opts: ChunkOptions = { title: 'Test Note' };
     const chunks = chunkMarkdown(body, opts);
 
     expect(chunks.length).toBe(2);
-    expect(chunks[0].sectionPath).toBe('Test Note');
-    expect(chunks[1].sectionPath).toBe('Test Note > H2');
+    expect(chunks[0]?.sectionPath).toBe('Test Note');
+    expect(chunks[1]?.sectionPath).toBe('Test Note > H2');
   });
 
   it('does NOT split at heading inside a fenced code block', () => {
@@ -98,7 +99,7 @@ describe('chunkMarkdown - IDX-03: heading boundary splitting', () => {
 
     // Only one section (H1), code block heading should not create a new chunk
     expect(chunks.length).toBe(1);
-    expect(chunks[0].sectionPath).toBe('Code Note');
+    expect(chunks[0]?.sectionPath).toBe('Code Note');
   });
 
   it('keeps GFM table whole and attached to its section', () => {
@@ -118,8 +119,8 @@ describe('chunkMarkdown - IDX-03: heading boundary splitting', () => {
 
     // All content should be in one chunk for this section
     expect(chunks.length).toBe(1);
-    expect(chunks[0].text).toContain('Col A');
-    expect(chunks[0].text).toContain('cell1');
+    expect(chunks[0]?.text).toContain('Col A');
+    expect(chunks[0]?.text).toContain('cell1');
   });
 
   it('creates single section for note with no headings', () => {
@@ -128,13 +129,21 @@ describe('chunkMarkdown - IDX-03: heading boundary splitting', () => {
     const chunks = chunkMarkdown(body, opts);
 
     expect(chunks.length).toBe(1);
-    expect(chunks[0].sectionPath).toBe('Plain Note');
+    expect(chunks[0]?.sectionPath).toBe('Plain Note');
   });
 });
 
 describe('chunkMarkdown - IDX-03: short section merging', () => {
   it('merges short H2 section (<100 tokens) into parent section', () => {
-    const body = ['## Parent Section', '', 'This is longer parent content that has some meaningful text.', '', '### Short Child', '', 'Tiny.'].join('\n');
+    const body = [
+      '## Parent Section',
+      '',
+      'This is longer parent content that has some meaningful text.',
+      '',
+      '### Short Child',
+      '',
+      'Tiny.',
+    ].join('\n');
     const opts: ChunkOptions = { title: 'Merge Note' };
     const chunks = chunkMarkdown(body, opts);
 
@@ -194,7 +203,11 @@ describe('chunkMarkdown - IDX-03: long section splitting', () => {
 
 describe('chunkMarkdown - IDX-04: section path metadata', () => {
   it('creates hierarchical section path for nested headings', () => {
-    const body = '# Title\n\nIntro\n\n## Section\n\nContent\n\n### Sub\n\nSub content';
+    // Use content >= MIN_CHUNK_TOKENS per section so each section produces its own chunk
+    const intro = generateLongParagraph(110);
+    const content = generateLongParagraph(110);
+    const subContent = generateLongParagraph(110);
+    const body = `# Title\n\n${intro}\n\n## Section\n\n${content}\n\n### Sub\n\n${subContent}`;
     const opts: ChunkOptions = { title: 'Hierarchy Note' };
     const chunks = chunkMarkdown(body, opts);
 
@@ -205,7 +218,10 @@ describe('chunkMarkdown - IDX-04: section path metadata', () => {
   });
 
   it('resets hierarchy when same-level heading follows', () => {
-    const body = '## A\n\nContent A\n\n## B\n\nContent B';
+    // Use content >= MIN_CHUNK_TOKENS per section so each section produces its own chunk
+    const contentA = generateLongParagraph(110);
+    const contentB = generateLongParagraph(110);
+    const body = `## A\n\n${contentA}\n\n## B\n\n${contentB}`;
     const opts: ChunkOptions = { title: 'Sibling Note' };
     const chunks = chunkMarkdown(body, opts);
 
@@ -217,7 +233,10 @@ describe('chunkMarkdown - IDX-04: section path metadata', () => {
   });
 
   it('handles H3 after H1 (skipping H2) correctly', () => {
-    const body = '# Top\n\nContent\n\n### Deep\n\nDeep content';
+    // Use content >= MIN_CHUNK_TOKENS per section
+    const topContent = generateLongParagraph(110);
+    const deepContent = generateLongParagraph(110);
+    const body = `# Top\n\n${topContent}\n\n### Deep\n\n${deepContent}`;
     const opts: ChunkOptions = { title: 'Skip Note' };
     const chunks = chunkMarkdown(body, opts);
 
@@ -234,7 +253,7 @@ describe('chunkMarkdown - chunk text format', () => {
     const chunks = chunkMarkdown(body, opts);
 
     expect(chunks.length).toBeGreaterThan(0);
-    expect(chunks[0].text).toMatch(/^My Note > My Section\n\n/);
+    expect(chunks[0]?.text).toMatch(/^My Note > My Section\n\n/);
   });
 
   it('prepends just note title for top-level content', () => {
@@ -243,7 +262,7 @@ describe('chunkMarkdown - chunk text format', () => {
     const chunks = chunkMarkdown(body, opts);
 
     expect(chunks.length).toBeGreaterThan(0);
-    expect(chunks[0].text).toMatch(/^Simple Note\n\n/);
+    expect(chunks[0]?.text).toMatch(/^Simple Note\n\n/);
   });
 });
 
@@ -253,8 +272,8 @@ describe('chunkMarkdown - Obsidian syntax normalization', () => {
     const opts: ChunkOptions = { title: 'Wiki Note' };
     const chunks = chunkMarkdown(body, opts);
 
-    expect(chunks[0].text).toContain('Other Note');
-    expect(chunks[0].text).not.toContain('[[');
+    expect(chunks[0]?.text).toContain('Other Note');
+    expect(chunks[0]?.text).not.toContain('[[');
   });
 
   it('normalizes aliased wikilinks in chunk text', () => {
@@ -262,8 +281,8 @@ describe('chunkMarkdown - Obsidian syntax normalization', () => {
     const opts: ChunkOptions = { title: 'Alias Note' };
     const chunks = chunkMarkdown(body, opts);
 
-    expect(chunks[0].text).toContain('display name');
-    expect(chunks[0].text).not.toContain('[[');
+    expect(chunks[0]?.text).toContain('display name');
+    expect(chunks[0]?.text).not.toContain('[[');
   });
 
   it('strips embeds from chunk text', () => {
@@ -271,8 +290,8 @@ describe('chunkMarkdown - Obsidian syntax normalization', () => {
     const opts: ChunkOptions = { title: 'Embed Note' };
     const chunks = chunkMarkdown(body, opts);
 
-    expect(chunks[0].text).not.toContain('![[');
-    expect(chunks[0].text).not.toContain('embedded-note');
+    expect(chunks[0]?.text).not.toContain('![[');
+    expect(chunks[0]?.text).not.toContain('embedded-note');
   });
 });
 
