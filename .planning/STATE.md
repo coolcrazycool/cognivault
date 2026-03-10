@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 05-01-PLAN.md (heading-aware markdown chunker)
-last_updated: "2026-03-10T21:30:00.000Z"
+stopped_at: Completed 05-03-PLAN.md (indexing pipeline plugin)
+last_updated: "2026-03-10T18:41:09.723Z"
 last_activity: 2026-03-10 — Completed plan 05-01 (heading-aware markdown chunker)
 progress:
   total_phases: 11
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 15
-  completed_plans: 13
+  completed_plans: 15
   percent: 15
 ---
 
@@ -59,6 +59,7 @@ Progress: [▓▓░░░░░░░░] 15%
 | Phase 04-index-state-+-change-detection P02 | 578 | 2 tasks | 6 files |
 | Phase 04-index-state-+-change-detection P03 | 5min | 1 tasks | 3 files |
 | Phase 05-markdown-indexing-pipeline P02 | 4min | 2 tasks | 9 files |
+| Phase 05 P03 | 7min | 1 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -110,6 +111,9 @@ Recent decisions affecting current work:
 - [Phase 05-02]: embedding plugin named 'embedder' (not 'embedding') to match qdrant plugin dependency declaration
 - [Phase 05-02]: Qdrant idempotent init: skip collection AND indexes if collection already exists
 - [Phase 05-02]: Class mock syntax required for OpenAI mock in vitest — arrow function mocks not constructable with new
+- [Phase 05]: Pipeline is a Fastify plugin with fp() wrapping; dependencies on indexer/qdrant/embedder/vault/db enforce registration order
+- [Phase 05]: UUID v5 with DNS namespace generates deterministic chunk IDs from '{path}:{chunk_index}'
+- [Phase 05]: Stale vector cleanup via qdrant.delete with chunk_index range filter applied on both created and updated events
 
 ### Pending Todos
 
@@ -121,6 +125,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T18:26:02.915Z
-Stopped at: Completed 05-02-PLAN.md
+Last session: 2026-03-10T18:41:03.759Z
+Stopped at: Completed 05-03-PLAN.md (indexing pipeline plugin)
 Resume file: None

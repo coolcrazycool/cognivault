@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Vault Read Operations** - Vault manager, path safety, list/read files, frontmatter read (completed 2026-03-10)
 - [x] **Phase 3: Vault Write Operations** - Create, update, append, delete, rename, frontmatter write (completed 2026-03-10)
 - [x] **Phase 4: Index State + Change Detection** - SQLite state tracking, filesystem polling, content hashing (completed 2026-03-10)
-- [ ] **Phase 5: Markdown Indexing Pipeline** - Heading-aware chunking, embedding, Qdrant upsert, stale cleanup
+- [x] **Phase 5: Markdown Indexing Pipeline** - Heading-aware chunking, embedding, Qdrant upsert, stale cleanup (completed 2026-03-10)
 - [ ] **Phase 6: Semantic + Lexical Search** - Qdrant ANN search, FTS5/BM25 lexical search, metadata filtering
 - [ ] **Phase 7: Hybrid Retrieval + Reranking** - RRF fusion, cross-encoder reranking, multilingual validation
 - [ ] **Phase 8: Context Pack Assembly** - Token-budgeted knowledge bundles with relevance floor and source citations
@@ -218,7 +218,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 2. Vault Read Operations | 3/3 | Complete   | 2026-03-10 |
 | 3. Vault Write Operations | 3/3 | Complete   | 2026-03-10 |
 | 4. Index State + Change Detection | 3/3 | Complete   | 2026-03-10 |
-| 5. Markdown Indexing Pipeline | 2/3 | In Progress|  |
+| 5. Markdown Indexing Pipeline | 3/3 | Complete   | 2026-03-10 |
 | 6. Semantic + Lexical Search | 0/3 | Not started | - |
 | 7. Hybrid Retrieval + Reranking | 0/3 | Not started | - |
 | 8. Context Pack Assembly | 0/3 | Not started | - |
