@@ -68,12 +68,12 @@ Plans:
   3. Agent can delete a note by path and the file is removed from disk
   4. Agent can rename or move a note to a new path, preserving content
   5. Agent can update individual frontmatter fields without corrupting note body or other metadata
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 03-01: Create, update, and append/prepend endpoints with atomic writes
-- [ ] 03-02: Delete and rename/move endpoints
-- [ ] 03-03: Frontmatter update endpoint with corruption protection
+- [ ] 03-01-PLAN.md — Create, update, and append/prepend endpoints with atomic writes
+- [ ] 03-02-PLAN.md — Delete and rename/move endpoints
+- [ ] 03-03-PLAN.md — Frontmatter update endpoint with shallow merge and null-delete
 
 ### Phase 4: Index State + Change Detection
 **Goal**: Service automatically detects vault changes and tracks index state in SQLite
