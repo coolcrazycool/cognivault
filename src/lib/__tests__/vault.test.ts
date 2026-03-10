@@ -196,9 +196,7 @@ describe('VaultManager', () => {
 
     it('combines recursive and ext filters', async () => {
       const result = await manager.listFiles({ ext: 'txt', recursive: true });
-      const filePaths = result.entries
-        .filter((e) => e.type === 'file')
-        .map((e) => e.path);
+      const filePaths = result.entries.filter((e) => e.type === 'file').map((e) => e.path);
       expect(filePaths).toContain('notes/daily/tuesday.txt');
       // Should not include .md files
       for (const p of filePaths) {
