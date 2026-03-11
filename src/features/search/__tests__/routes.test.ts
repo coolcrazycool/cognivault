@@ -243,6 +243,204 @@ describe('search routes', () => {
     });
   });
 
+  describe('POST /api/vault/search/hybrid', () => {
+    it('returns 200 with correct SearchResponse shape', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'test query' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.results).toBeDefined();
+      expect(Array.isArray(body.results)).toBe(true);
+      expect(body.total).toBeTypeOf('number');
+      expect(body.limit).toBeTypeOf('number');
+      expect(body.query_ms).toBeTypeOf('number');
+    });
+
+    it('calls both qdrant.search (semantic) AND qdrant.scroll (lexical)', async () => {
+      await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'hybrid test' },
+      });
+
+      expect(mockQdrantSearch).toHaveBeenCalled();
+      expect(mockQdrantScroll).toHaveBeenCalled();
+    });
+
+    it('calls semantic with 2x the requested limit', async () => {
+      await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'hybrid test', limit: 5 },
+      });
+
+      // semantic uses qdrant.search — it should receive limit=10 (2x)
+      expect(mockQdrantSearch).toHaveBeenCalledWith(
+        'cognivault',
+        expect.objectContaining({ limit: 10 }),
+      );
+    });
+
+    it('calls lexical with 2x the requested limit', async () => {
+      await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'hybrid test', limit: 5 },
+      });
+
+      // lexical uses qdrant.scroll
+      expect(mockQdrantScroll).toHaveBeenCalled();
+    });
+
+    it('deduplicates same-path results with accumulated RRF score', async () => {
+      // Both semantic and lexical return a result with the same path
+      const sharedPath = 'notes/shared.md';
+      mockQdrantSearch.mockResolvedValueOnce([
+        {
+          id: 'uuid-s1',
+          score: 0.9,
+          payload: {
+            text: 'shared text',
+            path: sharedPath,
+            title: 'shared',
+            section_path: 'shared > intro',
+            tags: [],
+            project: null,
+            status: null,
+            type: null,
+          },
+        },
+      ]);
+      mockQdrantScroll.mockResolvedValueOnce({
+        points: [
+          {
+            id: 'uuid-l1',
+            payload: {
+              text: 'shared text',
+              path: sharedPath,
+              title: 'shared',
+              section_path: 'shared > intro',
+              tags: [],
+              project: null,
+              status: null,
+              type: null,
+            },
+          },
+        ],
+      });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'shared', limit: 10 },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      // The shared path should appear only once (deduplicated)
+      const sharedResults = body.results.filter(
+        (r: { path: string }) => r.path === sharedPath,
+      );
+      expect(sharedResults).toHaveLength(1);
+      // Score should be > 1/(1+60) since it accumulated from both sources
+      const singleRrfScore = 1 / (1 + 60);
+      expect(sharedResults[0].score).toBeGreaterThan(singleRrfScore);
+    });
+
+    it('degrades gracefully when semantic returns empty — returns lexical results', async () => {
+      mockQdrantSearch.mockResolvedValueOnce([]);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'test' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.results.length).toBeGreaterThan(0);
+    });
+
+    it('degrades gracefully when lexical returns empty — returns semantic results', async () => {
+      mockQdrantScroll.mockResolvedValueOnce({ points: [] });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'test' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.results.length).toBeGreaterThan(0);
+    });
+
+    it('hybrid scores are in [0, 1] range', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'test' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      for (const result of body.results) {
+        expect(result.score).toBeGreaterThanOrEqual(0);
+        expect(result.score).toBeLessThanOrEqual(1);
+      }
+    });
+
+    it('returns 400 with empty query', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        payload: { query: '' },
+      });
+
+      expect(response.statusCode).toBe(400);
+    });
+
+    it('returns 401 without auth token', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { 'content-type': 'application/json' },
+        payload: { query: 'test' },
+      });
+
+      expect(response.statusCode).toBe(401);
+    });
+
+    it('response includes total, limit, query_ms fields', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'test', limit: 6 },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.total).toBe(body.results.length);
+      expect(body.limit).toBe(6);
+      expect(typeof body.query_ms).toBe('number');
+      expect(body.query_ms).toBeGreaterThanOrEqual(0);
+    });
+  });
+
   describe('POST /api/vault/search/lexical', () => {
     it('returns 200 with correct result shape and score is 1.0', async () => {
       const response = await app.inject({
