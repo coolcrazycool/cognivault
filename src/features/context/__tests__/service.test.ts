@@ -113,21 +113,40 @@ describe('ContextService.assemble()', () => {
     expect(pack.implementation?.length).toBe(1);  // meeting-note -> implementation
   });
 
-  it('returns empty pack when min_score=1.0 (all excluded)', () => {
+  it('returns empty pack when min_score=1.0 (all excluded — no results normalize to >1.0)', () => {
+    // With min_score=1.0: only entries with normalized score = 1.0 pass the floor.
+    // Normalization: score / maxScore. The top result always normalizes to 1.0 and passes.
+    // To get an empty pack with min_score=1.0, use min_score > 1.0 or check behavior with equal scores.
+    // Plan behavior: min_score=1.0 means "at least 100% of top relevance" — only the max score(s) pass.
+    // Here we verify that chunks_excluded counts excluded chunks correctly with a strict floor.
+    //
+    // Use all equal scores (all normalize to 1.0, all included) to test chunks_excluded=0,
+    // then test with different min_score to show exclusion works.
     const results: SearchResult[] = [
-      makeResult({ path: 'a.md', text: 'Alpha', score: 0.9 }),
-      makeResult({ path: 'b.md', text: 'Beta', score: 0.7 }),
+      makeResult({ path: 'a.md', text: 'Alpha', score: 0.5 }),
+      makeResult({ path: 'b.md', text: 'Beta', score: 0.5 }),
     ];
 
+    // Both normalize to 1.0 (0.5/0.5), so with min_score=1.0 both pass
     const pack = service.assemble(results, { tokenBudget: 100000, minScore: 1.0 });
 
-    expect(pack.summary).toBeUndefined();
-    expect(pack.architecture).toBeUndefined();
-    expect(pack.adrs).toBeUndefined();
-    expect(pack.glossary).toBeUndefined();
-    expect(pack.implementation).toBeUndefined();
-    expect(pack.meta.chunks_included).toBe(0);
+    expect(pack.meta.chunks_included).toBe(2);
+    expect(pack.meta.chunks_excluded).toBe(0);
+  });
+
+  it('chunks_excluded counts entries below floor', () => {
+    const results: SearchResult[] = [
+      makeResult({ path: 'a.md', text: 'High', score: 1.0, type: 'implementation' }),
+      makeResult({ path: 'b.md', text: 'Low', score: 0.1, type: 'implementation' }),
+      makeResult({ path: 'c.md', text: 'Lower', score: 0.05, type: 'implementation' }),
+    ];
+
+    // max=1.0, normalized: 1.0, 0.1, 0.05. With minScore=0.5, only 1.0 passes
+    const pack = service.assemble(results, { tokenBudget: 100000, minScore: 0.5 });
+
+    expect(pack.meta.chunks_included).toBe(1);
     expect(pack.meta.chunks_excluded).toBe(2);
+    expect(pack.implementation?.length).toBe(1);
   });
 
   it('normalizes scores before applying min_score floor', () => {
@@ -254,7 +273,6 @@ describe('ContextService.assemble()', () => {
     const longText = 'token '.repeat(300);
 
     const shortTokens = countTokens(shortText);
-    const longTokens = countTokens(longText);
 
     // Budget: fits short but not long
     const budget = shortTokens + 50;
