@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { ContextService, countTokens } from '../service.js';
 import type { SearchResult } from '../../search/schemas.js';
+import { ContextService, countTokens } from '../service.js';
 
 // Helper to build a mock SearchResult
-function makeResult(overrides: Partial<SearchResult> & { path: string; text: string; score: number }): SearchResult {
+function makeResult(
+  overrides: Partial<SearchResult> & { path: string; text: string; score: number },
+): SearchResult {
   return {
     title: 'Test Note',
     section_path: 'section',
@@ -106,11 +108,11 @@ describe('ContextService.assemble()', () => {
 
     const pack = service.assemble(results, { tokenBudget: 100000, minScore: 0 });
 
-    expect(pack.summary?.length).toBe(2);  // summary + overview
-    expect(pack.architecture?.length).toBe(2);  // architecture + arch
-    expect(pack.adrs?.length).toBe(2);  // adr + decision
-    expect(pack.glossary?.length).toBe(2);  // glossary + definition
-    expect(pack.implementation?.length).toBe(1);  // meeting-note -> implementation
+    expect(pack.summary?.length).toBe(2); // summary + overview
+    expect(pack.architecture?.length).toBe(2); // architecture + arch
+    expect(pack.adrs?.length).toBe(2); // adr + decision
+    expect(pack.glossary?.length).toBe(2); // glossary + definition
+    expect(pack.implementation?.length).toBe(1); // meeting-note -> implementation
   });
 
   it('returns empty pack when min_score=1.0 (all excluded — no results normalize to >1.0)', () => {
@@ -211,8 +213,18 @@ describe('ContextService.assemble()', () => {
   it('classifies by folder heuristic when type field is null', () => {
     const results: SearchResult[] = [
       makeResult({ path: 'docs/adr/001.md', text: 'ADR note', score: 1.0, type: null }),
-      makeResult({ path: 'docs/decisions/decision-1.md', text: 'Decision', score: 0.9, type: null }),
-      makeResult({ path: 'docs/architecture/overview.md', text: 'Arch note', score: 0.8, type: null }),
+      makeResult({
+        path: 'docs/decisions/decision-1.md',
+        text: 'Decision',
+        score: 0.9,
+        type: null,
+      }),
+      makeResult({
+        path: 'docs/architecture/overview.md',
+        text: 'Arch note',
+        score: 0.8,
+        type: null,
+      }),
       makeResult({ path: 'docs/arch/diagram.md', text: 'Arch diagram', score: 0.7, type: null }),
       makeResult({ path: 'docs/glossary/terms.md', text: 'Glossary', score: 0.6, type: null }),
       makeResult({ path: 'docs/definitions/def.md', text: 'Definition', score: 0.5, type: null }),

@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
+import { SearchService } from '../search/service.js';
 import type { ContextRequestBody } from './schemas.js';
 import { contextSchema } from './schemas.js';
 import { ContextService } from './service.js';
-import { SearchService } from '../search/service.js';
 
 export async function contextRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post<{ Body: ContextRequestBody }>(
