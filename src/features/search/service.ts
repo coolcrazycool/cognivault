@@ -114,29 +114,20 @@ export class SearchService {
     const RRF_K = 60;
     const scoreMap = new Map<string, { result: SearchResult; score: number }>();
 
-    // Accumulate RRF scores for semantic results (1-based rank)
-    for (let i = 0; i < semanticResults.length; i++) {
-      const result = semanticResults[i];
-      const rrfScore = 1 / (i + 1 + RRF_K);
-      const existing = scoreMap.get(result.path);
-      if (existing) {
-        existing.score += rrfScore;
-      } else {
-        scoreMap.set(result.path, { result, score: rrfScore });
-      }
-    }
+    const accumulateRRF = (results: SearchResult[]): void => {
+      results.forEach((result, i) => {
+        const rrfScore = 1 / (i + 1 + RRF_K);
+        const existing = scoreMap.get(result.path);
+        if (existing) {
+          existing.score += rrfScore;
+        } else {
+          scoreMap.set(result.path, { result, score: rrfScore });
+        }
+      });
+    };
 
-    // Accumulate RRF scores for lexical results (1-based rank)
-    for (let i = 0; i < lexicalResults.length; i++) {
-      const result = lexicalResults[i];
-      const rrfScore = 1 / (i + 1 + RRF_K);
-      const existing = scoreMap.get(result.path);
-      if (existing) {
-        existing.score += rrfScore;
-      } else {
-        scoreMap.set(result.path, { result, score: rrfScore });
-      }
-    }
+    accumulateRRF(semanticResults);
+    accumulateRRF(lexicalResults);
 
     // Sort by fused score descending, take top limit, clamp scores to [0, 1]
     return Array.from(scoreMap.values())

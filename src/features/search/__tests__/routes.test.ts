@@ -347,9 +347,7 @@ describe('search routes', () => {
       expect(response.statusCode).toBe(200);
       const body = response.json();
       // The shared path should appear only once (deduplicated)
-      const sharedResults = body.results.filter(
-        (r: { path: string }) => r.path === sharedPath,
-      );
+      const sharedResults = body.results.filter((r: { path: string }) => r.path === sharedPath);
       expect(sharedResults).toHaveLength(1);
       // Score should be > 1/(1+60) since it accumulated from both sources
       const singleRrfScore = 1 / (1 + 60);
