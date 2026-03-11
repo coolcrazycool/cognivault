@@ -1,0 +1,319 @@
+{
+  "queries": [
+    {
+      "id": "en-01",
+      "category": "english",
+      "query": "Compass catalog UI filters and pagination",
+      "relevant_paths": [
+        "Projects/Compass/catalog-filters.md",
+        "Projects/Compass/ui-components.md"
+      ]
+    },
+    {
+      "id": "en-02",
+      "category": "english",
+      "query": "schema evolution rules and backward compatibility",
+      "relevant_paths": [
+        "Architecture/schema-evolution.md",
+        "Architecture/api-versioning.md"
+      ]
+    },
+    {
+      "id": "en-03",
+      "category": "english",
+      "query": "ingestion pipeline architecture and metadata routing",
+      "relevant_paths": [
+        "Architecture/ingestion-pipeline.md",
+        "Projects/Compass/metadata-routes.md"
+      ]
+    },
+    {
+      "id": "en-04",
+      "category": "english",
+      "query": "SLA ownership and monitoring setup",
+      "relevant_paths": [
+        "Operations/sla-ownership.md",
+        "Operations/monitoring-setup.md"
+      ]
+    },
+    {
+      "id": "en-05",
+      "category": "english",
+      "query": "deployment procedures for production release",
+      "relevant_paths": [
+        "Operations/deployment-procedures.md",
+        "Operations/release-checklist.md"
+      ]
+    },
+    {
+      "id": "en-06",
+      "category": "english",
+      "query": "API versioning strategy and deprecation policy",
+      "relevant_paths": [
+        "Architecture/api-versioning.md",
+        "Architecture/deprecation-policy.md"
+      ]
+    },
+    {
+      "id": "en-07",
+      "category": "english",
+      "query": "database migration patterns and rollback strategy",
+      "relevant_paths": [
+        "Architecture/migration-patterns.md",
+        "Architecture/database-design.md"
+      ]
+    },
+    {
+      "id": "en-08",
+      "category": "english",
+      "query": "test coverage requirements and integration testing approach",
+      "relevant_paths": [
+        "Engineering/test-coverage.md",
+        "Engineering/integration-testing.md"
+      ]
+    },
+    {
+      "id": "en-09",
+      "category": "english",
+      "query": "data modeling guidelines for relational schemas",
+      "relevant_paths": [
+        "Architecture/data-modeling.md",
+        "Architecture/database-design.md"
+      ]
+    },
+    {
+      "id": "en-10",
+      "category": "english",
+      "query": "GraphQL schema design and resolver patterns",
+      "relevant_paths": [
+        "Architecture/graphql-schema.md",
+        "Architecture/schema-evolution.md"
+      ]
+    },
+    {
+      "id": "ru-01",
+      "category": "russian",
+      "query": "архитектурные решения по выбору базы данных",
+      "relevant_paths": [
+        "Architecture/database-design.md",
+        "Architecture/adr-database-choice.md"
+      ]
+    },
+    {
+      "id": "ru-02",
+      "category": "russian",
+      "query": "статус проекта и текущие задачи спринта",
+      "relevant_paths": [
+        "Projects/Compass/project-status.md",
+        "Projects/Compass/sprint-backlog.md"
+      ]
+    },
+    {
+      "id": "ru-03",
+      "category": "russian",
+      "query": "заметки с встречи по планированию архитектуры",
+      "relevant_paths": [
+        "Meetings/architecture-planning.md",
+        "Meetings/weekly-sync.md"
+      ]
+    },
+    {
+      "id": "ru-04",
+      "category": "russian",
+      "query": "процесс ревью кода и стандарты оформления",
+      "relevant_paths": [
+        "Engineering/code-review-process.md",
+        "Engineering/coding-standards.md"
+      ]
+    },
+    {
+      "id": "ru-05",
+      "category": "russian",
+      "query": "документация по онбордингу новых разработчиков",
+      "relevant_paths": [
+        "Team/onboarding.md",
+        "Team/developer-guide.md"
+      ]
+    },
+    {
+      "id": "ru-06",
+      "category": "russian",
+      "query": "настройка инфраструктуры и конфигурация серверов",
+      "relevant_paths": [
+        "Infrastructure/server-configuration.md",
+        "Infrastructure/infrastructure-setup.md"
+      ]
+    },
+    {
+      "id": "ru-07",
+      "category": "russian",
+      "query": "проектирование базы данных и нормализация таблиц",
+      "relevant_paths": [
+        "Architecture/database-design.md",
+        "Architecture/data-modeling.md"
+      ]
+    },
+    {
+      "id": "ru-08",
+      "category": "russian",
+      "query": "политика безопасности и управление доступом",
+      "relevant_paths": [
+        "Security/access-control.md",
+        "Security/security-policy.md"
+      ]
+    },
+    {
+      "id": "ru-09",
+      "category": "russian",
+      "query": "рабочие процессы команды и методология разработки",
+      "relevant_paths": [
+        "Team/team-workflows.md",
+        "Engineering/development-methodology.md"
+      ]
+    },
+    {
+      "id": "ru-10",
+      "category": "russian",
+      "query": "стандарты документации и шаблоны технических спецификаций",
+      "relevant_paths": [
+        "Engineering/documentation-standards.md",
+        "Engineering/spec-templates.md"
+      ]
+    },
+    {
+      "id": "mixed-01",
+      "category": "mixed",
+      "query": "Compass catalog ui filters настройка",
+      "relevant_paths": [
+        "Projects/Compass/catalog-filters.md",
+        "Projects/Compass/ui-components.md"
+      ]
+    },
+    {
+      "id": "mixed-02",
+      "category": "mixed",
+      "query": "как устроен ingestion metadata routes",
+      "relevant_paths": [
+        "Architecture/ingestion-pipeline.md",
+        "Projects/Compass/metadata-routes.md"
+      ]
+    },
+    {
+      "id": "mixed-03",
+      "category": "mixed",
+      "query": "SLA ownership tabs мониторинг",
+      "relevant_paths": [
+        "Operations/sla-ownership.md",
+        "Operations/monitoring-setup.md"
+      ]
+    },
+    {
+      "id": "mixed-04",
+      "category": "mixed",
+      "query": "schema evolution rules для GraphQL",
+      "relevant_paths": [
+        "Architecture/schema-evolution.md",
+        "Architecture/graphql-schema.md"
+      ]
+    },
+    {
+      "id": "mixed-05",
+      "category": "mixed",
+      "query": "deployment pipeline автоматизация CI/CD",
+      "relevant_paths": [
+        "Operations/deployment-procedures.md",
+        "Infrastructure/cicd-pipeline.md"
+      ]
+    },
+    {
+      "id": "mixed-06",
+      "category": "mixed",
+      "query": "database migration стратегия rollback",
+      "relevant_paths": [
+        "Architecture/migration-patterns.md",
+        "Architecture/database-design.md"
+      ]
+    },
+    {
+      "id": "mixed-07",
+      "category": "mixed",
+      "query": "API versioning политика совместимости",
+      "relevant_paths": [
+        "Architecture/api-versioning.md",
+        "Architecture/deprecation-policy.md"
+      ]
+    },
+    {
+      "id": "mixed-08",
+      "category": "mixed",
+      "query": "тестирование integration tests покрытие",
+      "relevant_paths": [
+        "Engineering/integration-testing.md",
+        "Engineering/test-coverage.md"
+      ]
+    },
+    {
+      "id": "mixed-09",
+      "category": "mixed",
+      "query": "onboarding документация для новых разработчиков",
+      "relevant_paths": [
+        "Team/onboarding.md",
+        "Team/developer-guide.md"
+      ]
+    },
+    {
+      "id": "mixed-10",
+      "category": "mixed",
+      "query": "security policy доступ к production",
+      "relevant_paths": [
+        "Security/security-policy.md",
+        "Security/access-control.md"
+      ]
+    },
+    {
+      "id": "mixed-11",
+      "category": "mixed",
+      "query": "code review процесс pull request стандарты",
+      "relevant_paths": [
+        "Engineering/code-review-process.md",
+        "Engineering/coding-standards.md"
+      ]
+    },
+    {
+      "id": "mixed-12",
+      "category": "mixed",
+      "query": "GraphQL resolver оптимизация запросов",
+      "relevant_paths": [
+        "Architecture/graphql-schema.md",
+        "Architecture/data-modeling.md"
+      ]
+    },
+    {
+      "id": "mixed-13",
+      "category": "mixed",
+      "query": "Compass project status спринт backlog",
+      "relevant_paths": [
+        "Projects/Compass/project-status.md",
+        "Projects/Compass/sprint-backlog.md"
+      ]
+    },
+    {
+      "id": "mixed-14",
+      "category": "mixed",
+      "query": "архитектура ingestion pipeline chunking стратегия",
+      "relevant_paths": [
+        "Architecture/ingestion-pipeline.md",
+        "Architecture/data-modeling.md"
+      ]
+    },
+    {
+      "id": "mixed-15",
+      "category": "mixed",
+      "query": "infrastructure setup конфигурация Docker Kubernetes",
+      "relevant_paths": [
+        "Infrastructure/infrastructure-setup.md",
+        "Infrastructure/server-configuration.md"
+      ]
+    }
+  ]
+}
