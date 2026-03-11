@@ -147,12 +147,11 @@ Plans:
   2. Context pack respects configurable token budget (default ~32K, adjustable per request)
   3. Context pack includes relevant chunks organized by type (summary, architecture, ADRs, implementation) with source citations
   4. Context pack applies relevance floor filtering, excluding low-relevance chunks rather than greedy bin-packing
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 08-01: Context pack endpoint with token budget and relevance floor
-- [ ] 08-02: Structured assembly with section types and source attribution
-- [ ] 08-03: Position-aware ordering (high-relevance at start/end) and deduplication
+- [ ] 08-01-PLAN.md — Schemas, SearchResult type fix, and ContextService assembly pipeline
+- [ ] 08-02-PLAN.md — Context route handler, app registration, and integration tests
 
 ### Phase 9: TOON + API Polish
 **Goal**: Agents communicate with CogniVault using either JSON or TOON for ~40% token savings
@@ -219,7 +218,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 5. Markdown Indexing Pipeline | 3/3 | Complete   | 2026-03-10 |
 | 6. Semantic + Lexical Search | 2/2 | Complete   | 2026-03-11 |
 | 7. Hybrid Retrieval + Reranking | 2/2 | Complete   | 2026-03-11 |
-| 8. Context Pack Assembly | 0/3 | Not started | - |
+| 8. Context Pack Assembly | 0/2 | Not started | - |
 | 9. TOON + API Polish | 0/3 | Not started | - |
 | 10. Multi-Format Indexing | 0/3 | Not started | - |
 | 11. Observability + Admin | 0/4 | Not started | - |
