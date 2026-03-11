@@ -34,6 +34,7 @@ export const SearchResultSchema = Type.Object({
   tags: Type.Array(Type.String()),
   project: Type.Union([Type.String(), Type.Null()]),
   status: Type.Union([Type.String(), Type.Null()]),
+  type: Type.Union([Type.String(), Type.Null()]),
 });
 
 export type SearchResult = Static<typeof SearchResultSchema>;

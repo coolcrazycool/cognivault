@@ -187,6 +187,7 @@ export class SearchService {
       tags: Array.isArray(payload.tags) ? payload.tags : [],
       project: typeof payload.project === 'string' ? payload.project : null,
       status: typeof payload.status === 'string' ? payload.status : null,
+      type: typeof payload.type === 'string' ? payload.type : null,
     };
   }
 }
