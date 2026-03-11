@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 07-01-PLAN.md
-last_updated: "2026-03-11T07:19:34Z"
+stopped_at: Completed 07-02-PLAN.md
+last_updated: "2026-03-11T07:27:00.021Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
   total_phases: 11
-  completed_phases: 6
-  total_plans: 18
-  completed_plans: 18
+  completed_phases: 7
+  total_plans: 19
+  completed_plans: 19
   percent: 19
 ---
 
@@ -63,6 +63,7 @@ Progress: [▓▓░░░░░░░░] 19%
 | Phase 06-semantic-+-lexical-search P01 | 8min | 2 tasks | 4 files |
 | Phase 06-semantic-+-lexical-search P02 | 8min | 2 tasks | 5 files |
 | Phase 07-hybrid-retrieval-reranking P01 | 4min | 2 tasks | 4 files |
+| Phase 07-hybrid-retrieval-reranking P02 | 2min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -130,6 +131,9 @@ Recent decisions affecting current work:
 - [Phase 07-01]: Raw RRF scores used (no relative normalization) — already in [0,1] per research recommendation
 - [Phase 07-01]: RET-04 cross-encoder reranking explicitly deferred to v2 — no code, no stub, no placeholder
 - [Phase 07-01]: forEach with index used instead of indexed for-loops to satisfy TypeScript strict noUncheckedIndexedAccess
+- [Phase 07-02]: tsx used for running eval harness — faster than ts-node, modern ESM support, zero-config
+- [Phase 07-02]: Eval harness in test/eval/ (not src/) to stay outside vitest include pattern (src/**/__tests__/**/*.test.ts)
+- [Phase 07-02]: recall@10 threshold 0.7, comparing semantic/lexical/hybrid; harness standalone CLI not part of pnpm test
 
 ### Pending Todos
 
@@ -141,5 +145,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T07:19:34Z
-Stopped at: Completed 07-01-PLAN.md
+Last session: 2026-03-11T07:27:00.018Z
+Stopped at: Completed 07-02-PLAN.md
