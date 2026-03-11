@@ -79,13 +79,14 @@ const mockEmbedder = {
 
 async function buildTestApp(): Promise<FastifyInstance> {
   const { default: Fastify } = await import('fastify');
-  const { TypeBoxTypeProvider } = await import('@fastify/type-provider-typebox');
 
-  const app = Fastify({ logger: false }).withTypeProvider<TypeBoxTypeProvider>();
+  const app = Fastify({ logger: false });
 
-  // Decorate with mocked qdrant and embedder
-  app.decorate('qdrant', mockQdrant);
-  app.decorate('embedder', mockEmbedder);
+  // Decorate with mocked qdrant and embedder (cast to satisfy Fastify TypeScript type checks)
+  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial QdrantClient
+  app.decorate('qdrant', mockQdrant as any);
+  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial EmbeddingProvider
+  app.decorate('embedder', mockEmbedder as any);
 
   // Register error handler (converts validation errors to proper 400 responses)
   const { default: errorHandler } = await import('../../../plugins/error-handler.js');
@@ -362,9 +363,7 @@ describe('search routes', () => {
         'cognivault',
         expect.objectContaining({
           filter: expect.objectContaining({
-            must: expect.arrayContaining([
-              { key: 'type', match: { value: 'meeting-note' } },
-            ]),
+            must: expect.arrayContaining([{ key: 'type', match: { value: 'meeting-note' } }]),
           }),
         }),
       );

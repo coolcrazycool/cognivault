@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
-import { SearchService } from './service.js';
 import type { SearchRequestBody } from './schemas.js';
 import { lexicalSearchSchema, semanticSearchSchema } from './schemas.js';
+import { SearchService } from './service.js';
 
 export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
   // POST /semantic — Semantic search using embedding similarity via Qdrant vector search

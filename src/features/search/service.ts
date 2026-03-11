@@ -79,8 +79,13 @@ export class SearchService {
       filter.must = mustConditions;
     }
 
-    const result = await this.qdrant.scroll(COLLECTION_NAME, {
-      filter: filter as Parameters<QdrantClient['scroll']>[1]['filter'],
+    const result = await (
+      this.qdrant.scroll as unknown as (
+        collection: string,
+        opts: { filter: unknown; limit: number; with_payload: boolean },
+      ) => Promise<unknown>
+    )(COLLECTION_NAME, {
+      filter,
       limit,
       with_payload: true,
     });
@@ -92,8 +97,7 @@ export class SearchService {
     return points
       .filter((p) => p.payload?.text !== undefined && p.payload.text !== null)
       .filter(
-        (p) =>
-          folderPrefix === undefined || (p.payload?.path ?? '').startsWith(folderPrefix),
+        (p) => folderPrefix === undefined || (p.payload?.path ?? '').startsWith(folderPrefix),
         // TODO: At scale, add a text index on path field to push filtering to Qdrant.
       )
       .map((p) => this.toSearchResult(p.payload ?? {}, 1.0));
