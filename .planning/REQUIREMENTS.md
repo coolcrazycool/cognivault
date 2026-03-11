@@ -40,7 +40,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [x] **RET-01**: Agent can perform semantic search with embedding similarity
 - [x] **RET-02**: Agent can perform lexical search for exact terms and acronyms
-- [ ] **RET-03**: Agent can perform hybrid search combining semantic + lexical via RRF fusion
+- [x] **RET-03**: Agent can perform hybrid search combining semantic + lexical via RRF fusion
 - [ ] **RET-04**: Hybrid results are reranked by cross-encoder (Cohere/BGE) for top-K precision
 - [x] **RET-05**: Agent can filter search by tags, project, status, folder path, note type
 - [x] **RET-06**: Search results include chunk text, source note path, section_path, and relevance score
@@ -135,8 +135,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | IDX-13 | Phase 11 | Pending |
 | RET-01 | Phase 6 | Complete |
 | RET-02 | Phase 6 | Complete |
-| RET-03 | Phase 7 | Pending |
-| RET-04 | Phase 7 | Pending |
+| RET-03 | Phase 7 | Complete |
+| RET-04 | Phase 7 | Deferred to v2 |
 | RET-05 | Phase 6 | Complete |
 | RET-06 | Phase 6 | Complete |
 | RET-07 | Phase 7 | Pending |

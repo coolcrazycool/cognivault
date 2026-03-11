@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 7 context gathered
-last_updated: "2026-03-11T06:37:27.961Z"
-last_activity: 2026-03-11 — Completed plan 06-01 (Qdrant text payload and full-text indexes)
+stopped_at: Completed 07-01-PLAN.md
+last_updated: "2026-03-11T07:19:34Z"
+last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
   total_phases: 11
   completed_phases: 6
-  total_plans: 17
-  completed_plans: 17
-  percent: 16
+  total_plans: 18
+  completed_plans: 18
+  percent: 19
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-03-10)
 
 ## Current Position
 
-Phase: 6 of 11 (Semantic + Lexical Search)
-Plan: 1 of 3 in current phase (completed)
+Phase: 7 of 11 (Hybrid Retrieval + Reranking)
+Plan: 1 of 1 in current phase (completed)
 Status: In progress
-Last activity: 2026-03-11 — Completed plan 06-01 (Qdrant text payload and full-text indexes)
+Last activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 
-Progress: [▓▓░░░░░░░░] 16%
+Progress: [▓▓░░░░░░░░] 19%
 
 ## Performance Metrics
 
@@ -62,6 +62,7 @@ Progress: [▓▓░░░░░░░░] 16%
 | Phase 05 P03 | 7min | 1 tasks | 3 files |
 | Phase 06-semantic-+-lexical-search P01 | 8min | 2 tasks | 4 files |
 | Phase 06-semantic-+-lexical-search P02 | 8min | 2 tasks | 5 files |
+| Phase 07-hybrid-retrieval-reranking P01 | 4min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -123,6 +124,12 @@ Recent decisions affecting current work:
 - [Phase 06-02]: SearchService instantiated per-request in route handler (not decorated on fastify) — avoids plugin complexity for a stateless service
 - [Phase 06-02]: Folder filter post-processes results in-memory via path.startsWith() — Qdrant keyword index not prefix-capable
 - [Phase 06-02]: Error handler required in test app to convert TypeBox validation failures to 400 (without it returns 500)
+- [Phase 07-01]: RRF k=60 hardcoded (no env config) — standard literature value per user decision
+- [Phase 07-01]: Equal weight between semantic and lexical sources — standard RRF, no bias per user decision
+- [Phase 07-01]: No source attribution in hybrid results, no strategy parameter — uniform interface per user decision
+- [Phase 07-01]: Raw RRF scores used (no relative normalization) — already in [0,1] per research recommendation
+- [Phase 07-01]: RET-04 cross-encoder reranking explicitly deferred to v2 — no code, no stub, no placeholder
+- [Phase 07-01]: forEach with index used instead of indexed for-loops to satisfy TypeScript strict noUncheckedIndexedAccess
 
 ### Pending Todos
 
@@ -134,6 +141,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T06:37:27.957Z
-Stopped at: Phase 7 context gathered
-Resume file: .planning/phases/07-hybrid-retrieval-reranking/07-CONTEXT.md
+Last session: 2026-03-11T07:19:34Z
+Stopped at: Completed 07-01-PLAN.md

@@ -135,7 +135,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 07-01-PLAN.md — RRF fusion hybrid() method, POST /hybrid route, unit tests
+- [x] 07-01-PLAN.md — RRF fusion hybrid() method, POST /hybrid route, unit tests
 - [ ] 07-02-PLAN.md — Multilingual evaluation harness CLI script with 30-35 queries and recall@10 metrics
 
 ### Phase 8: Context Pack Assembly
@@ -218,7 +218,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 4. Index State + Change Detection | 3/3 | Complete   | 2026-03-10 |
 | 5. Markdown Indexing Pipeline | 3/3 | Complete   | 2026-03-10 |
 | 6. Semantic + Lexical Search | 2/2 | Complete   | 2026-03-11 |
-| 7. Hybrid Retrieval + Reranking | 0/2 | Not started | - |
+| 7. Hybrid Retrieval + Reranking | 1/2 | In progress | - |
 | 8. Context Pack Assembly | 0/3 | Not started | - |
 | 9. TOON + API Polish | 0/3 | Not started | - |
 | 10. Multi-Format Indexing | 0/3 | Not started | - |
