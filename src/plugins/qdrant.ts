@@ -9,7 +9,9 @@ declare module 'fastify' {
   }
 }
 
-const COLLECTION_NAME = 'cognivault';
+export const COLLECTION_NAME = 'cognivault';
+
+const TEXT_INDEXES = ['text', 'title', 'section_path'] as const;
 
 const PAYLOAD_INDEXES: Array<{ field: string; type: 'keyword' | 'integer' }> = [
   { field: 'path', type: 'keyword' },
@@ -41,6 +43,22 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
         field_name: field,
         field_schema: type,
       });
+    }
+  }
+
+  // Create full-text indexes for lexical search — idempotent (safe on restart)
+  for (const field of TEXT_INDEXES) {
+    try {
+      await client.createPayloadIndex(COLLECTION_NAME, {
+        field_name: field,
+        field_schema: {
+          type: 'text',
+          tokenizer: 'multilingual',
+          lowercase: true,
+        },
+      });
+    } catch {
+      // Index already exists — safe to ignore on restart
     }
   }
 

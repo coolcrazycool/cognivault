@@ -85,6 +85,7 @@ async function processCreatedOrUpdated(
       type: frontmatterData.type ?? null,
       content_hash: event.contentHash,
       extra_metadata: JSON.stringify(omit(frontmatterData, ['tags', 'project', 'status', 'type'])),
+      text: chunk.text,
     },
   }));
 
