@@ -48,10 +48,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Context Assembly
 
-- [ ] **CTX-01**: Agent can request structured context pack for a given task/query
-- [ ] **CTX-02**: Context pack respects configurable token budget (default ~32K)
-- [ ] **CTX-03**: Context pack includes project summary, architecture notes, ADRs, glossary, implementation notes with source citations
-- [ ] **CTX-04**: Context pack applies relevance floor filtering (not greedy bin-packing)
+- [x] **CTX-01**: Agent can request structured context pack for a given task/query
+- [x] **CTX-02**: Context pack respects configurable token budget (default ~32K)
+- [x] **CTX-03**: Context pack includes project summary, architecture notes, ADRs, glossary, implementation notes with source citations
+- [x] **CTX-04**: Context pack applies relevance floor filtering (not greedy bin-packing)
 
 ### Agent Interface
 
@@ -140,10 +140,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | RET-05 | Phase 6 | Complete |
 | RET-06 | Phase 6 | Complete |
 | RET-07 | Phase 7 | Complete |
-| CTX-01 | Phase 8 | Pending |
-| CTX-02 | Phase 8 | Pending |
-| CTX-03 | Phase 8 | Pending |
-| CTX-04 | Phase 8 | Pending |
+| CTX-01 | Phase 8 | Complete |
+| CTX-02 | Phase 8 | Complete |
+| CTX-03 | Phase 8 | Complete |
+| CTX-04 | Phase 8 | Complete |
 | API-01 | Phase 9 | Pending |
 | API-02 | Phase 9 | Pending |
 | API-03 | Phase 9 | Pending |
