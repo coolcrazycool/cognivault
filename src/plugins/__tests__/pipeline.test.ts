@@ -149,6 +149,8 @@ describe('pipeline plugin', () => {
       expect(firstPoint.payload['status']).toBeNull();
       expect(firstPoint.payload['type']).toBeNull();
       expect(typeof firstPoint.payload['extra_metadata']).toBe('string');
+      expect(typeof firstPoint.payload['text']).toBe('string');
+      expect((firstPoint.payload['text'] as string).length).toBeGreaterThan(0);
 
       // Stale cleanup should have been called
       expect(qdrantDelete).toHaveBeenCalledWith(

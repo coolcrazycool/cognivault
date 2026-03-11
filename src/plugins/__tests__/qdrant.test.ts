@@ -1,5 +1,5 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import fp from 'fastify-plugin';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EmbeddingProvider } from '../../lib/embedding.js';
 
 // Set required env vars before any imports that trigger config parsing
@@ -94,9 +94,7 @@ describe('qdrantPlugin', () => {
     await app.register(qdrantPlugin);
     await app.ready();
 
-    const indexedFields = mockCreatePayloadIndex.mock.calls.map(
-      (call) => call[1].field_name,
-    );
+    const indexedFields = mockCreatePayloadIndex.mock.calls.map((call) => call[1].field_name);
 
     expect(indexedFields).toContain('path');
     expect(indexedFields).toContain('tags');
@@ -104,7 +102,8 @@ describe('qdrantPlugin', () => {
     expect(indexedFields).toContain('status');
     expect(indexedFields).toContain('type');
     expect(indexedFields).toContain('chunk_index');
-    expect(mockCreatePayloadIndex).toHaveBeenCalledTimes(6);
+    // 6 keyword/integer indexes + 3 full-text indexes (text, title, section_path)
+    expect(mockCreatePayloadIndex).toHaveBeenCalledTimes(9);
 
     await app.close();
   });
@@ -128,10 +127,11 @@ describe('qdrantPlugin', () => {
     await app.close();
   });
 
-  it('does not create indexes when collection already exists', async () => {
+  it('skips keyword/integer indexes but still creates text indexes when collection already exists', async () => {
     mockGetCollections.mockResolvedValue({
       collections: [{ name: 'cognivault' }],
     });
+    mockCreatePayloadIndex.mockResolvedValue({});
 
     const Fastify = (await import('fastify')).default;
     const { default: qdrantPlugin } = await import('../qdrant.js');
@@ -141,7 +141,42 @@ describe('qdrantPlugin', () => {
     await app.register(qdrantPlugin);
     await app.ready();
 
-    expect(mockCreatePayloadIndex).not.toHaveBeenCalled();
+    // Keyword/integer indexes are NOT created (inside if (!exists) block)
+    expect(mockCreateCollection).not.toHaveBeenCalled();
+    // Text indexes ARE created idempotently (outside if (!exists) block)
+    const indexedFields = mockCreatePayloadIndex.mock.calls.map((call) => call[1].field_name);
+    expect(indexedFields).toContain('text');
+    expect(indexedFields).toContain('title');
+    expect(indexedFields).toContain('section_path');
+    expect(mockCreatePayloadIndex).toHaveBeenCalledTimes(3);
+
+    await app.close();
+  });
+
+  it('creates full-text text indexes with multilingual tokenizer and lowercase', async () => {
+    mockGetCollections.mockResolvedValue({ collections: [] });
+    mockCreateCollection.mockResolvedValue({});
+    mockCreatePayloadIndex.mockResolvedValue({});
+
+    const Fastify = (await import('fastify')).default;
+    const { default: qdrantPlugin } = await import('../qdrant.js');
+
+    const app = Fastify({ logger: false });
+    await app.register(createEmbedderPlugin());
+    await app.register(qdrantPlugin);
+    await app.ready();
+
+    const textIndexCalls = mockCreatePayloadIndex.mock.calls.filter(
+      (call) => typeof call[1].field_schema === 'object' && call[1].field_schema.type === 'text',
+    );
+    expect(textIndexCalls.length).toBe(3);
+    for (const call of textIndexCalls) {
+      expect(call[1].field_schema).toMatchObject({
+        type: 'text',
+        tokenizer: 'multilingual',
+        lowercase: true,
+      });
+    }
 
     await app.close();
   });
