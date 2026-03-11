@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 6 context gathered
-last_updated: "2026-03-10T18:58:05.194Z"
-last_activity: 2026-03-10 — Completed plan 05-01 (heading-aware markdown chunker)
+stopped_at: Completed 06-01 (Qdrant text payload and full-text indexes)
+last_updated: "2026-03-11T08:34:00.000Z"
+last_activity: 2026-03-11 — Completed plan 06-01 (Qdrant text payload and full-text indexes)
 progress:
   total_phases: 11
   completed_phases: 5
   total_plans: 15
-  completed_plans: 15
-  percent: 15
+  completed_plans: 16
+  percent: 16
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-10)
 
 **Core value:** AI agents can find and retrieve the right knowledge from an Obsidian vault in under one second, with high precision across mixed Russian/English content, exact technical terms, and freeform metadata.
-**Current focus:** Phase 2 - Vault Read Operations (plan 2 of 3 complete)
+**Current focus:** Phase 6 - Semantic + Lexical Search (plan 1 of 3 complete)
 
 ## Current Position
 
-Phase: 5 of 11 (Markdown Indexing Pipeline)
-Plan: 1 of 4 in current phase
+Phase: 6 of 11 (Semantic + Lexical Search)
+Plan: 1 of 3 in current phase (completed)
 Status: In progress
-Last activity: 2026-03-10 — Completed plan 05-01 (heading-aware markdown chunker)
+Last activity: 2026-03-11 — Completed plan 06-01 (Qdrant text payload and full-text indexes)
 
-Progress: [▓▓░░░░░░░░] 15%
+Progress: [▓▓░░░░░░░░] 16%
 
 ## Performance Metrics
 
@@ -60,6 +60,7 @@ Progress: [▓▓░░░░░░░░] 15%
 | Phase 04-index-state-+-change-detection P03 | 5min | 1 tasks | 3 files |
 | Phase 05-markdown-indexing-pipeline P02 | 4min | 2 tasks | 9 files |
 | Phase 05 P03 | 7min | 1 tasks | 3 files |
+| Phase 06-semantic-+-lexical-search P01 | 8min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -114,6 +115,10 @@ Recent decisions affecting current work:
 - [Phase 05]: Pipeline is a Fastify plugin with fp() wrapping; dependencies on indexer/qdrant/embedder/vault/db enforce registration order
 - [Phase 05]: UUID v5 with DNS namespace generates deterministic chunk IDs from '{path}:{chunk_index}'
 - [Phase 05]: Stale vector cleanup via qdrant.delete with chunk_index range filter applied on both created and updated events
+- [Phase 06-01]: Text indexes created outside if(!exists) block so they apply to pre-existing collections (Phase 5 upgrade path)
+- [Phase 06-01]: Multilingual tokenizer chosen for Russian + English token boundary handling in full-text search
+- [Phase 06-01]: COLLECTION_NAME exported from qdrant.ts to avoid hardcoding in search service
+- [Phase 06-01]: lowercase: true for case-insensitive lexical search matching
 
 ### Pending Todos
 
@@ -125,6 +130,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-10T18:58:05.189Z
-Stopped at: Phase 6 context gathered
-Resume file: .planning/phases/06-semantic-+-lexical-search/06-CONTEXT.md
+Last session: 2026-03-11T08:34:00.000Z
+Stopped at: Completed 06-01 (Qdrant text payload and full-text indexes)
+Resume file: .planning/phases/06-semantic-+-lexical-search/06-01-SUMMARY.md

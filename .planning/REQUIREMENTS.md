@@ -43,7 +43,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [ ] **RET-03**: Agent can perform hybrid search combining semantic + lexical via RRF fusion
 - [ ] **RET-04**: Hybrid results are reranked by cross-encoder (Cohere/BGE) for top-K precision
 - [ ] **RET-05**: Agent can filter search by tags, project, status, folder path, note type
-- [ ] **RET-06**: Search results include chunk text, source note path, section_path, and relevance score
+- [x] **RET-06**: Search results include chunk text, source note path, section_path, and relevance score
 - [ ] **RET-07**: Search handles mixed Russian/English queries with technical terms accurately
 
 ### Context Assembly
@@ -138,7 +138,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | RET-03 | Phase 7 | Pending |
 | RET-04 | Phase 7 | Pending |
 | RET-05 | Phase 6 | Pending |
-| RET-06 | Phase 6 | Pending |
+| RET-06 | Phase 6 | Complete |
 | RET-07 | Phase 7 | Pending |
 | CTX-01 | Phase 8 | Pending |
 | CTX-02 | Phase 8 | Pending |

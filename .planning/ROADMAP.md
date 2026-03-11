@@ -218,7 +218,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 3. Vault Write Operations | 3/3 | Complete   | 2026-03-10 |
 | 4. Index State + Change Detection | 3/3 | Complete   | 2026-03-10 |
 | 5. Markdown Indexing Pipeline | 3/3 | Complete   | 2026-03-10 |
-| 6. Semantic + Lexical Search | 0/2 | Not started | - |
+| 6. Semantic + Lexical Search | 1/2 | In progress | - |
 | 7. Hybrid Retrieval + Reranking | 0/3 | Not started | - |
 | 8. Context Pack Assembly | 0/3 | Not started | - |
 | 9. TOON + API Polish | 0/3 | Not started | - |
