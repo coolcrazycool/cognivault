@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 06-01 (Qdrant text payload and full-text indexes)
-last_updated: "2026-03-11T08:34:00.000Z"
+stopped_at: Completed 06-02 (Semantic + Lexical Search endpoints)
+last_updated: "2026-03-11T05:42:09.376Z"
 last_activity: 2026-03-11 — Completed plan 06-01 (Qdrant text payload and full-text indexes)
 progress:
   total_phases: 11
-  completed_phases: 5
-  total_plans: 15
-  completed_plans: 16
+  completed_phases: 6
+  total_plans: 17
+  completed_plans: 17
   percent: 16
 ---
 
@@ -61,6 +61,7 @@ Progress: [▓▓░░░░░░░░] 16%
 | Phase 05-markdown-indexing-pipeline P02 | 4min | 2 tasks | 9 files |
 | Phase 05 P03 | 7min | 1 tasks | 3 files |
 | Phase 06-semantic-+-lexical-search P01 | 8min | 2 tasks | 4 files |
+| Phase 06-semantic-+-lexical-search P02 | 8min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -119,6 +120,9 @@ Recent decisions affecting current work:
 - [Phase 06-01]: Multilingual tokenizer chosen for Russian + English token boundary handling in full-text search
 - [Phase 06-01]: COLLECTION_NAME exported from qdrant.ts to avoid hardcoding in search service
 - [Phase 06-01]: lowercase: true for case-insensitive lexical search matching
+- [Phase 06-02]: SearchService instantiated per-request in route handler (not decorated on fastify) — avoids plugin complexity for a stateless service
+- [Phase 06-02]: Folder filter post-processes results in-memory via path.startsWith() — Qdrant keyword index not prefix-capable
+- [Phase 06-02]: Error handler required in test app to convert TypeBox validation failures to 400 (without it returns 500)
 
 ### Pending Todos
 
@@ -130,6 +134,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-11T08:34:00.000Z
-Stopped at: Completed 06-01 (Qdrant text payload and full-text indexes)
-Resume file: .planning/phases/06-semantic-+-lexical-search/06-01-SUMMARY.md
+Last session: 2026-03-11T05:42:09.373Z
+Stopped at: Completed 06-02 (Semantic + Lexical Search endpoints)
+Resume file: None

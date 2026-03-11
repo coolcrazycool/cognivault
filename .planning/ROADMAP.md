@@ -17,7 +17,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: Vault Write Operations** - Create, update, append, delete, rename, frontmatter write (completed 2026-03-10)
 - [x] **Phase 4: Index State + Change Detection** - SQLite state tracking, filesystem polling, content hashing (completed 2026-03-10)
 - [x] **Phase 5: Markdown Indexing Pipeline** - Heading-aware chunking, embedding, Qdrant upsert, stale cleanup (completed 2026-03-10)
-- [ ] **Phase 6: Semantic + Lexical Search** - Qdrant ANN search, FTS5/BM25 lexical search, metadata filtering
+- [x] **Phase 6: Semantic + Lexical Search** - Qdrant ANN search, FTS5/BM25 lexical search, metadata filtering (completed 2026-03-11)
 - [ ] **Phase 7: Hybrid Retrieval + Reranking** - RRF fusion, cross-encoder reranking, multilingual validation
 - [ ] **Phase 8: Context Pack Assembly** - Token-budgeted knowledge bundles with relevance floor and source citations
 - [ ] **Phase 9: TOON + API Polish** - TOON content negotiation, JSON default, OpenAPI spec generation
@@ -218,7 +218,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 3. Vault Write Operations | 3/3 | Complete   | 2026-03-10 |
 | 4. Index State + Change Detection | 3/3 | Complete   | 2026-03-10 |
 | 5. Markdown Indexing Pipeline | 3/3 | Complete   | 2026-03-10 |
-| 6. Semantic + Lexical Search | 1/2 | In progress | - |
+| 6. Semantic + Lexical Search | 2/2 | Complete   | 2026-03-11 |
 | 7. Hybrid Retrieval + Reranking | 0/3 | Not started | - |
 | 8. Context Pack Assembly | 0/3 | Not started | - |
 | 9. TOON + API Polish | 0/3 | Not started | - |
