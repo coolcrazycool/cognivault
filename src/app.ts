@@ -1,6 +1,7 @@
 import type { TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
 import type { FastifyInstance } from 'fastify';
 import Fastify from 'fastify';
+import { contextRoutes } from './features/context/routes.js';
 import { healthRoutes } from './features/health/routes.js';
 import { searchRoutes } from './features/search/routes.js';
 import { vaultRoutes } from './features/vault/routes.js';
@@ -38,6 +39,7 @@ export async function buildApp(opts?: BuildAppOptions): Promise<FastifyInstance>
   await app.register(healthRoutes);
   await app.register(vaultRoutes, { prefix: '/api/vault' });
   await app.register(searchRoutes, { prefix: '/api/vault/search' });
+  await app.register(contextRoutes, { prefix: '/api/vault' });
 
   return app;
 }
