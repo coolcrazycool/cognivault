@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 4: Index State + Change Detection** - SQLite state tracking, filesystem polling, content hashing (completed 2026-03-10)
 - [x] **Phase 5: Markdown Indexing Pipeline** - Heading-aware chunking, embedding, Qdrant upsert, stale cleanup (completed 2026-03-10)
 - [x] **Phase 6: Semantic + Lexical Search** - Qdrant ANN search, FTS5/BM25 lexical search, metadata filtering (completed 2026-03-11)
-- [ ] **Phase 7: Hybrid Retrieval + Reranking** - RRF fusion, cross-encoder reranking, multilingual validation
+- [ ] **Phase 7: Hybrid Retrieval + Reranking** - RRF fusion, multilingual evaluation harness (reranking deferred to v2)
 - [ ] **Phase 8: Context Pack Assembly** - Token-budgeted knowledge bundles with relevance floor and source citations
 - [ ] **Phase 9: TOON + API Polish** - TOON content negotiation, JSON default, OpenAPI spec generation
 - [ ] **Phase 10: Multi-Format Indexing** - PDF, Canvas, Excalidraw, CSV, and image metadata indexing
@@ -124,20 +124,19 @@ Plans:
 - [ ] 06-02-PLAN.md — Search feature module (semantic + lexical endpoints, schemas, service, tests)
 
 ### Phase 7: Hybrid Retrieval + Reranking
-**Goal**: Agents get high-precision results from combined semantic + lexical search with cross-encoder reranking
+**Goal**: Agents get high-precision results from combined semantic + lexical search via RRF fusion, validated by multilingual evaluation harness
 **Depends on**: Phase 6
 **Requirements**: RET-03, RET-04, RET-07
 **Success Criteria** (what must be TRUE):
   1. Hybrid search endpoint combines semantic and lexical results via RRF fusion
-  2. Top-K hybrid results are reranked by cross-encoder for improved precision
+  2. RET-04 (cross-encoder reranking) is deferred to v2 — not implemented in this phase
   3. Mixed Russian/English queries with technical terms return relevant results (validated by evaluation harness)
-  4. Reranking is optional per request and degrades gracefully if reranker is unavailable
-**Plans**: TBD
+  4. Evaluation harness reports recall@10 per category and overall for all three search types
+**Plans**: 2 plans
 
 Plans:
-- [ ] 07-01: RRF fusion combining semantic + lexical results
-- [ ] 07-02: Cross-encoder reranking via Cohere Rerank with graceful fallback
-- [ ] 07-03: Multilingual evaluation harness (30-50 queries, recall@10 for Russian/English/mixed)
+- [ ] 07-01-PLAN.md — RRF fusion hybrid() method, POST /hybrid route, unit tests
+- [ ] 07-02-PLAN.md — Multilingual evaluation harness CLI script with 30-35 queries and recall@10 metrics
 
 ### Phase 8: Context Pack Assembly
 **Goal**: Agents can request structured, token-budgeted knowledge bundles for downstream tasks
@@ -219,7 +218,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 4. Index State + Change Detection | 3/3 | Complete   | 2026-03-10 |
 | 5. Markdown Indexing Pipeline | 3/3 | Complete   | 2026-03-10 |
 | 6. Semantic + Lexical Search | 2/2 | Complete   | 2026-03-11 |
-| 7. Hybrid Retrieval + Reranking | 0/3 | Not started | - |
+| 7. Hybrid Retrieval + Reranking | 0/2 | Not started | - |
 | 8. Context Pack Assembly | 0/3 | Not started | - |
 | 9. TOON + API Polish | 0/3 | Not started | - |
 | 10. Multi-Format Indexing | 0/3 | Not started | - |
