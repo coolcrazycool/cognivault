@@ -103,6 +103,51 @@ export class SearchService {
       .map((p) => this.toSearchResult(p.payload ?? {}, 1.0));
   }
 
+  async hybrid(query: string, limit: number, filters: SearchFilters): Promise<SearchResult[]> {
+    // Fetch from both sources in parallel with 2x the requested limit
+    const [semanticResults, lexicalResults] = await Promise.all([
+      this.semantic(query, limit * 2, filters),
+      this.lexical(query, limit * 2, filters),
+    ]);
+
+    // RRF fusion with hardcoded K=60 (per user decision — no env config)
+    const RRF_K = 60;
+    const scoreMap = new Map<string, { result: SearchResult; score: number }>();
+
+    // Accumulate RRF scores for semantic results (1-based rank)
+    for (let i = 0; i < semanticResults.length; i++) {
+      const result = semanticResults[i];
+      const rrfScore = 1 / (i + 1 + RRF_K);
+      const existing = scoreMap.get(result.path);
+      if (existing) {
+        existing.score += rrfScore;
+      } else {
+        scoreMap.set(result.path, { result, score: rrfScore });
+      }
+    }
+
+    // Accumulate RRF scores for lexical results (1-based rank)
+    for (let i = 0; i < lexicalResults.length; i++) {
+      const result = lexicalResults[i];
+      const rrfScore = 1 / (i + 1 + RRF_K);
+      const existing = scoreMap.get(result.path);
+      if (existing) {
+        existing.score += rrfScore;
+      } else {
+        scoreMap.set(result.path, { result, score: rrfScore });
+      }
+    }
+
+    // Sort by fused score descending, take top limit, clamp scores to [0, 1]
+    return Array.from(scoreMap.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map(({ result, score }) => ({
+        ...result,
+        score: Math.min(1, Math.max(0, score)),
+      }));
+  }
+
   private buildFilter(filters: SearchFilters): QdrantFilter | undefined {
     const must = this.buildMustConditions(filters);
     if (must.length === 0) return undefined;

@@ -69,4 +69,13 @@ export const lexicalSearchSchema = {
   },
 };
 
+export const hybridSearchSchema = {
+  body: SearchRequestBodySchema,
+  response: {
+    200: SearchResponseSchema,
+    400: ErrorResponseSchema,
+    500: ErrorResponseSchema,
+  },
+};
+
 export { ErrorResponseSchema };

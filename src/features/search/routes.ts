@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { SearchRequestBody } from './schemas.js';
-import { lexicalSearchSchema, semanticSearchSchema } from './schemas.js';
+import { hybridSearchSchema, lexicalSearchSchema, semanticSearchSchema } from './schemas.js';
 import { SearchService } from './service.js';
 
 export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
@@ -14,6 +14,25 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
       const { query, limit = 10, filters = {} } = request.body;
       const searchService = new SearchService(fastify.qdrant, fastify.embedder);
       const results = await searchService.semantic(query, limit, filters);
+      return {
+        results,
+        total: results.length,
+        limit,
+        query_ms: Date.now() - start,
+      };
+    },
+  );
+
+  // POST /hybrid — Hybrid search combining semantic + lexical via Reciprocal Rank Fusion (RRF)
+  fastify.post<{ Body: SearchRequestBody }>(
+    '/hybrid',
+    { schema: hybridSearchSchema },
+    async (request) => {
+      // query_ms measures total wall time including embedding (semantic path calls embedder)
+      const start = Date.now();
+      const { query, limit = 10, filters = {} } = request.body;
+      const searchService = new SearchService(fastify.qdrant, fastify.embedder);
+      const results = await searchService.hybrid(query, limit, filters);
       return {
         results,
         total: results.length,
