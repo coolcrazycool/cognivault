@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 12 context gathered
-last_updated: "2026-03-12T14:15:17.227Z"
+stopped_at: Completed 12-02-PLAN.md (Prometheus + Grafana monitoring infrastructure)
+last_updated: "2026-03-12T14:40:22.185Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
   total_phases: 12
   completed_phases: 11
-  total_plans: 29
-  completed_plans: 29
+  total_plans: 32
+  completed_plans: 30
   percent: 19
 ---
 
@@ -74,6 +74,7 @@ Progress: [▓▓░░░░░░░░] 19%
 | Phase 11-observability-admin P02 | 5min | 2 tasks | 6 files |
 | Phase 11-observability-admin P11-01 | 17min | 2 tasks | 10 files |
 | Phase 11-observability-admin P11-03 | 4min | 2 tasks | 6 files |
+| Phase 12-prometheus-metrics-dashboard-in-separate-container P02 | 2min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -172,6 +173,9 @@ Recent decisions affecting current work:
 - [Phase 11-observability-admin]: resourceFromAttributes() used (not new Resource()) — @opentelemetry/resources v2 removed Resource class
 - [Phase 11-observability-admin]: TraceFlags.SAMPLED guard for log injection — no-op tracer returns all-zeros traceId; checking SAMPLED flag prevents polluting Pino logs when tracing disabled
 - [Phase 11-observability-admin]: Dynamic import for initTracing, static import for shutdownTracing — SDK loading gated on OTEL_EXPORTER_OTLP_ENDPOINT presence
+- [Phase 12-02]: HighErrorRate alert uses stalled search requests (rate==0 while up==1) as proxy — prom-client collectDefaultMetrics lacks HTTP status_code labels
+- [Phase 12-02]: Grafana datasource uid set to 'prometheus' for stable reference from Plan 03 dashboard JSON
+- [Phase 12-02]: Node-based CogniVault healthcheck — node:22-slim has no wget/curl
 
 ### Roadmap Evolution
 
@@ -187,5 +191,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-12T14:15:17.221Z
-Stopped at: Phase 12 context gathered
+Last session: 2026-03-12T14:40:22.182Z
+Stopped at: Completed 12-02-PLAN.md (Prometheus + Grafana monitoring infrastructure)
