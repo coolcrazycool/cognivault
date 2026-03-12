@@ -66,7 +66,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **INF-02**: Service auto-generates OpenAPI spec from route definitions
 - [x] **INF-03**: Service emits structured JSON logs with request context
 - [x] **INF-04**: Service exposes Prometheus metrics (latency, throughput, index stats)
-- [ ] **INF-05**: Service supports OpenTelemetry distributed tracing
+- [x] **INF-05**: Service supports OpenTelemetry distributed tracing
 - [x] **INF-06**: Service deploys as single Docker container alongside Qdrant via docker-compose
 
 ## v2 Requirements
@@ -152,7 +152,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | INF-02 | Phase 9 | Complete |
 | INF-03 | Phase 11 | Complete |
 | INF-04 | Phase 11 | Complete |
-| INF-05 | Phase 11 | Pending |
+| INF-05 | Phase 11 | Complete |
 | INF-06 | Phase 1 | Complete |
 
 **Coverage:**

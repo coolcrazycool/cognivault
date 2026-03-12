@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: "Completed 11-01-PLAN.md (observability: logging enrichment + metrics)"
-last_updated: "2026-03-12T12:53:25.582Z"
+stopped_at: Completed 11-03-PLAN.md (OTel distributed tracing)
+last_updated: "2026-03-12T12:59:57.400Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
   total_phases: 11
-  completed_phases: 10
+  completed_phases: 11
   total_plans: 29
-  completed_plans: 28
+  completed_plans: 29
   percent: 19
 ---
 
@@ -73,6 +73,7 @@ Progress: [▓▓░░░░░░░░] 19%
 | Phase 10-multi-format-indexing P03 | 8min | 2 tasks | 7 files |
 | Phase 11-observability-admin P02 | 5min | 2 tasks | 6 files |
 | Phase 11-observability-admin P11-01 | 17min | 2 tasks | 10 files |
+| Phase 11-observability-admin P11-03 | 4min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -168,6 +169,9 @@ Recent decisions affecting current work:
 - [Phase 11-02]: 409 guard: service throws Error with statusCode=409, route catches and returns structured error body
 - [Phase 11-01]: Per-instance prom-client Registry (not global default) to prevent test pollution
 - [Phase 11-01]: Custom Pino req serializer includes headers to enable Authorization redaction in Fastify v5
+- [Phase 11-observability-admin]: resourceFromAttributes() used (not new Resource()) — @opentelemetry/resources v2 removed Resource class
+- [Phase 11-observability-admin]: TraceFlags.SAMPLED guard for log injection — no-op tracer returns all-zeros traceId; checking SAMPLED flag prevents polluting Pino logs when tracing disabled
+- [Phase 11-observability-admin]: Dynamic import for initTracing, static import for shutdownTracing — SDK loading gated on OTEL_EXPORTER_OTLP_ENDPOINT presence
 
 ### Pending Todos
 
@@ -179,5 +183,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-12T12:53:25.580Z
-Stopped at: Completed 11-01-PLAN.md (observability: logging enrichment + metrics)
+Last session: 2026-03-12T12:59:57.397Z
+Stopped at: Completed 11-03-PLAN.md (OTel distributed tracing)
