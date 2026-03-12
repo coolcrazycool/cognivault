@@ -48,6 +48,7 @@ export class SearchService {
 
   async semantic(query: string, limit: number, filters: SearchFilters): Promise<SearchResult[]> {
     const [embedding] = await this.embedder.embed([query]);
+    const folderPrefix = filters.folder;
 
     const result = await this.qdrant.search(COLLECTION_NAME, {
       vector: embedding as number[],
@@ -59,6 +60,10 @@ export class SearchService {
     const points = result as unknown as ScoredPoint[];
     return points
       .filter((hit) => hit.payload?.text !== undefined && hit.payload.text !== null)
+      .filter(
+        (hit) => folderPrefix === undefined || (hit.payload?.path ?? '').startsWith(folderPrefix),
+        // TODO: At scale, add a text index on path field to push filtering to Qdrant.
+      )
       .map((hit) => this.toSearchResult(hit.payload ?? {}, this.normalizeScore(hit.score)));
   }
 

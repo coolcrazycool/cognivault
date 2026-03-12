@@ -267,7 +267,7 @@ describe('search routes', () => {
         },
         {
           id: 'uuid-p2',
-          score: 0.80,
+          score: 0.8,
           payload: {
             text: 'not in projects',
             path: 'notes/other.md',
