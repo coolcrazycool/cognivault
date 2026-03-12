@@ -345,14 +345,21 @@ async function pipelinePlugin(fastify: FastifyInstance): Promise<void> {
         } catch (err: unknown) {
           fastify.log.error({ event, err }, 'Pipeline processing failed — will retry on next poll');
         } finally {
-          // Update queue depth gauge after each task completes
-          fastify.metrics.indexQueueDepth.set(queue.size + queue.pending);
+          // no-op: gauge updated via queue events below
         }
       });
       // Update queue depth gauge after adding to queue
       fastify.metrics.indexQueueDepth.set(queue.size + queue.pending);
     }
   };
+
+  // Update gauge when PQueue completes a task (pending is already decremented)
+  queue.on('next', () => {
+    fastify.metrics.indexQueueDepth.set(queue.size + queue.pending);
+  });
+  queue.on('idle', () => {
+    fastify.metrics.indexQueueDepth.set(0);
+  });
 
   fastify.indexer.on('changes', onChanges);
 
