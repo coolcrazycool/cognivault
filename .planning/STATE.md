@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 11-02-PLAN.md (admin reindex API)
-last_updated: "2026-03-12T12:40:49.602Z"
+stopped_at: "Completed 11-01-PLAN.md (observability: logging enrichment + metrics)"
+last_updated: "2026-03-12T12:53:25.582Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
   total_phases: 11
   completed_phases: 10
   total_plans: 29
-  completed_plans: 27
+  completed_plans: 28
   percent: 19
 ---
 
@@ -72,6 +72,7 @@ Progress: [▓▓░░░░░░░░] 19%
 | Phase 10-multi-format-indexing P01 | 5min | 2 tasks | 6 files |
 | Phase 10-multi-format-indexing P03 | 8min | 2 tasks | 7 files |
 | Phase 11-observability-admin P02 | 5min | 2 tasks | 6 files |
+| Phase 11-observability-admin P11-01 | 17min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -165,6 +166,8 @@ Recent decisions affecting current work:
 - [Phase 11-02]: ReindexService instantiated once per plugin scope to preserve in-memory job map
 - [Phase 11-02]: Full reindex: stop() then start() VaultIndexer; path/folder emit synthetic 'updated' FileChangeEvents directly
 - [Phase 11-02]: 409 guard: service throws Error with statusCode=409, route catches and returns structured error body
+- [Phase 11-01]: Per-instance prom-client Registry (not global default) to prevent test pollution
+- [Phase 11-01]: Custom Pino req serializer includes headers to enable Authorization redaction in Fastify v5
 
 ### Pending Todos
 
@@ -176,5 +179,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-12T12:40:49.599Z
-Stopped at: Completed 11-02-PLAN.md (admin reindex API)
+Last session: 2026-03-12T12:53:25.580Z
+Stopped at: Completed 11-01-PLAN.md (observability: logging enrichment + metrics)
