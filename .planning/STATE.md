@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 13-02-PLAN.md
-last_updated: "2026-03-12T17:27:55.170Z"
+stopped_at: Completed 14-02-PLAN.md
+last_updated: "2026-03-12T19:03:31.060Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
   total_phases: 14
   completed_phases: 13
-  total_plans: 34
-  completed_plans: 34
+  total_plans: 36
+  completed_plans: 35
   percent: 19
 ---
 
@@ -80,6 +80,7 @@ Progress: [▓▓░░░░░░░░] 19%
 | Phase 12-prometheus-metrics-dashboard-in-separate-container P03 | 525729min | 3 tasks | 3 files |
 | Phase 13-search-reindex-correctness P01 | 2min | 1 tasks | 2 files |
 | Phase 13-search-reindex-correctness P02 | 4min | 2 tasks | 3 files |
+| Phase 14-infrastructure-hardening-cleanup P02 | 3 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -193,6 +194,9 @@ Recent decisions affecting current work:
 - [Phase 13-02]: [13-02]: onIdle() not onEmpty() — onIdle waits for size===0 && pending===0; onEmpty only waits for queue size
 - [Phase 13-02]: [13-02]: scanComplete uses .on() not .once() because async handler promise resolves after .once() auto-removes listener
 - [Phase 13-02]: [13-02]: declare module 'fastify' block placed after all imports to satisfy Biome organizeImports rule
+- [Phase 14-infrastructure-hardening-cleanup]: cognivault_data named volume at /data replaces ephemeral /tmp/cognivault-data for persistent SQLite across restarts
+- [Phase 14-infrastructure-hardening-cleanup]: HighErrorRate alert for: 30m (was 5m) to avoid false-positives during development idle periods
+- [Phase 14-infrastructure-hardening-cleanup]: MON-04 traces to Phase 14 because idle-safe alert rule fix ships here; v1 requirements total updated to 52
 
 ### Roadmap Evolution
 
@@ -208,5 +212,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-12T17:24:59.851Z
-Stopped at: Completed 13-02-PLAN.md
+Last session: 2026-03-12T19:03:31.057Z
+Stopped at: Completed 14-02-PLAN.md

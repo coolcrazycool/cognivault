@@ -225,7 +225,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 11. Observability + Admin | 3/3 | Complete    | 2026-03-12 |
 | 12. Prometheus Metrics Dashboard | 3/3 | Complete    | 2026-03-12 |
 | 13. Search & Reindex Correctness | 2/2 | Complete    | 2026-03-12 |
-| 14. Infrastructure Hardening & Cleanup | 0/2 | Not Started | - |
+| 14. Infrastructure Hardening & Cleanup | 1/2 | In Progress|  |
 
 ### Phase 12: Prometheus metrics dashboard in separate container
 
