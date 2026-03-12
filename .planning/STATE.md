@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 12-01-PLAN.md
-last_updated: "2026-03-12T14:40:57.922Z"
+stopped_at: "Checkpoint: Task 3 human-verify for 12-03 (Grafana stack end-to-end)"
+last_updated: "2026-03-12T14:46:33.060Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
   total_phases: 12
-  completed_phases: 11
+  completed_phases: 12
   total_plans: 32
-  completed_plans: 31
+  completed_plans: 32
   percent: 19
 ---
 
@@ -76,6 +76,7 @@ Progress: [▓▓░░░░░░░░] 19%
 | Phase 11-observability-admin P11-03 | 4min | 2 tasks | 6 files |
 | Phase 12-prometheus-metrics-dashboard-in-separate-container P02 | 2min | 2 tasks | 5 files |
 | Phase 12-prometheus-metrics-dashboard-in-separate-container P01 | 2min | 2 tasks | 4 files |
+| Phase 12-prometheus-metrics-dashboard-in-separate-container P03 | 3min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -179,6 +180,8 @@ Recent decisions affecting current work:
 - [Phase 12-02]: Node-based CogniVault healthcheck — node:22-slim has no wget/curl
 - [Phase 12-01]: embeddingRequests and chunksProcessed incremented in both embedAndUpsert and processMarkdown independently — markdown has its own embed call path separate from embedAndUpsert
 - [Phase 12-01]: pipelineDuration wraps entire processCreatedOrUpdated for consistent duration tracking across all file types
+- [Phase 12-03]: Search error rate panel is text annotation (not PromQL) — prom-client lacks HTTP status_code labels; gap documented for future iteration
+- [Phase 12-03]: Reindex Status uses clamp_max(queue_depth, 1) mapped to Idle/Busy — boolean status without dedicated metric
 
 ### Roadmap Evolution
 
@@ -194,5 +197,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-12T14:40:57.920Z
-Stopped at: Completed 12-01-PLAN.md
+Last session: 2026-03-12T14:46:33.057Z
+Stopped at: Checkpoint: Task 3 human-verify for 12-03 (Grafana stack end-to-end)
