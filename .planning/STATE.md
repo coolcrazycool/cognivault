@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 10-02-PLAN.md (Canvas + Excalidraw chunkers)
-last_updated: "2026-03-12T10:26:29.920Z"
+stopped_at: Completed 10-multi-format-indexing plan 01 (PDF and CSV chunkers)
+last_updated: "2026-03-12T10:28:08.644Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
   total_phases: 11
   completed_phases: 9
   total_plans: 26
-  completed_plans: 24
+  completed_plans: 25
   percent: 19
 ---
 
@@ -69,6 +69,7 @@ Progress: [▓▓░░░░░░░░] 19%
 | Phase 09-toon-api-polish P01 | 65min | 2 tasks | 6 files |
 | Phase 09-toon-api-polish P02 | 8min | 1 tasks | 6 files |
 | Phase 10-multi-format-indexing P02 | 4min | 2 tasks | 4 files |
+| Phase 10-multi-format-indexing P01 | 5min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -153,6 +154,9 @@ Recent decisions affecting current work:
 - [Phase 09-toon-api-polish]: [09-02]: swaggerPlugin registered after auth, before infrastructure plugins — captures all route schemas
 - [Phase 10-02]: Canvas sectionPath: 'CanvasName > Node N' (1-based, text nodes only)
 - [Phase 10-02]: Excalidraw short-element merge threshold: <5 tokens (cl100k_base), adjacent short texts joined by newline
+- [Phase 10-multi-format-indexing]: pdfjs-dist GlobalWorkerOptions.workerSrc='' disables web worker for server-side PDF extraction
+- [Phase 10-multi-format-indexing]: TextItem narrowed via 'str' in item predicate to handle TextMarkedContent items in pdfjs-dist text extraction
+- [Phase 10-multi-format-indexing]: CSV default batch size 30 rows; PapaParse imported as default export (import Papa from 'papaparse')
 
 ### Pending Todos
 
@@ -164,5 +168,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-12T10:26:29.918Z
-Stopped at: Completed 10-02-PLAN.md (Canvas + Excalidraw chunkers)
+Last session: 2026-03-12T10:28:08.641Z
+Stopped at: Completed 10-multi-format-indexing plan 01 (PDF and CSV chunkers)

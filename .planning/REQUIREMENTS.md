@@ -29,10 +29,10 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **IDX-05**: Service extracts and indexes frontmatter fields into Qdrant payload
 - [x] **IDX-06**: Service handles created/updated/moved/deleted files incrementally
 - [x] **IDX-07**: Service removes stale vectors when notes are deleted or chunks change
-- [ ] **IDX-08**: Service extracts and indexes text from PDF files
+- [x] **IDX-08**: Service extracts and indexes text from PDF files
 - [x] **IDX-09**: Service parses and indexes Canvas JSON node content
 - [x] **IDX-10**: Service extracts and indexes text elements from Excalidraw files
-- [ ] **IDX-11**: Service indexes CSV content with row-level chunking
+- [x] **IDX-11**: Service indexes CSV content with row-level chunking
 - [ ] **IDX-12**: Service tracks image files metadata (name, path, linked notes)
 - [ ] **IDX-13**: Admin can trigger full or partial reindex via API endpoint
 
@@ -127,10 +127,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | IDX-05 | Phase 5 | Complete |
 | IDX-06 | Phase 4 | Complete |
 | IDX-07 | Phase 5 | Complete |
-| IDX-08 | Phase 10 | Pending |
+| IDX-08 | Phase 10 | Complete |
 | IDX-09 | Phase 10 | Complete |
 | IDX-10 | Phase 10 | Complete |
-| IDX-11 | Phase 10 | Pending |
+| IDX-11 | Phase 10 | Complete |
 | IDX-12 | Phase 10 | Pending |
 | IDX-13 | Phase 11 | Pending |
 | RET-01 | Phase 6 | Complete |
