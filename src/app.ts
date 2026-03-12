@@ -24,6 +24,26 @@ interface BuildAppOptions {
 }
 
 /**
+ * Custom Pino request serializer that includes headers so redact can mask sensitive values.
+ * The default Fastify serializer omits headers — we add them to enable Authorization redaction.
+ */
+function serializeRequest(req: {
+  method: string;
+  url: string;
+  hostname?: string;
+  remoteAddress?: string;
+  headers?: Record<string, unknown>;
+}) {
+  return {
+    method: req.method,
+    url: req.url,
+    hostname: req.hostname,
+    remoteAddress: req.remoteAddress,
+    headers: req.headers,
+  };
+}
+
+/**
  * Build the Pino logger options with Authorization header redaction.
  * When logger is false (tests with no logging), pass through as-is.
  * When logger is true or undefined, construct a logger object with redact.
@@ -33,16 +53,24 @@ function buildLoggerOptions(logger: boolean | object | undefined): boolean | obj
   if (logger === false) {
     return false;
   }
+
+  const enrichedOptions = {
+    redact: ['req.headers.authorization'],
+    serializers: {
+      req: serializeRequest,
+    },
+  };
+
   if (logger === true || logger === undefined) {
     return {
       level: 'info',
-      redact: ['req.headers.authorization'],
+      ...enrichedOptions,
     };
   }
-  // logger is an object — merge redact in
+  // logger is an object — merge enriched options in
   return {
     ...(logger as object),
-    redact: ['req.headers.authorization'],
+    ...enrichedOptions,
   };
 }
 
