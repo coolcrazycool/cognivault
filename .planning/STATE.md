@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 13-01-PLAN.md
-last_updated: "2026-03-12T17:21:31.901Z"
+stopped_at: Completed 13-02-PLAN.md
+last_updated: "2026-03-12T17:24:59.855Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
   total_phases: 14
-  completed_phases: 12
+  completed_phases: 13
   total_plans: 34
-  completed_plans: 33
+  completed_plans: 34
   percent: 19
 ---
 
@@ -79,6 +79,7 @@ Progress: [▓▓░░░░░░░░] 19%
 | Phase 12-prometheus-metrics-dashboard-in-separate-container P03 | 3min | 2 tasks | 3 files |
 | Phase 12-prometheus-metrics-dashboard-in-separate-container P03 | 525729min | 3 tasks | 3 files |
 | Phase 13-search-reindex-correctness P01 | 2min | 1 tasks | 2 files |
+| Phase 13-search-reindex-correctness P02 | 4min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -188,6 +189,10 @@ Recent decisions affecting current work:
 - [Phase 12-03]: Reindex Status uses clamp_max(queue_depth, 1) mapped to Idle/Busy — boolean status without dedicated metric
 - [Phase 13-01]: semantic() folder post-filter mirrors lexical() pattern: folderPrefix extract + path.startsWith filter before map()
 - [Phase 13-01]: hybrid() folder filter fix is free — hybrid() delegates to this.semantic() which now applies the filter; no changes to hybrid() needed
+- [Phase 13-02]: [13-02]: pipelineQueue decorated on fastify via fastify.decorate() in pipelinePlugin for cross-plugin access
+- [Phase 13-02]: [13-02]: onIdle() not onEmpty() — onIdle waits for size===0 && pending===0; onEmpty only waits for queue size
+- [Phase 13-02]: [13-02]: scanComplete uses .on() not .once() because async handler promise resolves after .once() auto-removes listener
+- [Phase 13-02]: [13-02]: declare module 'fastify' block placed after all imports to satisfy Biome organizeImports rule
 
 ### Roadmap Evolution
 
@@ -203,5 +208,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-12T17:21:31.898Z
-Stopped at: Completed 13-01-PLAN.md
+Last session: 2026-03-12T17:24:59.851Z
+Stopped at: Completed 13-02-PLAN.md

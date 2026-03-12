@@ -24,7 +24,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 10: Multi-Format Indexing** - PDF, Canvas, Excalidraw, CSV, and image metadata indexing (completed 2026-03-12)
 - [x] **Phase 11: Observability + Admin** - Structured logging, Prometheus metrics, OpenTelemetry, manual reindex (completed 2026-03-12)
 - [x] **Phase 12: Prometheus Metrics Dashboard** - Prometheus + Grafana docker-compose, dashboards, alert rules (completed 2026-03-12)
-- [ ] **Phase 13: Search & Reindex Correctness** - Folder filter in semantic search, reindex status timing, contentHash fix
+- [x] **Phase 13: Search & Reindex Correctness** - Folder filter in semantic search, reindex status timing, contentHash fix (completed 2026-03-12)
 - [ ] **Phase 14: Infrastructure Hardening & Cleanup** - Docker volume persistence, unsafe cast fix, lint cleanup, docs
 
 ## Phase Details
@@ -224,7 +224,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 10. Multi-Format Indexing | 3/3 | Complete    | 2026-03-12 |
 | 11. Observability + Admin | 3/3 | Complete    | 2026-03-12 |
 | 12. Prometheus Metrics Dashboard | 3/3 | Complete    | 2026-03-12 |
-| 13. Search & Reindex Correctness | 1/2 | In Progress|  |
+| 13. Search & Reindex Correctness | 2/2 | Complete   | 2026-03-12 |
 | 14. Infrastructure Hardening & Cleanup | 0/0 | Not Started | - |
 
 ### Phase 12: Prometheus metrics dashboard in separate container
