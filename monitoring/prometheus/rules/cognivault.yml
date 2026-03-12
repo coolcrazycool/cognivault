@@ -35,9 +35,9 @@ groups:
           ) and on() (
             up{job="cognivault"} == 1
           )
-        for: 5m
+        for: 30m
         labels:
           severity: warning
         annotations:
           summary: "CogniVault search requests stalled"
-          description: "CogniVault is up but no search requests have been processed in the last 5 minutes, which may indicate an error condition."
+          description: "CogniVault is up but no search requests have been processed in the last 30 minutes. Check if the service is receiving traffic."
