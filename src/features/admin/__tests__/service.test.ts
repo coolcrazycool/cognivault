@@ -178,6 +178,35 @@ describe('ReindexService', () => {
     });
   });
 
+  describe('createPathJob', () => {
+    it('path reindex emits real contentHash from DB when file exists', async () => {
+      mockDbGet.mockReturnValue({ contentHash: 'abc123', path: 'notes/foo.md' });
+
+      const service = new ReindexService(mockFastify);
+      await service.createJob('path', 'notes/foo.md');
+
+      // The emit should have been called with the real contentHash
+      expect(mockEmit).toHaveBeenCalledOnce();
+      const emitArgs = mockEmit.mock.calls[0]!;
+      const events = emitArgs[1] as Array<{ path: string; type: string; contentHash: string }>;
+      expect(events).toHaveLength(1);
+      expect(events[0]!.contentHash).toBe('abc123');
+    });
+
+    it('path reindex emits empty contentHash when file not found in DB', async () => {
+      mockDbGet.mockReturnValue(undefined);
+
+      const service = new ReindexService(mockFastify);
+      await service.createJob('path', 'notes/missing.md');
+
+      expect(mockEmit).toHaveBeenCalledOnce();
+      const emitArgs = mockEmit.mock.calls[0]!;
+      const events = emitArgs[1] as Array<{ path: string; type: string; contentHash: string }>;
+      expect(events).toHaveLength(1);
+      expect(events[0]!.contentHash).toBe('');
+    });
+  });
+
   describe('getJob', () => {
     it('returns job state with filesProcessed, totalFiles, errors', async () => {
       const service = new ReindexService(mockFastify);

@@ -7,12 +7,6 @@ import matter from 'gray-matter';
 import PQueue from 'p-queue';
 import { v5 as uuidv5 } from 'uuid';
 import { config } from '../config.js';
-
-declare module 'fastify' {
-  interface FastifyInstance {
-    pipelineQueue: PQueue;
-  }
-}
 import { indexedFiles } from '../db/schema.js';
 import { chunkCanvas } from '../lib/canvas-chunker.js';
 import { chunkMarkdown } from '../lib/chunker.js';
@@ -21,6 +15,12 @@ import { chunkExcalidraw } from '../lib/excalidraw-chunker.js';
 import { extractImageBacklinks, IMAGE_EXTENSIONS } from '../lib/image-tracker.js';
 import type { FileChangeEvent } from '../lib/indexer.js';
 import { chunkPdf } from '../lib/pdf-chunker.js';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    pipelineQueue: PQueue;
+  }
+}
 
 // UUID v5 DNS namespace constant
 const UUID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';

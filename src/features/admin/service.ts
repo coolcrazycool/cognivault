@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { eq, like } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
+import { indexedFiles } from '../../db/schema.js';
 
 // ── Types ──
 
@@ -102,13 +104,22 @@ export class ReindexService {
     this.jobs.set(job.id, job);
 
     try {
+      // Look up the real contentHash from indexed_files (fall back to '' if not found)
+      const row = this.fastify.db
+        .select()
+        .from(indexedFiles)
+        .where(eq(indexedFiles.path, filePath))
+        .get();
+
+      const contentHash = row?.contentHash ?? '';
+
       // Emit a synthetic updated event for the specific file
       // The indexer (and pipeline) will handle re-processing
       this.fastify.indexer.emit('changes', [
         {
           path: filePath,
           type: 'updated',
-          contentHash: '',
+          contentHash,
         },
       ]);
 
@@ -139,9 +150,6 @@ export class ReindexService {
 
     try {
       // Query DB for all files matching the folder prefix
-      const { indexedFiles } = await import('../../db/schema.js');
-      const { like } = await import('drizzle-orm');
-
       const files = this.fastify.db
         .select()
         .from(indexedFiles)
