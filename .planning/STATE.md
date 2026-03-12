@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 14-01-PLAN.md
-last_updated: "2026-03-12T19:14:42.924Z"
+stopped_at: Completed 14-03-PLAN.md
+last_updated: "2026-03-12T19:51:21.543Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
   total_phases: 14
   completed_phases: 14
-  total_plans: 36
-  completed_plans: 36
+  total_plans: 37
+  completed_plans: 37
   percent: 19
 ---
 
@@ -82,6 +82,7 @@ Progress: [▓▓░░░░░░░░] 19%
 | Phase 13-search-reindex-correctness P02 | 4min | 2 tasks | 3 files |
 | Phase 14-infrastructure-hardening-cleanup P02 | 3 | 2 tasks | 3 files |
 | Phase 14-infrastructure-hardening-cleanup P01 | 14min | 2 tasks | 13 files |
+| Phase 14-infrastructure-hardening-cleanup P03 | 21min | 1 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -201,6 +202,9 @@ Recent decisions affecting current work:
 - [Phase 14-01]: [14-01]: VaultManager.vaultRootPath getter returns this.rootPath — simple public accessor replacing unsafe runtime casts across indexer and pipeline
 - [Phase 14-01]: [14-01]: db.test.ts close coverage via afterAll comment — vi.resetModules() causes ZodError due to config singleton requiring OPENAI_API_KEY at module load
 - [Phase 14-01]: [14-01]: Mock vaults in tests must expose vaultRootPath property to match VaultManager public API after getter addition
+- [Phase 14-03]: node --env-file=.env ./node_modules/vitest/vitest.mjs run used for test script — .bin/vitest is a bash shim incompatible with node --env-file flag
+- [Phase 14-03]: vi.mock(openai) required in all buildApp() test files — .env OPENAI_API_KEY lacks model.request scope, live API calls return 401
+- [Phase 14-03]: vault/routes.ts handleVaultError returns FastifyReply (not void) — Fastify v5 double-response fix; return value signals route handler response is complete
 
 ### Roadmap Evolution
 
@@ -216,5 +220,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-12T19:14:42.921Z
-Stopped at: Completed 14-01-PLAN.md
+Last session: 2026-03-12T19:51:21.540Z
+Stopped at: Completed 14-03-PLAN.md
