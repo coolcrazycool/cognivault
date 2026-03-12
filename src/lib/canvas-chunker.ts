@@ -21,7 +21,7 @@ interface CanvasFile {
 function isCanvasFile(value: unknown): value is CanvasFile {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
-  return Array.isArray(obj['nodes']);
+  return Array.isArray(obj.nodes);
 }
 
 // ── Chunk shape (same as MarkdownChunk) ──

@@ -27,12 +27,17 @@ function shapeElement(id: string, type: string = 'rectangle'): object {
   return { id, type, x: 0, y: 0, width: 100, height: 100 };
 }
 
+// Long enough to avoid short-element merging (>=5 tokens each)
+const LONG_TEXT_1 = 'This element contains enough tokens to stand alone';
+const LONG_TEXT_2 = 'Another element with sufficient token count to avoid merging';
+const LONG_TEXT_3 = 'Third element also long enough to remain separate from others';
+
 describe('chunkExcalidraw - text element extraction', () => {
-  it('produces one chunk per text element', () => {
+  it('produces one chunk per text element (with long-enough texts)', () => {
     const file = makeExcalidraw([
-      textElement('1', 'First label'),
-      textElement('2', 'Second label'),
-      textElement('3', 'Third label'),
+      textElement('1', LONG_TEXT_1),
+      textElement('2', LONG_TEXT_2),
+      textElement('3', LONG_TEXT_3),
     ]);
 
     const chunks = chunkExcalidraw(file, 'MyDrawing');
@@ -41,9 +46,9 @@ describe('chunkExcalidraw - text element extraction', () => {
 
   it('assigns sectionPath "DrawingName > Text N" (1-based)', () => {
     const file = makeExcalidraw([
-      textElement('1', 'Alpha'),
-      textElement('2', 'Beta'),
-      textElement('3', 'Gamma'),
+      textElement('1', LONG_TEXT_1),
+      textElement('2', LONG_TEXT_2),
+      textElement('3', LONG_TEXT_3),
     ]);
 
     const chunks = chunkExcalidraw(file, 'MyDrawing');
@@ -53,7 +58,7 @@ describe('chunkExcalidraw - text element extraction', () => {
   });
 
   it('assigns sequential chunkIndex starting at 0', () => {
-    const file = makeExcalidraw([textElement('1', 'Alpha'), textElement('2', 'Beta')]);
+    const file = makeExcalidraw([textElement('1', LONG_TEXT_1), textElement('2', LONG_TEXT_2)]);
 
     const chunks = chunkExcalidraw(file, 'MyDrawing');
     expect(chunks[0]?.chunkIndex).toBe(0);
@@ -144,10 +149,7 @@ describe('chunkExcalidraw - short element merging', () => {
     // A text with well over 5 tokens
     const longText =
       'This is a longer sentence with many tokens that definitely exceeds five tokens total.';
-    const file = makeExcalidraw([
-      textElement('1', longText),
-      textElement('2', longText),
-    ]);
+    const file = makeExcalidraw([textElement('1', longText), textElement('2', longText)]);
 
     const chunks = chunkExcalidraw(file, 'MyDrawing');
     // Each is standalone (>5 tokens)
