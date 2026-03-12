@@ -2,8 +2,8 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { decode, encode } from '@toon-format/toon';
-import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
+import Fastify from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 // Set env vars before any module imports that trigger config parsing
