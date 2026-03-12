@@ -225,7 +225,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 11. Observability + Admin | 3/3 | Complete    | 2026-03-12 |
 | 12. Prometheus Metrics Dashboard | 3/3 | Complete    | 2026-03-12 |
 | 13. Search & Reindex Correctness | 2/2 | Complete    | 2026-03-12 |
-| 14. Infrastructure Hardening & Cleanup | 2/2 | Complete   | 2026-03-12 |
+| 14. Infrastructure Hardening & Cleanup | 2/3 | In Progress | |
 
 ### Phase 12: Prometheus metrics dashboard in separate container
 
@@ -274,8 +274,10 @@ Plans:
   4. No-op onClose test in db.test.ts replaced with meaningful assertion or removed
   5. HighErrorRate alert rule handles idle periods without false-positives
   6. MON-01 through MON-08 added to REQUIREMENTS.md traceability table
-**Plans**: 2 plans
+  7. pnpm test passes all test suites without requiring OPENAI_API_KEY in shell environment
+**Plans**: 3 plans
 
 Plans:
 - [ ] 14-01-PLAN.md -- Code quality: VaultManager getter, unsafe cast removal, Biome lint fix, db.test close assertion
 - [ ] 14-02-PLAN.md -- Infrastructure: Docker named volume, HighErrorRate alert fix, MON requirements traceability
+- [ ] 14-03-PLAN.md -- Gap closure: Fix test script to load .env automatically for embedding plugin validation
