@@ -87,6 +87,12 @@ async function buildTestApp(): Promise<FastifyInstance> {
   app.decorate('qdrant', mockQdrant as any);
   // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial EmbeddingProvider
   app.decorate('embedder', mockEmbedder as any);
+  app.decorate('metrics', {
+    searchDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
+    searchRequests: { inc: vi.fn() },
+    indexQueueDepth: { set: vi.fn() },
+    staleVectorCleanups: { inc: vi.fn() },
+  } as unknown as FastifyInstance['metrics']);
 
   // Register error handler (converts validation errors to proper 400 responses)
   const { default: errorHandler } = await import('../../../plugins/error-handler.js');

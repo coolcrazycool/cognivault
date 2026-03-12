@@ -15,6 +15,7 @@ export async function contextRoutes(fastify: FastifyInstance): Promise<void> {
       // Fetch top 50 hybrid results (per locked decision)
       const searchService = new SearchService(fastify.qdrant, fastify.embedder);
       const results = await searchService.hybrid(query, 50, filters);
+      fastify.metrics.searchRequests.inc({ type: 'hybrid' });
 
       // Assemble context pack
       const contextService = new ContextService();

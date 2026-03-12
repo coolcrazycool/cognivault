@@ -120,13 +120,19 @@ async function buildTestApp(opts?: {
           on: vi.fn(),
           removeListener: vi.fn(),
         } as unknown as FastifyInstance['indexer']);
+        f.decorate('metrics', {
+          searchDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
+          searchRequests: { inc: vi.fn() },
+          indexQueueDepth: { set: vi.fn() },
+          staleVectorCleanups: { inc: vi.fn() },
+        } as unknown as FastifyInstance['metrics']);
       },
       { name: 'vault' },
     ),
   );
 
   // Satisfy fp dependency checks with empty plugins
-  for (const name of ['db', 'embedder', 'qdrant', 'indexer'] as const) {
+  for (const name of ['db', 'embedder', 'qdrant', 'indexer', 'metrics'] as const) {
     await app.register(fp(async (_f) => {}, { name }));
   }
 

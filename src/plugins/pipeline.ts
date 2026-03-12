@@ -12,7 +12,7 @@ import { chunkCanvas } from '../lib/canvas-chunker.js';
 import { chunkMarkdown } from '../lib/chunker.js';
 import { chunkCsv } from '../lib/csv-chunker.js';
 import { chunkExcalidraw } from '../lib/excalidraw-chunker.js';
-import { IMAGE_EXTENSIONS, extractImageBacklinks } from '../lib/image-tracker.js';
+import { extractImageBacklinks, IMAGE_EXTENSIONS } from '../lib/image-tracker.js';
 import type { FileChangeEvent } from '../lib/indexer.js';
 import { chunkPdf } from '../lib/pdf-chunker.js';
 
@@ -59,6 +59,7 @@ async function embedAndUpsert(
         ],
       },
     });
+    fastify.metrics.staleVectorCleanups.inc();
     return;
   }
 
@@ -91,6 +92,7 @@ async function embedAndUpsert(
       ],
     },
   });
+  fastify.metrics.staleVectorCleanups.inc();
 
   // Update embedding_model_version in indexed_files
   fastify.db
@@ -127,6 +129,7 @@ async function processMarkdown(fastify: FastifyInstance, event: FileChangeEvent)
         ],
       },
     });
+    fastify.metrics.staleVectorCleanups.inc();
     return;
   }
 
@@ -167,6 +170,7 @@ async function processMarkdown(fastify: FastifyInstance, event: FileChangeEvent)
       ],
     },
   });
+  fastify.metrics.staleVectorCleanups.inc();
 
   // Update embedding_model_version in indexed_files
   fastify.db
@@ -331,8 +335,13 @@ async function pipelinePlugin(fastify: FastifyInstance): Promise<void> {
           }
         } catch (err: unknown) {
           fastify.log.error({ event, err }, 'Pipeline processing failed — will retry on next poll');
+        } finally {
+          // Update queue depth gauge after each task completes
+          fastify.metrics.indexQueueDepth.set(queue.size + queue.pending);
         }
       });
+      // Update queue depth gauge after adding to queue
+      fastify.metrics.indexQueueDepth.set(queue.size + queue.pending);
     }
   };
 
@@ -347,5 +356,5 @@ async function pipelinePlugin(fastify: FastifyInstance): Promise<void> {
 
 export default fp(pipelinePlugin, {
   name: 'pipeline',
-  dependencies: ['indexer', 'qdrant', 'embedder', 'vault', 'db'],
+  dependencies: ['indexer', 'qdrant', 'embedder', 'vault', 'db', 'metrics'],
 });
