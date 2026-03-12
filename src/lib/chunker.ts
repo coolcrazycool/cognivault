@@ -87,6 +87,31 @@ interface Section {
   nodes: Node[];
 }
 
+// Split oversized text by lines to stay within MAX_CHUNK_TOKENS
+function splitTextByLines(text: string, headerText: string, maxTokens: number): string[] {
+  const lines = text.split('\n');
+  const chunks: string[] = [];
+  let currentLines: string[] = [];
+  let currentTokens = countTokens(headerText);
+
+  for (const line of lines) {
+    const lineTokens = countTokens(line);
+    if (currentLines.length > 0 && currentTokens + lineTokens > maxTokens) {
+      chunks.push(`${headerText}\n\n${normalizeObsidianSyntax(currentLines.join('\n'))}`);
+      currentLines = [];
+      currentTokens = countTokens(headerText);
+    }
+    currentLines.push(line);
+    currentTokens += lineTokens;
+  }
+
+  if (currentLines.length > 0) {
+    chunks.push(`${headerText}\n\n${normalizeObsidianSyntax(currentLines.join('\n'))}`);
+  }
+
+  return chunks;
+}
+
 // Split a list of nodes at paragraph boundaries to stay within MAX_CHUNK_TOKENS
 function splitAtParagraphBoundaries(nodes: Node[], headerText: string): string[] {
   const chunks: string[] = [];
@@ -97,8 +122,21 @@ function splitAtParagraphBoundaries(nodes: Node[], headerText: string): string[]
     const nodeText = nodeToText(node);
     const nodeTokens = countTokens(nodeText);
 
-    // Tables and code blocks are atomic — never split them
+    // Tables and code blocks — split by lines if they exceed MAX_CHUNK_TOKENS
     if (isTable(node) || isCode(node)) {
+      if (nodeTokens > MAX_CHUNK_TOKENS) {
+        // Flush current accumulator first
+        if (currentNodes.length > 0) {
+          chunks.push(
+            `${headerText}\n\n${normalizeObsidianSyntax(sectionNodesToText(currentNodes))}`,
+          );
+          currentNodes = [];
+          currentTokens = countTokens(headerText);
+        }
+        // Split the oversized node by lines
+        chunks.push(...splitTextByLines(nodeText, headerText, MAX_CHUNK_TOKENS));
+        continue;
+      }
       if (currentNodes.length > 0 && currentTokens + nodeTokens > MAX_CHUNK_TOKENS) {
         chunks.push(
           `${headerText}\n\n${normalizeObsidianSyntax(sectionNodesToText(currentNodes))}`,
