@@ -23,6 +23,9 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 9: TOON + API Polish** - TOON content negotiation, JSON default, OpenAPI spec generation (completed 2026-03-12)
 - [x] **Phase 10: Multi-Format Indexing** - PDF, Canvas, Excalidraw, CSV, and image metadata indexing (completed 2026-03-12)
 - [x] **Phase 11: Observability + Admin** - Structured logging, Prometheus metrics, OpenTelemetry, manual reindex (completed 2026-03-12)
+- [x] **Phase 12: Prometheus Metrics Dashboard** - Prometheus + Grafana docker-compose, dashboards, alert rules (completed 2026-03-12)
+- [ ] **Phase 13: Search & Reindex Correctness** - Folder filter in semantic search, reindex status timing, contentHash fix
+- [ ] **Phase 14: Infrastructure Hardening & Cleanup** - Docker volume persistence, unsafe cast fix, lint cleanup, docs
 
 ## Phase Details
 
@@ -221,6 +224,8 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 10. Multi-Format Indexing | 3/3 | Complete    | 2026-03-12 |
 | 11. Observability + Admin | 3/3 | Complete    | 2026-03-12 |
 | 12. Prometheus Metrics Dashboard | 3/3 | Complete    | 2026-03-12 |
+| 13. Search & Reindex Correctness | 0/0 | Not Started | - |
+| 14. Infrastructure Hardening & Cleanup | 0/0 | Not Started | - |
 
 ### Phase 12: Prometheus metrics dashboard in separate container
 
@@ -241,3 +246,28 @@ Plans:
 - [ ] 12-01-PLAN.md — New pipeline metrics (embedding, chunks, duration) in metrics.ts + pipeline.ts instrumentation
 - [ ] 12-02-PLAN.md — Prometheus + Grafana docker-compose services, scrape config, alert rules, Grafana provisioning
 - [ ] 12-03-PLAN.md — Three Grafana dashboard JSON files (Search, Indexing, System) with end-to-end verification
+
+### Phase 13: Search & Reindex Correctness
+**Goal:** Fix integration correctness issues in search filtering and reindex status tracking
+**Depends on:** Phase 6, Phase 11
+**Requirements:** RET-05, IDX-13, IDX-06
+**Gap Closure:** Closes integration gaps from v1.0 audit
+**Success Criteria** (what must be TRUE):
+  1. Folder filter is applied in semantic() and hybrid semantic leg, not just lexical post-filter
+  2. Reindex job status transitions to 'completed' only after pipeline queue fully drains
+  3. Path-scoped reindex emits real contentHash instead of empty string
+**Plans**: TBD
+
+### Phase 14: Infrastructure Hardening & Cleanup
+**Goal:** Fix infrastructure issues, clean up tech debt, and complete documentation gaps
+**Depends on:** Phase 1, Phase 4, Phase 9, Phase 12
+**Requirements:** MON-01, MON-02, MON-03, MON-04, MON-05, MON-06, MON-07, MON-08
+**Gap Closure:** Closes tech debt and documentation gaps from v1.0 audit
+**Success Criteria** (what must be TRUE):
+  1. SQLite data directory uses a named Docker volume, persisted across container restarts
+  2. VaultManager.rootPath accessed via public getter, not unsafe private-field cast
+  3. Biome lint passes cleanly (organizeImports fixed in toon.test.ts)
+  4. No-op onClose test in db.test.ts replaced with meaningful assertion or removed
+  5. HighErrorRate alert rule handles idle periods without false-positives
+  6. MON-01 through MON-08 added to REQUIREMENTS.md traceability table
+**Plans**: TBD
