@@ -70,6 +70,11 @@ async function buildTestApp(opts?: {
   qdrantDelete: ReturnType<typeof vi.fn>;
   setPayload: ReturnType<typeof vi.fn>;
   dbUpdate: ReturnType<typeof vi.fn>;
+  metrics: {
+    embeddingRequests: { inc: ReturnType<typeof vi.fn> };
+    chunksProcessed: { inc: ReturnType<typeof vi.fn> };
+    pipelineDuration: { startTimer: ReturnType<typeof vi.fn> };
+  };
 }> {
   const Fastify = (await import('fastify')).default;
 
@@ -125,6 +130,9 @@ async function buildTestApp(opts?: {
           searchRequests: { inc: vi.fn() },
           indexQueueDepth: { set: vi.fn() },
           staleVectorCleanups: { inc: vi.fn() },
+          embeddingRequests: { inc: vi.fn() },
+          chunksProcessed: { inc: vi.fn() },
+          pipelineDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
         } as unknown as FastifyInstance['metrics']);
       },
       { name: 'vault' },
@@ -140,7 +148,13 @@ async function buildTestApp(opts?: {
   await app.register(pipelinePlugin);
   await app.ready();
 
-  return { app, readContent, embed, upsert, qdrantDelete, setPayload, dbUpdate };
+  const metrics = app.metrics as unknown as {
+    embeddingRequests: { inc: ReturnType<typeof vi.fn> };
+    chunksProcessed: { inc: ReturnType<typeof vi.fn> };
+    pipelineDuration: { startTimer: ReturnType<typeof vi.fn> };
+  };
+
+  return { app, readContent, embed, upsert, qdrantDelete, setPayload, dbUpdate, metrics };
 }
 
 // Helper: invoke the 'changes' listener the pipeline registered on indexer.on
@@ -799,6 +813,87 @@ describe('pipeline plugin', () => {
       if (call) {
         expect(call[1].payload['title']).toBe('new-name');
       }
+
+      await app.close();
+    });
+  });
+
+  // ── pipeline metrics ─────────────────────────────────────────────────────
+
+  describe('pipeline metrics', () => {
+    it('increments embeddingRequests when processing a markdown file', async () => {
+      const { app, metrics } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'notes/my-note.md',
+        type: 'created',
+        contentHash: 'abc123',
+      };
+
+      await emitChanges(app, [event]);
+
+      expect(metrics.embeddingRequests.inc).toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('increments chunksProcessed with chunk count when processing a markdown file', async () => {
+      const { app, metrics } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'notes/my-note.md',
+        type: 'created',
+        contentHash: 'abc123',
+      };
+
+      await emitChanges(app, [event]);
+
+      expect(metrics.chunksProcessed.inc).toHaveBeenCalledWith(expect.any(Number));
+
+      await app.close();
+    });
+
+    it('starts and ends pipelineDuration timer when processing a markdown file', async () => {
+      const { app, metrics } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'notes/my-note.md',
+        type: 'created',
+        contentHash: 'abc123',
+      };
+
+      await emitChanges(app, [event]);
+
+      expect(metrics.pipelineDuration.startTimer).toHaveBeenCalled();
+      // Verify the returned end() function was called
+      const endFn = metrics.pipelineDuration.startTimer.mock.results[0]?.value as
+        | ReturnType<typeof vi.fn>
+        | undefined;
+      expect(endFn).toBeDefined();
+      if (endFn) {
+        expect(endFn).toHaveBeenCalled();
+      }
+
+      await app.close();
+    });
+
+    it('starts pipelineDuration timer for non-markdown formats (csv)', async () => {
+      const csvContent = 'name,age\nAlice,30\nBob,25';
+      const { app, metrics } = await buildTestApp({
+        readContent: vi.fn().mockResolvedValue({ content: csvContent }),
+      });
+
+      const event: FileChangeEvent = {
+        path: 'data/users.csv',
+        type: 'created',
+        contentHash: 'csvhash',
+      };
+
+      await emitChanges(app, [event]);
+
+      expect(metrics.pipelineDuration.startTimer).toHaveBeenCalled();
+      expect(metrics.embeddingRequests.inc).toHaveBeenCalled();
+      expect(metrics.chunksProcessed.inc).toHaveBeenCalledWith(expect.any(Number));
 
       await app.close();
     });

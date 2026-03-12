@@ -64,6 +64,8 @@ async function embedAndUpsert(
   }
 
   const embeddings = await fastify.embedder.embed(chunks.map((c) => c.text));
+  fastify.metrics.embeddingRequests.inc();
+  fastify.metrics.chunksProcessed.inc(chunks.length);
   const ext = path.extname(event.path);
   const title = path.basename(event.path, ext);
 
@@ -134,6 +136,8 @@ async function processMarkdown(fastify: FastifyInstance, event: FileChangeEvent)
   }
 
   const embeddings = await fastify.embedder.embed(chunks.map((c) => c.text));
+  fastify.metrics.embeddingRequests.inc();
+  fastify.metrics.chunksProcessed.inc(chunks.length);
 
   const frontmatterData = parsed.data as Record<string, unknown>;
 
@@ -217,66 +221,71 @@ async function processCreatedOrUpdated(
   fastify: FastifyInstance,
   event: FileChangeEvent,
 ): Promise<void> {
-  const ext = path.extname(event.path).toLowerCase();
+  const end = fastify.metrics.pipelineDuration.startTimer();
+  try {
+    const ext = path.extname(event.path).toLowerCase();
 
-  // Image files: SQLite tracking only, no Qdrant vectors
-  if (IMAGE_EXTENSIONS.has(ext)) {
-    await processImage(fastify, event);
-    return;
-  }
-
-  // Text formats: extract chunks -> embed -> upsert to Qdrant
-  let chunks: Array<{ text: string; sectionPath: string; chunkIndex: number }>;
-  const extraPayload: Record<string, unknown> = {
-    tags: [],
-    project: null,
-    status: null,
-    type: null,
-    extra_metadata: '{}',
-  };
-
-  switch (ext) {
-    case '.md':
-      // Delegate to full markdown handler (preserves frontmatter logic)
-      await processMarkdown(fastify, event);
+    // Image files: SQLite tracking only, no Qdrant vectors
+    if (IMAGE_EXTENSIONS.has(ext)) {
+      await processImage(fastify, event);
       return;
-
-    case '.pdf': {
-      const vaultRoot = (fastify.vault as unknown as { rootPath: string }).rootPath;
-      const absPath = path.join(vaultRoot, event.path);
-      const buffer = await fs.readFile(absPath);
-      const filename = path.basename(event.path, ext);
-      chunks = await chunkPdf(buffer, filename);
-      break;
     }
 
-    case '.csv': {
-      const result = await fastify.vault.readContent(event.path);
-      const filename = path.basename(event.path, ext);
-      chunks = chunkCsv(result.content, filename);
-      break;
+    // Text formats: extract chunks -> embed -> upsert to Qdrant
+    let chunks: Array<{ text: string; sectionPath: string; chunkIndex: number }>;
+    const extraPayload: Record<string, unknown> = {
+      tags: [],
+      project: null,
+      status: null,
+      type: null,
+      extra_metadata: '{}',
+    };
+
+    switch (ext) {
+      case '.md':
+        // Delegate to full markdown handler (preserves frontmatter logic)
+        await processMarkdown(fastify, event);
+        return;
+
+      case '.pdf': {
+        const vaultRoot = (fastify.vault as unknown as { rootPath: string }).rootPath;
+        const absPath = path.join(vaultRoot, event.path);
+        const buffer = await fs.readFile(absPath);
+        const filename = path.basename(event.path, ext);
+        chunks = await chunkPdf(buffer, filename);
+        break;
+      }
+
+      case '.csv': {
+        const result = await fastify.vault.readContent(event.path);
+        const filename = path.basename(event.path, ext);
+        chunks = chunkCsv(result.content, filename);
+        break;
+      }
+
+      case '.canvas': {
+        const result = await fastify.vault.readContent(event.path);
+        const canvasName = path.basename(event.path, ext);
+        chunks = chunkCanvas(result.content, canvasName);
+        break;
+      }
+
+      case '.excalidraw': {
+        const result = await fastify.vault.readContent(event.path);
+        const drawingName = path.basename(event.path, ext);
+        chunks = chunkExcalidraw(result.content, drawingName);
+        break;
+      }
+
+      default:
+        // Unknown extension — skip
+        return;
     }
 
-    case '.canvas': {
-      const result = await fastify.vault.readContent(event.path);
-      const canvasName = path.basename(event.path, ext);
-      chunks = chunkCanvas(result.content, canvasName);
-      break;
-    }
-
-    case '.excalidraw': {
-      const result = await fastify.vault.readContent(event.path);
-      const drawingName = path.basename(event.path, ext);
-      chunks = chunkExcalidraw(result.content, drawingName);
-      break;
-    }
-
-    default:
-      // Unknown extension — skip
-      return;
+    await embedAndUpsert(fastify, event, chunks, extraPayload);
+  } finally {
+    end();
   }
-
-  await embedAndUpsert(fastify, event, chunks, extraPayload);
 }
 
 async function processDeleted(fastify: FastifyInstance, event: FileChangeEvent): Promise<void> {
