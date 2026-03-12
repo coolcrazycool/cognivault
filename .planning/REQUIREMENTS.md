@@ -69,6 +69,17 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **INF-05**: Service supports OpenTelemetry distributed tracing
 - [x] **INF-06**: Service deploys as single Docker container alongside Qdrant via docker-compose
 
+### Monitoring
+
+- [x] **MON-01**: Service exposes total embedding API calls metric (cognivault_embedding_requests_total)
+- [x] **MON-02**: Service exposes total chunks processed and per-file pipeline duration metrics
+- [x] **MON-03**: Prometheus container scrapes /metrics at 15s interval with 7-day retention
+- [x] **MON-04**: Four Prometheus alerting rules defined (CogniVaultDown, HighSearchLatencyP99, HighMemoryUsage, HighErrorRate)
+- [x] **MON-05**: Grafana container auto-provisions datasource and dashboards on startup
+- [x] **MON-06**: Search performance dashboard shows latency percentiles, request rate, error rate
+- [x] **MON-07**: Indexing pipeline dashboard shows embedding calls, chunk throughput, queue depth
+- [x] **MON-08**: System dashboard shows CPU, memory, heap, GC, event loop lag, uptime
+
 ## v2 Requirements
 
 Deferred to future release. Tracked but not in current roadmap.
@@ -154,10 +165,18 @@ Which phases cover which requirements. Updated during roadmap creation.
 | INF-04 | Phase 11 | Complete |
 | INF-05 | Phase 11 | Complete |
 | INF-06 | Phase 1 | Complete |
+| MON-01 | Phase 12 | Complete |
+| MON-02 | Phase 12 | Complete |
+| MON-03 | Phase 12 | Complete |
+| MON-04 | Phase 14 | Complete |
+| MON-05 | Phase 12 | Complete |
+| MON-06 | Phase 12 | Complete |
+| MON-07 | Phase 12 | Complete |
+| MON-08 | Phase 12 | Complete |
 
 **Coverage:**
-- v1 requirements: 44 total
-- Mapped to phases: 44
+- v1 requirements: 52 total
+- Mapped to phases: 52
 - Unmapped: 0
 
 ---
