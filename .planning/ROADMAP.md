@@ -204,7 +204,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12
 Note: Phases 9, 10, 11 depend on earlier phases but are independent of each other and could execute in any order after their dependencies are met.
 
 | Phase | Plans Complete | Status | Completed |
@@ -220,3 +220,24 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 9. TOON + API Polish | 2/2 | Complete   | 2026-03-12 |
 | 10. Multi-Format Indexing | 3/3 | Complete    | 2026-03-12 |
 | 11. Observability + Admin | 3/3 | Complete    | 2026-03-12 |
+| 12. Prometheus Metrics Dashboard | 0/3 | Planning  | - |
+
+### Phase 12: Prometheus metrics dashboard in separate container
+
+**Goal:** Prometheus and Grafana run alongside CogniVault in docker-compose, scraping metrics and providing auto-provisioned dashboards for search performance, indexing pipeline health, and Node.js runtime monitoring
+**Requirements**: MON-01, MON-02, MON-03, MON-04, MON-05, MON-06, MON-07, MON-08
+**Depends on:** Phase 11
+**Success Criteria** (what must be TRUE):
+  1. Prometheus scrapes CogniVault /metrics endpoint every 15 seconds with 7-day retention
+  2. Grafana loads three auto-provisioned dashboards (Search, Indexing, System) on startup without manual configuration
+  3. Search dashboard shows latency percentiles, heatmaps, request rate, and error rate
+  4. Indexing dashboard shows embedding call rate, chunk throughput, pipeline duration, queue depth
+  5. System dashboard shows CPU, memory, heap, GC, event loop lag, and uptime
+  6. Four Prometheus alerting rules fire on service down, high memory, high latency, high error rate
+  7. Three new pipeline metrics (embedding requests, chunks processed, pipeline duration) are instrumented in CogniVault
+**Plans**: 3 plans
+
+Plans:
+- [ ] 12-01-PLAN.md — New pipeline metrics (embedding, chunks, duration) in metrics.ts + pipeline.ts instrumentation
+- [ ] 12-02-PLAN.md — Prometheus + Grafana docker-compose services, scrape config, alert rules, Grafana provisioning
+- [ ] 12-03-PLAN.md — Three Grafana dashboard JSON files (Search, Indexing, System) with end-to-end verification
