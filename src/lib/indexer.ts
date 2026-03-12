@@ -2,12 +2,12 @@ import * as crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { eq } from 'drizzle-orm';
+import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type { FastifyBaseLogger } from 'fastify';
 import pLimit from 'p-limit';
-import { indexedFiles } from '../db/schema.js';
 import type * as schema from '../db/schema.js';
+import { indexedFiles } from '../db/schema.js';
 import type { VaultManager } from './vault.js';
 
 // ── Types ──
@@ -47,6 +47,42 @@ interface IndexerEvents {
 const BATCH_SIZE = 100;
 const LOG_PROGRESS_EVERY = 500;
 
+const INDEXED_EXTENSIONS = [
+  'md',
+  'pdf',
+  'canvas',
+  'excalidraw',
+  'csv',
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'svg',
+  'webp',
+  'bmp',
+] as const;
+
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp']);
+
+function fileTypeFromPath(filePath: string): string {
+  const ext = filePath.toLowerCase().split('.').at(-1) ?? '';
+  if (IMAGE_EXTS.has(`.${ext}`)) return 'image';
+  switch (ext) {
+    case 'md':
+      return 'md';
+    case 'pdf':
+      return 'pdf';
+    case 'csv':
+      return 'csv';
+    case 'canvas':
+      return 'canvas';
+    case 'excalidraw':
+      return 'excalidraw';
+    default:
+      return 'md';
+  }
+}
+
 // ── VaultIndexer ──
 
 export class VaultIndexer extends EventEmitter<IndexerEvents> {
@@ -85,8 +121,16 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
   // ── Private: Vault scanning ──
 
   private async scanVault(): Promise<string[]> {
-    const { entries } = await this.vault.listFiles({ recursive: true, ext: 'md' });
-    return entries.filter((e) => e.type === 'file').map((e) => e.path);
+    const pathSet = new Set<string>();
+    for (const ext of INDEXED_EXTENSIONS) {
+      const { entries } = await this.vault.listFiles({ recursive: true, ext });
+      for (const e of entries) {
+        if (e.type === 'file') {
+          pathSet.add(e.path);
+        }
+      }
+    }
+    return Array.from(pathSet);
   }
 
   // ── Private: Absolute path helper ──
@@ -179,6 +223,7 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
               mtime: f.mtime,
               size: f.size,
               indexedAt: now,
+              fileType: fileTypeFromPath(f.path),
             })),
           )
           .onConflictDoUpdate({
@@ -188,6 +233,7 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
               mtime: indexedFiles.mtime,
               size: indexedFiles.size,
               indexedAt: indexedFiles.indexedAt,
+              fileType: indexedFiles.fileType,
             },
           })
           .run();
@@ -321,7 +367,8 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
     );
 
     // Stability check for created files (parallel)
-    const stableCreated: Array<{ path: string; contentHash: string; mtime: number; size: number }> = [];
+    const stableCreated: Array<{ path: string; contentHash: string; mtime: number; size: number }> =
+      [];
     await Promise.all(
       createdFirstHashes.map(async (item) => {
         if (!item) return;
@@ -343,7 +390,8 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
     );
 
     // Stability check for updated files (parallel)
-    const stableUpdated: Array<{ path: string; contentHash: string; mtime: number; size: number }> = [];
+    const stableUpdated: Array<{ path: string; contentHash: string; mtime: number; size: number }> =
+      [];
     await Promise.all(
       candidateUpdates.map(async (item) => {
         const stableHash = await this.checkStability(this.abs(item.path), item.firstHash);
@@ -419,6 +467,7 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
           mtime: item.mtime,
           size: item.size,
           indexedAt: now,
+          fileType: fileTypeFromPath(item.path),
         })
         .onConflictDoUpdate({
           target: indexedFiles.path,
@@ -427,6 +476,7 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
             mtime: indexedFiles.mtime,
             size: indexedFiles.size,
             indexedAt: indexedFiles.indexedAt,
+            fileType: indexedFiles.fileType,
           },
         })
         .run();

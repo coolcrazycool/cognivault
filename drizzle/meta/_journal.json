@@ -15,6 +15,13 @@
       "when": 1773166916411,
       "tag": "0001_military_whiplash",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1773311392000,
+      "tag": "0002_multi_format",
+      "breakpoints": true
     }
   ]
 }
