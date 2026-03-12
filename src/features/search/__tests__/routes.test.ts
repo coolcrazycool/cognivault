@@ -247,6 +247,52 @@ describe('search routes', () => {
       expect(typeof body.query_ms).toBe('number');
       expect(body.query_ms).toBeGreaterThanOrEqual(0);
     });
+
+    it('folder filter in semantic search returns only matching paths', async () => {
+      // Qdrant returns mixed paths — folder filter should post-filter them
+      mockQdrantSearch.mockResolvedValueOnce([
+        {
+          id: 'uuid-p1',
+          score: 0.95,
+          payload: {
+            text: 'in projects',
+            path: 'Projects/alpha.md',
+            title: 'alpha',
+            section_path: 'alpha > intro',
+            tags: [],
+            project: null,
+            status: null,
+            type: null,
+          },
+        },
+        {
+          id: 'uuid-p2',
+          score: 0.80,
+          payload: {
+            text: 'not in projects',
+            path: 'notes/other.md',
+            title: 'other',
+            section_path: 'other > main',
+            tags: [],
+            project: null,
+            status: null,
+            type: null,
+          },
+        },
+      ]);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/semantic',
+        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'test', filters: { folder: 'Projects/' } },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.results).toHaveLength(1);
+      expect(body.results[0].path).toBe('Projects/alpha.md');
+    });
   });
 
   describe('POST /api/vault/search/hybrid', () => {
@@ -442,6 +488,85 @@ describe('search routes', () => {
       expect(body.limit).toBe(6);
       expect(typeof body.query_ms).toBe('number');
       expect(body.query_ms).toBeGreaterThanOrEqual(0);
+    });
+
+    it('hybrid search with folder filter excludes results outside folder', async () => {
+      // Both semantic and lexical return mixed paths — only Projects/ should survive
+      mockQdrantSearch.mockResolvedValueOnce([
+        {
+          id: 'uuid-s1',
+          score: 0.92,
+          payload: {
+            text: 'semantic in projects',
+            path: 'Projects/beta.md',
+            title: 'beta',
+            section_path: 'beta > intro',
+            tags: [],
+            project: null,
+            status: null,
+            type: null,
+          },
+        },
+        {
+          id: 'uuid-s2',
+          score: 0.75,
+          payload: {
+            text: 'semantic outside',
+            path: 'Archive/old.md',
+            title: 'old',
+            section_path: 'old > intro',
+            tags: [],
+            project: null,
+            status: null,
+            type: null,
+          },
+        },
+      ]);
+      mockQdrantScroll.mockResolvedValueOnce({
+        points: [
+          {
+            id: 'uuid-l1',
+            payload: {
+              text: 'lexical in projects',
+              path: 'Projects/gamma.md',
+              title: 'gamma',
+              section_path: 'gamma > setup',
+              tags: [],
+              project: null,
+              status: null,
+              type: null,
+            },
+          },
+          {
+            id: 'uuid-l2',
+            payload: {
+              text: 'lexical outside',
+              path: 'notes/unrelated.md',
+              title: 'unrelated',
+              section_path: 'main',
+              tags: [],
+              project: null,
+              status: null,
+              type: null,
+            },
+          },
+        ],
+      });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'test', filters: { folder: 'Projects/' } },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      // All returned results must be within Projects/
+      expect(body.results.length).toBeGreaterThan(0);
+      for (const result of body.results) {
+        expect(result.path).toMatch(/^Projects\//);
+      }
     });
   });
 
