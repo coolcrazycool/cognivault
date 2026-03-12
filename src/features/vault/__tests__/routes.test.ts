@@ -2,7 +2,34 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+// Mock OpenAI to avoid real API calls during embedding plugin validation
+vi.mock('openai', () => {
+  const mockEmbeddingsCreate = vi.fn().mockResolvedValue({
+    data: [{ index: 0, embedding: new Array(1536).fill(0.1) }],
+  });
+  class MockOpenAI {
+    embeddings = { create: mockEmbeddingsCreate };
+  }
+  return { default: MockOpenAI };
+});
+
+// Mock Qdrant client to avoid connection to localhost:6333 during plugin init
+vi.mock('@qdrant/js-client-rest', () => {
+  class MockQdrantClient {
+    getCollections = vi.fn().mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+    createCollection = vi.fn().mockResolvedValue({});
+    createPayloadIndex = vi.fn().mockResolvedValue({});
+    upsert = vi.fn().mockResolvedValue({});
+    delete = vi.fn().mockResolvedValue({});
+    setPayload = vi.fn().mockResolvedValue({});
+    search = vi.fn().mockResolvedValue([]);
+    query = vi.fn().mockResolvedValue({ points: [] });
+    scroll = vi.fn().mockResolvedValue({ points: [] });
+  }
+  return { QdrantClient: MockQdrantClient };
+});
 
 let tmpDir: string;
 let vaultRoot: string;
@@ -51,6 +78,7 @@ await fs.writeFile(path.join(vaultRoot, 'image.png'), pngHeader);
 // Set env vars before importing app
 process.env.COGNIVAULT_API_KEY = 'test-api-key';
 process.env.VAULT_PATH = vaultRoot;
+process.env.OPENAI_API_KEY = 'test-openai-key';
 
 const { buildApp } = await import('../../../app.js');
 
@@ -60,6 +88,23 @@ describe('vault routes', () => {
   beforeAll(async () => {
     app = await buildApp({ logger: false });
     await app.ready();
+    // Wait for the initial vault scan to complete and all pipeline queue tasks
+    // to drain before running tests. The indexer's initial scan is fire-and-forget
+    // from the onReady hook, so we must wait for scanComplete + queue idle to
+    // prevent ERR_HTTP_HEADERS_SENT unhandled errors during concurrent tests.
+    await new Promise<void>((resolve) => {
+      // If already done scanning, onIdle resolves immediately
+      app.indexer.once('scanComplete', () => {
+        void app.pipelineQueue.onIdle().then(resolve);
+      });
+      // Guard: if scan somehow already finished before we registered the listener,
+      // just wait for the queue to be idle (it will resolve immediately if empty)
+      void app.pipelineQueue.onIdle().then(() => {
+        // Check if indexer is no longer indexing — scan must be done
+        if (!app.indexer.isIndexing) resolve();
+      });
+    });
+    app.indexer.stop();
   });
 
   afterAll(async () => {

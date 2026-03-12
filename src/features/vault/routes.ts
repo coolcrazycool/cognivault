@@ -23,12 +23,11 @@ import {
   updateMetadataSchema,
 } from './schemas.js';
 
-function handleVaultError(err: unknown, reply: FastifyReply): void {
+function handleVaultError(err: unknown, reply: FastifyReply): FastifyReply {
   if (err instanceof VaultError) {
-    reply.status(err.statusCode).send({
+    return reply.status(err.statusCode).send({
       error: { code: err.code, message: err.message },
     });
-    return;
   }
   throw err;
 }
@@ -43,7 +42,7 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
         const result = await fastify.vault.listFiles({ path, recursive, ext });
         return result;
       } catch (err: unknown) {
-        handleVaultError(err, reply);
+        return handleVaultError(err, reply);
       }
     },
   );
@@ -56,7 +55,7 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
         const result = await fastify.vault.readContent(request.query.path);
         return result;
       } catch (err: unknown) {
-        handleVaultError(err, reply);
+        return handleVaultError(err, reply);
       }
     },
   );
@@ -69,7 +68,7 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
         const result = await fastify.vault.readMetadata(request.query.path);
         return result;
       } catch (err: unknown) {
-        handleVaultError(err, reply);
+        return handleVaultError(err, reply);
       }
     },
   );
@@ -84,7 +83,7 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
         reply.status(201);
         return result;
       } catch (err: unknown) {
-        handleVaultError(err, reply);
+        return handleVaultError(err, reply);
       }
     },
   );
@@ -98,7 +97,7 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
         const result = await fastify.vault.updateContent(path, content);
         return result;
       } catch (err: unknown) {
-        handleVaultError(err, reply);
+        return handleVaultError(err, reply);
       }
     },
   );
@@ -112,7 +111,7 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
         const result = await fastify.vault.appendContent(path, content, mode);
         return result;
       } catch (err: unknown) {
-        handleVaultError(err, reply);
+        return handleVaultError(err, reply);
       }
     },
   );
@@ -126,7 +125,7 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
         const result = await fastify.vault.deleteNote(path);
         return result;
       } catch (err: unknown) {
-        handleVaultError(err, reply);
+        return handleVaultError(err, reply);
       }
     },
   );
@@ -140,7 +139,7 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
         const result = await fastify.vault.moveNote(from, to);
         return result;
       } catch (err: unknown) {
-        handleVaultError(err, reply);
+        return handleVaultError(err, reply);
       }
     },
   );
@@ -154,7 +153,7 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
         const result = await fastify.vault.updateMetadata(path, metadata);
         return result;
       } catch (err: unknown) {
-        handleVaultError(err, reply);
+        return handleVaultError(err, reply);
       }
     },
   );

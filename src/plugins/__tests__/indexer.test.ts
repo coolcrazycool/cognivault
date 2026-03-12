@@ -2,8 +2,35 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { VaultIndexer } from '../../lib/indexer.js';
+
+// Mock OpenAI to avoid real API calls during embedding plugin validation
+vi.mock('openai', () => {
+  const mockEmbeddingsCreate = vi.fn().mockResolvedValue({
+    data: [{ index: 0, embedding: new Array(1536).fill(0.1) }],
+  });
+  class MockOpenAI {
+    embeddings = { create: mockEmbeddingsCreate };
+  }
+  return { default: MockOpenAI };
+});
+
+// Mock Qdrant client to avoid connection to localhost:6333 during plugin init
+vi.mock('@qdrant/js-client-rest', () => {
+  class MockQdrantClient {
+    getCollections = vi.fn().mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+    createCollection = vi.fn().mockResolvedValue({});
+    createPayloadIndex = vi.fn().mockResolvedValue({});
+    upsert = vi.fn().mockResolvedValue({});
+    delete = vi.fn().mockResolvedValue({});
+    setPayload = vi.fn().mockResolvedValue({});
+    search = vi.fn().mockResolvedValue([]);
+    query = vi.fn().mockResolvedValue({ points: [] });
+    scroll = vi.fn().mockResolvedValue({ points: [] });
+  }
+  return { QdrantClient: MockQdrantClient };
+});
 
 // Create temp directories for vault and data dir
 const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'indexer-plugin-test-'));
@@ -18,6 +45,7 @@ await fs.writeFile(path.join(vaultRoot, 'test-note.md'), '# Test Note\n\nHello w
 process.env.COGNIVAULT_API_KEY = 'test-api-key';
 process.env.VAULT_PATH = vaultRoot;
 process.env.COGNIVAULT_DATA_DIR = dataDir;
+process.env.OPENAI_API_KEY = 'test-openai-key';
 
 const { buildApp } = await import('../../app.js');
 
