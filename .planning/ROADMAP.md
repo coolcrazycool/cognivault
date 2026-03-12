@@ -178,12 +178,12 @@ Plans:
   3. Excalidraw files have their text elements extracted and indexed
   4. CSV files are indexed with row-level chunking
   5. Image files have their metadata (name, path, linked notes) tracked in the index
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 10-01: ChunkingStrategy implementations for PDF and CSV
-- [ ] 10-02: ChunkingStrategy implementations for Canvas JSON and Excalidraw
-- [ ] 10-03: Image metadata extraction and indexing
+- [ ] 10-01-PLAN.md — PDF chunker (pdfjs-dist) and CSV chunker (PapaParse) with tests
+- [ ] 10-02-PLAN.md — Canvas JSON chunker and Excalidraw chunker with tests
+- [ ] 10-03-PLAN.md — DB migration, image tracker, indexer extension, and pipeline format dispatch
 
 ### Phase 11: Observability + Admin
 **Goal**: Service is production-ready with structured logging, metrics, tracing, and admin reindex controls
