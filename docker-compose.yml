@@ -5,9 +5,13 @@ services:
       - "${PORT:-3000}:3000"
     environment:
       - COGNIVAULT_API_KEY=${COGNIVAULT_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
       - VAULT_PATH=/vault
       - QDRANT_URL=http://qdrant:6333
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      - COGNIVAULT_DATA_DIR=/tmp/cognivault-data
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
     volumes:
       - ${VAULT_PATH:-./__vault}:/vault:ro
     depends_on:
