@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 11-03-PLAN.md (OTel distributed tracing)
-last_updated: "2026-03-12T13:03:28.076Z"
+stopped_at: Phase 12 context gathered
+last_updated: "2026-03-12T14:15:17.227Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
-  total_phases: 11
+  total_phases: 12
   completed_phases: 11
   total_plans: 29
   completed_plans: 29
@@ -173,6 +173,10 @@ Recent decisions affecting current work:
 - [Phase 11-observability-admin]: TraceFlags.SAMPLED guard for log injection — no-op tracer returns all-zeros traceId; checking SAMPLED flag prevents polluting Pino logs when tracing disabled
 - [Phase 11-observability-admin]: Dynamic import for initTracing, static import for shutdownTracing — SDK loading gated on OTEL_EXPORTER_OTLP_ENDPOINT presence
 
+### Roadmap Evolution
+
+- Phase 12 added: Prometheus metrics dashboard in separate container
+
 ### Pending Todos
 
 None yet.
@@ -183,5 +187,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-12T12:59:57.397Z
-Stopped at: Completed 11-03-PLAN.md (OTel distributed tracing)
+Last session: 2026-03-12T14:15:17.221Z
+Stopped at: Phase 12 context gathered
