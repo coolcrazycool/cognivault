@@ -55,9 +55,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Agent Interface
 
-- [ ] **API-01**: Service accepts TOON-formatted requests (Content-Type: text/toon)
-- [ ] **API-02**: Service returns TOON-formatted responses when Accept: text/toon
-- [ ] **API-03**: Service returns JSON by default (Accept: application/json or unspecified)
+- [x] **API-01**: Service accepts TOON-formatted requests (Content-Type: text/toon)
+- [x] **API-02**: Service returns TOON-formatted responses when Accept: text/toon
+- [x] **API-03**: Service returns JSON by default (Accept: application/json or unspecified)
 - [x] **API-04**: Service authenticates requests via API key (no role separation)
 
 ### Infrastructure
@@ -144,9 +144,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CTX-02 | Phase 8 | Complete |
 | CTX-03 | Phase 8 | Complete |
 | CTX-04 | Phase 8 | Complete |
-| API-01 | Phase 9 | Pending |
-| API-02 | Phase 9 | Pending |
-| API-03 | Phase 9 | Pending |
+| API-01 | Phase 9 | Complete |
+| API-02 | Phase 9 | Complete |
+| API-03 | Phase 9 | Complete |
 | API-04 | Phase 1 | Complete |
 | INF-01 | Phase 1 | Complete |
 | INF-02 | Phase 9 | Pending |

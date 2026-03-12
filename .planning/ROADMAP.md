@@ -218,6 +218,6 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 6. Semantic + Lexical Search | 2/2 | Complete   | 2026-03-11 |
 | 7. Hybrid Retrieval + Reranking | 2/2 | Complete   | 2026-03-11 |
 | 8. Context Pack Assembly | 2/2 | Complete   | 2026-03-11 |
-| 9. TOON + API Polish | 0/2 | Not started | - |
+| 9. TOON + API Polish | 1/2 | In Progress|  |
 | 10. Multi-Format Indexing | 0/3 | Not started | - |
 | 11. Observability + Admin | 0/4 | Not started | - |

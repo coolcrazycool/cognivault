@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 9 context gathered
-last_updated: "2026-03-12T05:10:37.510Z"
+stopped_at: Completed 09-01-PLAN.md (TOON content negotiation)
+last_updated: "2026-03-12T06:58:22.802Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
   total_phases: 11
   completed_phases: 8
-  total_plans: 21
-  completed_plans: 21
+  total_plans: 23
+  completed_plans: 22
   percent: 19
 ---
 
@@ -66,6 +66,7 @@ Progress: [▓▓░░░░░░░░] 19%
 | Phase 07-hybrid-retrieval-reranking P02 | 2min | 2 tasks | 4 files |
 | Phase 08-context-pack-assembly P01 | 4min | 2 tasks | 5 files |
 | Phase 08-context-pack-assembly P02 | 5min | 2 tasks | 4 files |
+| Phase 09-toon-api-polish P01 | 65min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -142,6 +143,9 @@ Recent decisions affecting current work:
 - [Phase 08-02]: contextRoutes registered at prefix /api/vault (not /api/vault/context) so route path /context yields POST /api/vault/context
 - [Phase 08-02]: hybrid() called with limit=50; internally 2x oversamples to 100 for qdrant.search
 - [Phase 08-02]: query_ms overwritten in route handler (not ContextService) because service sets placeholder 0; route measures wall time including hybrid search
+- [Phase 09-01]: TOON decode never throws — primitive string check added in parser to produce INVALID_TOON 400 for unstructured input
+- [Phase 09-01]: Format symmetry: Content-Type: text/toon alone triggers TOON response (no Accept header needed)
+- [Phase 09-01]: TOON-aware error handler maps INVALID_TOON code before validation check; Auth 401 TOON-serialized via error handler
 
 ### Pending Todos
 
@@ -153,5 +157,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-12T05:10:37.502Z
-Stopped at: Phase 9 context gathered
+Last session: 2026-03-12T06:58:22.799Z
+Stopped at: Completed 09-01-PLAN.md (TOON content negotiation)
