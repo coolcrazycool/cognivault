@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 09-01-PLAN.md (TOON content negotiation)
-last_updated: "2026-03-12T06:58:22.802Z"
+stopped_at: Completed 09-02-PLAN.md (Swagger/OpenAPI documentation)
+last_updated: "2026-03-12T07:00:25.510Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
   total_phases: 11
-  completed_phases: 8
+  completed_phases: 9
   total_plans: 23
-  completed_plans: 22
+  completed_plans: 23
   percent: 19
 ---
 
@@ -67,6 +67,7 @@ Progress: [▓▓░░░░░░░░] 19%
 | Phase 08-context-pack-assembly P01 | 4min | 2 tasks | 5 files |
 | Phase 08-context-pack-assembly P02 | 5min | 2 tasks | 4 files |
 | Phase 09-toon-api-polish P01 | 65min | 2 tasks | 6 files |
+| Phase 09-toon-api-polish P02 | 8min | 1 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -146,6 +147,9 @@ Recent decisions affecting current work:
 - [Phase 09-01]: TOON decode never throws — primitive string check added in parser to produce INVALID_TOON 400 for unstructured input
 - [Phase 09-01]: Format symmetry: Content-Type: text/toon alone triggers TOON response (no Accept header needed)
 - [Phase 09-01]: TOON-aware error handler maps INVALID_TOON code before validation check; Auth 401 TOON-serialized via error handler
+- [Phase 09-toon-api-polish]: [09-02]: transformObject on @fastify/swagger injects text/toon into all non-health route content types
+- [Phase 09-toon-api-polish]: [09-02]: Auth bypass for /docs via request.url.startsWith('/docs') in global auth hook — uiHooks cannot override global onRequest
+- [Phase 09-toon-api-polish]: [09-02]: swaggerPlugin registered after auth, before infrastructure plugins — captures all route schemas
 
 ### Pending Todos
 
@@ -157,5 +161,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-12T06:58:22.799Z
-Stopped at: Completed 09-01-PLAN.md (TOON content negotiation)
+Last session: 2026-03-12T07:00:25.508Z
+Stopped at: Completed 09-02-PLAN.md (Swagger/OpenAPI documentation)

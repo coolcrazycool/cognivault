@@ -63,7 +63,7 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Infrastructure
 
 - [x] **INF-01**: Service exposes health and readiness endpoints
-- [ ] **INF-02**: Service auto-generates OpenAPI spec from route definitions
+- [x] **INF-02**: Service auto-generates OpenAPI spec from route definitions
 - [ ] **INF-03**: Service emits structured JSON logs with request context
 - [ ] **INF-04**: Service exposes Prometheus metrics (latency, throughput, index stats)
 - [ ] **INF-05**: Service supports OpenTelemetry distributed tracing
@@ -149,7 +149,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | API-03 | Phase 9 | Complete |
 | API-04 | Phase 1 | Complete |
 | INF-01 | Phase 1 | Complete |
-| INF-02 | Phase 9 | Pending |
+| INF-02 | Phase 9 | Complete |
 | INF-03 | Phase 11 | Pending |
 | INF-04 | Phase 11 | Pending |
 | INF-05 | Phase 11 | Pending |

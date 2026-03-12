@@ -20,7 +20,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 6: Semantic + Lexical Search** - Qdrant ANN search, FTS5/BM25 lexical search, metadata filtering (completed 2026-03-11)
 - [x] **Phase 7: Hybrid Retrieval + Reranking** - RRF fusion, multilingual evaluation harness (reranking deferred to v2) (completed 2026-03-11)
 - [x] **Phase 8: Context Pack Assembly** - Token-budgeted knowledge bundles with relevance floor and source citations (completed 2026-03-11)
-- [ ] **Phase 9: TOON + API Polish** - TOON content negotiation, JSON default, OpenAPI spec generation
+- [x] **Phase 9: TOON + API Polish** - TOON content negotiation, JSON default, OpenAPI spec generation (completed 2026-03-12)
 - [ ] **Phase 10: Multi-Format Indexing** - PDF, Canvas, Excalidraw, CSV, and image metadata indexing
 - [ ] **Phase 11: Observability + Admin** - Structured logging, Prometheus metrics, OpenTelemetry, manual reindex
 
@@ -218,6 +218,6 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 6. Semantic + Lexical Search | 2/2 | Complete   | 2026-03-11 |
 | 7. Hybrid Retrieval + Reranking | 2/2 | Complete   | 2026-03-11 |
 | 8. Context Pack Assembly | 2/2 | Complete   | 2026-03-11 |
-| 9. TOON + API Polish | 1/2 | In Progress|  |
+| 9. TOON + API Polish | 2/2 | Complete   | 2026-03-12 |
 | 10. Multi-Format Indexing | 0/3 | Not started | - |
 | 11. Observability + Admin | 0/4 | Not started | - |
