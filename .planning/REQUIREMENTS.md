@@ -34,7 +34,7 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **IDX-10**: Service extracts and indexes text elements from Excalidraw files
 - [x] **IDX-11**: Service indexes CSV content with row-level chunking
 - [x] **IDX-12**: Service tracks image files metadata (name, path, linked notes)
-- [ ] **IDX-13**: Admin can trigger full or partial reindex via API endpoint
+- [x] **IDX-13**: Admin can trigger full or partial reindex via API endpoint
 
 ### Retrieval
 
@@ -132,7 +132,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | IDX-10 | Phase 10 | Complete |
 | IDX-11 | Phase 10 | Complete |
 | IDX-12 | Phase 10 | Complete |
-| IDX-13 | Phase 11 | Pending |
+| IDX-13 | Phase 11 | Complete |
 | RET-01 | Phase 6 | Complete |
 | RET-02 | Phase 6 | Complete |
 | RET-03 | Phase 7 | Complete |

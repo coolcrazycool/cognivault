@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 11 context gathered
-last_updated: "2026-03-12T12:15:42.946Z"
+stopped_at: Completed 11-02-PLAN.md (admin reindex API)
+last_updated: "2026-03-12T12:40:49.602Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
   total_phases: 11
   completed_phases: 10
-  total_plans: 26
-  completed_plans: 26
+  total_plans: 29
+  completed_plans: 27
   percent: 19
 ---
 
@@ -71,6 +71,7 @@ Progress: [▓▓░░░░░░░░] 19%
 | Phase 10-multi-format-indexing P02 | 4min | 2 tasks | 4 files |
 | Phase 10-multi-format-indexing P01 | 5min | 2 tasks | 6 files |
 | Phase 10-multi-format-indexing P03 | 8min | 2 tasks | 7 files |
+| Phase 11-observability-admin P02 | 5min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -161,6 +162,9 @@ Recent decisions affecting current work:
 - [Phase 10-03]: SQL migration uses statement-breakpoint separator — drizzle migrator requires this for multi-statement files
 - [Phase 10-03]: Image files skip Qdrant entirely — no vectors created/deleted for image extensions in pipeline
 - [Phase 10-03]: vi.mock at module level (not vi.spyOn) required for node:fs/promises ESM mocking in vitest
+- [Phase 11-02]: ReindexService instantiated once per plugin scope to preserve in-memory job map
+- [Phase 11-02]: Full reindex: stop() then start() VaultIndexer; path/folder emit synthetic 'updated' FileChangeEvents directly
+- [Phase 11-02]: 409 guard: service throws Error with statusCode=409, route catches and returns structured error body
 
 ### Pending Todos
 
@@ -172,5 +176,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-12T12:15:42.943Z
-Stopped at: Phase 11 context gathered
+Last session: 2026-03-12T12:40:49.599Z
+Stopped at: Completed 11-02-PLAN.md (admin reindex API)
