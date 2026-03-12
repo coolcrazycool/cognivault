@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 12-03-PLAN.md (Phase 12 complete)
-last_updated: "2026-03-12T15:03:38.799Z"
+stopped_at: Completed 13-01-PLAN.md
+last_updated: "2026-03-12T17:21:31.901Z"
 last_activity: 2026-03-11 — Completed plan 07-01 (Hybrid search endpoint with RRF fusion)
 progress:
-  total_phases: 12
+  total_phases: 14
   completed_phases: 12
-  total_plans: 32
-  completed_plans: 32
+  total_plans: 34
+  completed_plans: 33
   percent: 19
 ---
 
@@ -78,6 +78,7 @@ Progress: [▓▓░░░░░░░░] 19%
 | Phase 12-prometheus-metrics-dashboard-in-separate-container P01 | 2min | 2 tasks | 4 files |
 | Phase 12-prometheus-metrics-dashboard-in-separate-container P03 | 3min | 2 tasks | 3 files |
 | Phase 12-prometheus-metrics-dashboard-in-separate-container P03 | 525729min | 3 tasks | 3 files |
+| Phase 13-search-reindex-correctness P01 | 2min | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -185,6 +186,8 @@ Recent decisions affecting current work:
 - [Phase 12-03]: Reindex Status uses clamp_max(queue_depth, 1) mapped to Idle/Busy — boolean status without dedicated metric
 - [Phase 12-03]: Search error rate panel is text annotation (not PromQL) — prom-client lacks HTTP status_code labels; gap documented for future iteration
 - [Phase 12-03]: Reindex Status uses clamp_max(queue_depth, 1) mapped to Idle/Busy — boolean status without dedicated metric
+- [Phase 13-01]: semantic() folder post-filter mirrors lexical() pattern: folderPrefix extract + path.startsWith filter before map()
+- [Phase 13-01]: hybrid() folder filter fix is free — hybrid() delegates to this.semantic() which now applies the filter; no changes to hybrid() needed
 
 ### Roadmap Evolution
 
@@ -200,5 +203,5 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-12T14:49:33.370Z
-Stopped at: Completed 12-03-PLAN.md (Phase 12 complete)
+Last session: 2026-03-12T17:21:31.898Z
+Stopped at: Completed 13-01-PLAN.md
