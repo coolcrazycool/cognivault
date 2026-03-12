@@ -22,9 +22,6 @@ const mockIndexer = {
   emit: mockEmit,
 };
 
-const mockDbSelect = vi.fn();
-const mockDbSelectFrom = vi.fn();
-const mockDbSelectFromWhere = vi.fn();
 const mockDbAll = vi.fn().mockReturnValue([]);
 
 const mockDb = {
