@@ -3,6 +3,43 @@ import fp from 'fastify-plugin';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FileChangeEvent } from '../../lib/indexer.js';
 
+// ── Mock format chunkers ──
+
+const mockChunkPdf = vi
+  .fn()
+  .mockResolvedValue([{ text: 'PDF chunk text', sectionPath: 'Document', chunkIndex: 0 }]);
+const mockChunkCsv = vi
+  .fn()
+  .mockReturnValue([{ text: 'CSV chunk text', sectionPath: 'Rows 1-30', chunkIndex: 0 }]);
+const mockChunkCanvas = vi
+  .fn()
+  .mockReturnValue([
+    { text: 'Canvas chunk text', sectionPath: 'MyCanvas > Node 1', chunkIndex: 0 },
+  ]);
+const mockChunkExcalidraw = vi
+  .fn()
+  .mockReturnValue([{ text: 'Excalidraw chunk text', sectionPath: 'Drawing', chunkIndex: 0 }]);
+const mockExtractImageBacklinks = vi.fn().mockReturnValue([]);
+
+vi.mock('../../lib/pdf-chunker.js', () => ({ chunkPdf: mockChunkPdf }));
+vi.mock('../../lib/csv-chunker.js', () => ({ chunkCsv: mockChunkCsv }));
+vi.mock('../../lib/canvas-chunker.js', () => ({ chunkCanvas: mockChunkCanvas }));
+vi.mock('../../lib/excalidraw-chunker.js', () => ({ chunkExcalidraw: mockChunkExcalidraw }));
+vi.mock('../../lib/image-tracker.js', () => ({
+  IMAGE_EXTENSIONS: new Set(['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp']),
+  extractImageBacklinks: mockExtractImageBacklinks,
+}));
+
+// Mock node:fs/promises so we can control what fs.readFile returns in PDF tests
+const mockFsReadFile = vi.fn().mockResolvedValue(Buffer.from('fake pdf content'));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...original,
+    readFile: mockFsReadFile,
+  };
+});
+
 // Set required env vars before any imports that trigger config parsing
 beforeAll(() => {
   process.env.COGNIVAULT_API_KEY = 'test-api-key';
@@ -24,6 +61,7 @@ async function buildTestApp(opts?: {
   upsert?: ReturnType<typeof vi.fn>;
   qdrantDelete?: ReturnType<typeof vi.fn>;
   setPayload?: ReturnType<typeof vi.fn>;
+  vaultRootPath?: string;
 }): Promise<{
   app: FastifyInstance;
   readContent: ReturnType<typeof vi.fn>;
@@ -43,9 +81,17 @@ async function buildTestApp(opts?: {
 
   // Build the db.update chain mock
   const dbRun = vi.fn();
-  const dbWhere = vi.fn().mockReturnValue({ run: dbRun });
+  const dbWhere = vi.fn().mockReturnValue({ run: dbRun, all: vi.fn().mockReturnValue([]) });
   const dbSet = vi.fn().mockReturnValue({ where: dbWhere });
   const dbUpdate = vi.fn().mockReturnValue({ set: dbSet });
+
+  // Build db.select chain mock for processImage (select from indexed_files where fileType='md')
+  const dbSelectAll = vi.fn().mockReturnValue([]);
+  const dbSelectWhere = vi.fn().mockReturnValue({ all: dbSelectAll });
+  const dbSelectFrom = vi.fn().mockReturnValue({ where: dbSelectWhere });
+  const dbSelect = vi.fn().mockReturnValue({ from: dbSelectFrom });
+
+  const vaultRootPath = opts?.vaultRootPath ?? '/tmp/test-vault';
 
   const app = Fastify({ logger: false });
 
@@ -53,7 +99,10 @@ async function buildTestApp(opts?: {
   await app.register(
     fp(
       async (f) => {
-        f.decorate('vault', { readContent } as unknown as FastifyInstance['vault']);
+        f.decorate('vault', {
+          readContent,
+          rootPath: vaultRootPath,
+        } as unknown as FastifyInstance['vault']);
         f.decorate('embedder', {
           dimensions: 1536,
           embed,
@@ -63,7 +112,10 @@ async function buildTestApp(opts?: {
           delete: qdrantDelete,
           setPayload,
         } as unknown as FastifyInstance['qdrant']);
-        f.decorate('db', { update: dbUpdate } as unknown as FastifyInstance['db']);
+        f.decorate('db', {
+          update: dbUpdate,
+          select: dbSelect,
+        } as unknown as FastifyInstance['db']);
         f.decorate('indexer', {
           on: vi.fn(),
           removeListener: vi.fn(),
@@ -510,6 +562,237 @@ describe('pipeline plugin', () => {
       const secondCall = upsert.mock.calls[0] as [string, UpsertArg] | undefined;
       const secondId = secondCall?.[1].points[0]?.id;
       expect(secondId).toBe(firstId);
+
+      await app.close();
+    });
+  });
+
+  // ── format dispatch ───────────────────────────────────────────────────────
+
+  describe('PDF file dispatch', () => {
+    it('calls chunkPdf with Buffer for .pdf files (reads via fs.readFile not vault.readContent)', async () => {
+      mockFsReadFile.mockResolvedValueOnce(Buffer.from('fake pdf content'));
+
+      const { app, readContent, upsert, embed } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'docs/report.pdf',
+        type: 'created',
+        contentHash: 'pdfhash',
+      };
+
+      await emitChanges(app, [event]);
+
+      // vault.readContent should NOT be called for PDF
+      expect(readContent).not.toHaveBeenCalledWith('docs/report.pdf');
+      // chunkPdf should be called
+      expect(mockChunkPdf).toHaveBeenCalledWith(expect.any(Buffer), 'report');
+      // Should embed and upsert
+      expect(embed).toHaveBeenCalled();
+      expect(upsert).toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
+  describe('CSV file dispatch', () => {
+    it('calls chunkCsv with content string for .csv files (reads via vault.readContent)', async () => {
+      const csvContent = 'name,age\nAlice,30\nBob,25';
+      const { app, readContent, upsert, embed } = await buildTestApp({
+        readContent: vi.fn().mockResolvedValue({ content: csvContent }),
+      });
+
+      const event: FileChangeEvent = {
+        path: 'data/users.csv',
+        type: 'created',
+        contentHash: 'csvhash',
+      };
+
+      await emitChanges(app, [event]);
+
+      expect(readContent).toHaveBeenCalledWith('data/users.csv');
+      expect(mockChunkCsv).toHaveBeenCalledWith(csvContent, 'users');
+      expect(embed).toHaveBeenCalled();
+      expect(upsert).toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
+  describe('Canvas file dispatch', () => {
+    it('calls chunkCanvas with content string for .canvas files', async () => {
+      const canvasContent = '{"nodes":[],"edges":[]}';
+      const { app, readContent, upsert, embed } = await buildTestApp({
+        readContent: vi.fn().mockResolvedValue({ content: canvasContent }),
+      });
+
+      const event: FileChangeEvent = {
+        path: 'diagrams/architecture.canvas',
+        type: 'created',
+        contentHash: 'canvashash',
+      };
+
+      await emitChanges(app, [event]);
+
+      expect(readContent).toHaveBeenCalledWith('diagrams/architecture.canvas');
+      expect(mockChunkCanvas).toHaveBeenCalledWith(canvasContent, 'architecture');
+      expect(embed).toHaveBeenCalled();
+      expect(upsert).toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
+  describe('Excalidraw file dispatch', () => {
+    it('calls chunkExcalidraw with content string for .excalidraw files', async () => {
+      const excalidrawContent = '{"type":"excalidraw","elements":[]}';
+      const { app, readContent, upsert, embed } = await buildTestApp({
+        readContent: vi.fn().mockResolvedValue({ content: excalidrawContent }),
+      });
+
+      const event: FileChangeEvent = {
+        path: 'diagrams/flow.excalidraw',
+        type: 'created',
+        contentHash: 'excalidrawhash',
+      };
+
+      await emitChanges(app, [event]);
+
+      expect(readContent).toHaveBeenCalledWith('diagrams/flow.excalidraw');
+      expect(mockChunkExcalidraw).toHaveBeenCalledWith(excalidrawContent, 'flow');
+      expect(embed).toHaveBeenCalled();
+      expect(upsert).toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
+  describe('Image file dispatch', () => {
+    it('processes .png files as SQLite-only — no Qdrant upsert', async () => {
+      const { app, upsert, embed, qdrantDelete } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'attachments/diagram.png',
+        type: 'created',
+        contentHash: 'imghash',
+      };
+
+      await emitChanges(app, [event]);
+
+      // No embedding or Qdrant upsert for images
+      expect(embed).not.toHaveBeenCalled();
+      expect(upsert).not.toHaveBeenCalled();
+      // No Qdrant delete for images (no vectors to clean)
+      expect(qdrantDelete).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('processes .jpg files as SQLite-only — no Qdrant upsert', async () => {
+      const { app, upsert, embed } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'attachments/photo.jpg',
+        type: 'created',
+        contentHash: 'jpghash',
+      };
+
+      await emitChanges(app, [event]);
+
+      expect(embed).not.toHaveBeenCalled();
+      expect(upsert).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('calls extractImageBacklinks for image files', async () => {
+      const { app } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'attachments/logo.png',
+        type: 'created',
+        contentHash: 'logohash',
+      };
+
+      await emitChanges(app, [event]);
+
+      expect(mockExtractImageBacklinks).toHaveBeenCalledWith('logo.png', expect.any(Array));
+
+      await app.close();
+    });
+
+    it('skips Qdrant delete for image files on deleted event', async () => {
+      const { app, qdrantDelete } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'attachments/old-image.png',
+        type: 'deleted',
+        contentHash: 'oldhash',
+      };
+
+      await emitChanges(app, [event]);
+
+      expect(qdrantDelete).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('skips Qdrant setPayload for image files on moved event', async () => {
+      const { app, setPayload } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'attachments/new-location.png',
+        type: 'moved',
+        contentHash: 'mvhash',
+        oldPath: 'attachments/old-location.png',
+      };
+
+      await emitChanges(app, [event]);
+
+      expect(setPayload).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
+  describe('Unknown extension dispatch', () => {
+    it('skips processing for unknown file extensions', async () => {
+      const { app, upsert, embed, qdrantDelete } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'docs/readme.xyz',
+        type: 'created',
+        contentHash: 'xyzHash',
+      };
+
+      await emitChanges(app, [event]);
+
+      expect(embed).not.toHaveBeenCalled();
+      expect(upsert).not.toHaveBeenCalled();
+      expect(qdrantDelete).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
+  describe('moved event with non-markdown extension', () => {
+    it('uses dynamic extension for title extraction in moved events', async () => {
+      const { app, setPayload } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'notes/new-name.md',
+        type: 'moved',
+        contentHash: 'movehash',
+        oldPath: 'notes/old-name.md',
+      };
+
+      await emitChanges(app, [event]);
+
+      type SetPayloadArg = { payload: Record<string, unknown> };
+      const call = setPayload.mock.calls[0] as [string, SetPayloadArg] | undefined;
+      if (call) {
+        expect(call[1].payload['title']).toBe('new-name');
+      }
 
       await app.close();
     });
