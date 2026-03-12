@@ -13,6 +13,7 @@ const configSchema = z.object({
   OPENAI_API_KEY: z.string().min(1, 'OPENAI_API_KEY is required'),
   OPENAI_BASE_URL: z.string().url().optional(),
   EMBEDDING_MODEL: z.string().default('text-embedding-3-small'),
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
 });
 
 export type Config = z.infer<typeof configSchema>;

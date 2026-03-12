@@ -1,5 +1,11 @@
 import { buildApp } from './app.js';
 import { config } from './config.js';
+import { shutdownTracing } from './lib/tracing.js';
+
+if (config.OTEL_EXPORTER_OTLP_ENDPOINT) {
+  const { initTracing } = await import('./lib/tracing.js');
+  initTracing(config.OTEL_EXPORTER_OTLP_ENDPOINT);
+}
 
 const app = await buildApp({ logger: true });
 
@@ -12,7 +18,8 @@ try {
 
 function gracefulShutdown(signal: string): void {
   app.log.info(`Received ${signal}, shutting down gracefully`);
-  app.close().then(() => {
+  app.close().then(async () => {
+    await shutdownTracing();
     process.exit(0);
   });
 }
