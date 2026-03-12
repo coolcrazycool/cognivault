@@ -162,12 +162,11 @@ Plans:
   2. Service returns TOON-formatted responses when Accept header is text/toon
   3. Service returns JSON by default when Accept is application/json or unspecified
   4. OpenAPI spec is auto-generated from route definitions and accessible via endpoint
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 09-01: TOON request parsing and response serialization
-- [ ] 09-02: Content negotiation middleware (Accept/Content-Type routing)
-- [ ] 09-03: OpenAPI spec generation from Fastify route schemas
+- [ ] 09-01-PLAN.md — TOON content negotiation plugin with request parsing, response serialization, and TOON-aware error handling
+- [ ] 09-02-PLAN.md — OpenAPI spec generation with @fastify/swagger and Swagger UI at /docs
 
 ### Phase 10: Multi-Format Indexing
 **Goal**: Non-markdown vault content (PDF, Canvas, Excalidraw, CSV, images) is indexed and searchable
@@ -219,6 +218,6 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 6. Semantic + Lexical Search | 2/2 | Complete   | 2026-03-11 |
 | 7. Hybrid Retrieval + Reranking | 2/2 | Complete   | 2026-03-11 |
 | 8. Context Pack Assembly | 2/2 | Complete   | 2026-03-11 |
-| 9. TOON + API Polish | 0/3 | Not started | - |
+| 9. TOON + API Polish | 0/2 | Not started | - |
 | 10. Multi-Format Indexing | 0/3 | Not started | - |
 | 11. Observability + Admin | 0/4 | Not started | - |
