@@ -224,7 +224,7 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 10. Multi-Format Indexing | 3/3 | Complete    | 2026-03-12 |
 | 11. Observability + Admin | 3/3 | Complete    | 2026-03-12 |
 | 12. Prometheus Metrics Dashboard | 3/3 | Complete    | 2026-03-12 |
-| 13. Search & Reindex Correctness | 0/0 | Not Started | - |
+| 13. Search & Reindex Correctness | 0/2 | Not Started | - |
 | 14. Infrastructure Hardening & Cleanup | 0/0 | Not Started | - |
 
 ### Phase 12: Prometheus metrics dashboard in separate container
@@ -256,7 +256,11 @@ Plans:
   1. Folder filter is applied in semantic() and hybrid semantic leg, not just lexical post-filter
   2. Reindex job status transitions to 'completed' only after pipeline queue fully drains
   3. Path-scoped reindex emits real contentHash instead of empty string
-**Plans**: TBD
+**Plans**: 2 plans
+
+Plans:
+- [ ] 13-01-PLAN.md — Folder post-filter in semantic() search for RET-05 correctness
+- [ ] 13-02-PLAN.md — Pipeline queue drain for reindex completion and real contentHash in path reindex
 
 ### Phase 14: Infrastructure Hardening & Cleanup
 **Goal:** Fix infrastructure issues, clean up tech debt, and complete documentation gaps
