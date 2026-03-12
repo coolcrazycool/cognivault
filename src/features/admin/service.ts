@@ -52,9 +52,38 @@ export class ReindexService {
 
     this.jobs.set(job.id, job);
 
-    // Stop current indexer and restart for a full reindex
-    this.fastify.indexer.stop();
-    this.fastify.indexer.start();
+    // Listen for 'changes' events to count files as they are dispatched for processing
+    const onChanges = (events: import('../../lib/indexer.js').FileChangeEvent[]): void => {
+      // Count all non-deleted events as "files processed" (created/updated/moved)
+      const processed = events.filter((e) => e.type !== 'deleted').length;
+      job.filesProcessed += processed;
+    };
+
+    // Listen for scan completion to record totalFiles and mark job done
+    const onScanComplete = async (filesScanned: number, _eventsEmitted: number): Promise<void> => {
+      job.totalFiles = filesScanned;
+      // Ensure filesProcessed doesn't exceed totalFiles (images are excluded from Qdrant but counted)
+      if (job.filesProcessed > filesScanned) {
+        job.filesProcessed = filesScanned;
+      }
+      // Wait for all queued pipeline tasks to finish before marking completed
+      await this.fastify.pipelineQueue.onIdle();
+      job.status = 'completed';
+      job.completedAt = new Date().toISOString();
+      this.fastify.indexer.removeListener('changes', onChanges);
+      this.fastify.indexer.removeListener('scanComplete', onScanComplete);
+    };
+
+    this.fastify.indexer.on('changes', onChanges);
+    this.fastify.indexer.on('scanComplete', onScanComplete);
+
+    // Clear all existing vectors so stale data doesn't persist
+    await this.fastify.qdrant.delete('cognivault', {
+      filter: { must: [{ key: 'chunk_index', range: { gte: 0 } }] },
+    });
+
+    // restart(true) clears DB so every file is treated as 'created' and re-embedded
+    this.fastify.indexer.restart(true);
 
     return job;
   }

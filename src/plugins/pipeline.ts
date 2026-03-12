@@ -7,6 +7,12 @@ import matter from 'gray-matter';
 import PQueue from 'p-queue';
 import { v5 as uuidv5 } from 'uuid';
 import { config } from '../config.js';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    pipelineQueue: PQueue;
+  }
+}
 import { indexedFiles } from '../db/schema.js';
 import { chunkCanvas } from '../lib/canvas-chunker.js';
 import { chunkMarkdown } from '../lib/chunker.js';
@@ -324,7 +330,8 @@ async function processMoved(fastify: FastifyInstance, event: FileChangeEvent): P
 }
 
 async function pipelinePlugin(fastify: FastifyInstance): Promise<void> {
-  const queue = new PQueue({ concurrency: 3 });
+  const queue = new PQueue({ concurrency: 3, timeout: 120_000 });
+  fastify.decorate('pipelineQueue', queue);
 
   const onChanges = (events: FileChangeEvent[]): void => {
     for (const event of events) {
