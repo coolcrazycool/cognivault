@@ -1,33 +1,115 @@
-import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-
-// Create a real temp vault directory so vault plugin initializes correctly
-const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'swagger-test-'));
-const vaultRoot = path.join(tmpDir, 'vault');
-await fs.mkdir(vaultRoot, { recursive: true });
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 // Set env vars before any module imports that trigger config parsing
 process.env.COGNIVAULT_API_KEY = 'test-api-key';
-process.env.VAULT_PATH = vaultRoot;
-process.env.COGNIVAULT_DATA_DIR = path.join(tmpDir, 'data');
+process.env.VAULT_PATH = '/tmp/test-vault-swagger';
+process.env.COGNIVAULT_DATA_DIR = '/tmp/test-cognivault-swagger';
 process.env.OPENAI_API_KEY = 'test-openai-key';
 
-const { buildApp } = await import('../../app.js');
+// ── Mock external services to avoid real network calls ──
+
+const mockQdrant = {
+  search: vi.fn().mockResolvedValue([]),
+  scroll: vi.fn().mockResolvedValue({ points: [] }),
+  getCollections: vi.fn().mockResolvedValue({ collections: [] }),
+  createCollection: vi.fn().mockResolvedValue({}),
+  createPayloadIndex: vi.fn().mockResolvedValue({}),
+};
+
+const mockEmbedder = {
+  embed: vi.fn().mockResolvedValue([]),
+  dimensions: 1536,
+  validate: vi.fn().mockResolvedValue(undefined),
+};
+
+async function buildTestApp(): Promise<FastifyInstance> {
+  const { default: Fastify } = await import('fastify');
+  const { default: fp } = await import('fastify-plugin');
+
+  const app = Fastify({ logger: false });
+
+  // Register error handler
+  const { default: errorHandler } = await import('../../plugins/error-handler.js');
+  await app.register(errorHandler);
+
+  // Register auth plugin
+  const { default: authPlugin } = await import('../../plugins/auth.js');
+  await app.register(authPlugin);
+
+  // Register swagger plugin
+  const { default: swaggerPlugin } = await import('../../plugins/swagger.js');
+  await app.register(swaggerPlugin);
+
+  // Register mock vault plugin (stub)
+  await app.register(
+    fp(async (fastify) => {
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      fastify.decorate('vault', {} as any);
+    }),
+  );
+
+  // Register health routes (for path assertions in spec)
+  const { healthRoutes } = await import('../../features/health/routes.js');
+  await app.register(healthRoutes);
+
+  // Register mock db plugin (stub)
+  await app.register(
+    fp(async (fastify) => {
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      fastify.decorate('db', {} as any);
+    }),
+  );
+
+  // Register mock embedder plugin (stub)
+  await app.register(
+    fp(async (fastify) => {
+      // biome-ignore lint/suspicious/noExplicitAny: test stub — avoids real OpenAI calls
+      fastify.decorate('embedder', mockEmbedder as any);
+    }),
+  );
+
+  // Register mock qdrant plugin (stub)
+  await app.register(
+    fp(async (fastify) => {
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      fastify.decorate('qdrant', mockQdrant as any);
+    }),
+  );
+
+  // Register mock indexer (stub)
+  await app.register(
+    fp(async (fastify) => {
+      // biome-ignore lint/suspicious/noExplicitAny: test stub
+      fastify.decorate('indexer', { isIndexing: false } as any);
+    }),
+  );
+
+  // Register vault routes for complete API surface
+  const { vaultRoutes } = await import('../../features/vault/routes.js');
+  await app.register(vaultRoutes, { prefix: '/api/vault' });
+
+  // Register search routes for complete API surface
+  const { searchRoutes } = await import('../../features/search/routes.js');
+  await app.register(searchRoutes, { prefix: '/api/vault/search' });
+
+  // Register context routes for complete API surface
+  const { contextRoutes } = await import('../../features/context/routes.js');
+  await app.register(contextRoutes, { prefix: '/api/vault' });
+
+  await app.ready();
+  return app;
+}
 
 describe('Swagger / OpenAPI Plugin', () => {
   let app: FastifyInstance;
 
   beforeAll(async () => {
-    app = await buildApp({ logger: false });
-    await app.ready();
+    app = await buildTestApp();
   });
 
   afterAll(async () => {
     await app.close();
-    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   it('GET /docs returns 200 with Swagger UI HTML', async () => {
@@ -83,10 +165,7 @@ describe('Swagger / OpenAPI Plugin', () => {
     };
 
     expect(spec.components?.securitySchemes).toHaveProperty('bearerAuth');
-    const bearerScheme = spec.components?.securitySchemes?.['bearerAuth'] as Record<
-      string,
-      unknown
-    >;
+    const bearerScheme = spec.components?.securitySchemes?.bearerAuth as Record<string, unknown>;
     expect(bearerScheme?.type).toBe('http');
     expect(bearerScheme?.scheme).toBe('bearer');
   });

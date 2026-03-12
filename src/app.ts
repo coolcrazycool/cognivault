@@ -7,12 +7,12 @@ import { searchRoutes } from './features/search/routes.js';
 import { vaultRoutes } from './features/vault/routes.js';
 import authPlugin from './plugins/auth.js';
 import dbPlugin from './plugins/db.js';
-import swaggerPlugin from './plugins/swagger.js';
 import embeddingPlugin from './plugins/embedding.js';
 import errorHandler from './plugins/error-handler.js';
 import indexerPlugin from './plugins/indexer.js';
 import pipelinePlugin from './plugins/pipeline.js';
 import qdrantPlugin from './plugins/qdrant.js';
+import swaggerPlugin from './plugins/swagger.js';
 import toonPlugin from './plugins/toon.js';
 import vaultPlugin from './plugins/vault.js';
 

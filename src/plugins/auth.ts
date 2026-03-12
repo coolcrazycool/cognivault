@@ -21,6 +21,11 @@ async function authPlugin(fastify: FastifyInstance): Promise<void> {
       return;
     }
 
+    // Skip auth for Swagger UI docs routes (/docs and sub-paths)
+    if (request.url.startsWith('/docs')) {
+      return;
+    }
+
     const verify = (fastify as unknown as { verifyBearerAuth: VerifyFn }).verifyBearerAuth;
     await new Promise<void>((resolve, reject) => {
       verify(request, reply, (err?: Error) => {
