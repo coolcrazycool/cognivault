@@ -1,0 +1,116 @@
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import type { FastifyInstance } from 'fastify';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+// Mock OpenAI to avoid real API calls during embedding plugin validation
+vi.mock('openai', () => {
+  const mockEmbeddingsCreate = vi.fn().mockResolvedValue({
+    data: [{ index: 0, embedding: new Array(1536).fill(0.1) }],
+  });
+  class MockOpenAI {
+    embeddings = { create: mockEmbeddingsCreate };
+  }
+  return { default: MockOpenAI };
+});
+
+// Mock Qdrant client to avoid connection to localhost:6333 during plugin init
+vi.mock('@qdrant/js-client-rest', () => {
+  class MockQdrantClient {
+    getCollections = vi.fn().mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+    createCollection = vi.fn().mockResolvedValue({});
+    createPayloadIndex = vi.fn().mockResolvedValue({});
+    upsert = vi.fn().mockResolvedValue({});
+    delete = vi.fn().mockResolvedValue({});
+    setPayload = vi.fn().mockResolvedValue({});
+    search = vi.fn().mockResolvedValue([]);
+    query = vi.fn().mockResolvedValue({ points: [] });
+    scroll = vi.fn().mockResolvedValue({ points: [] });
+  }
+  return { QdrantClient: MockQdrantClient };
+});
+
+// Create a real temp vault directory so vault plugin can initialize
+const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'metrics-test-'));
+const vaultRoot = path.join(tmpDir, 'vault');
+await fs.mkdir(vaultRoot, { recursive: true });
+
+// Set env vars before any module imports that trigger config parsing
+process.env.COGNIVAULT_API_KEY = 'test-api-key-metrics';
+process.env.VAULT_PATH = vaultRoot;
+process.env.OPENAI_API_KEY = 'test-openai-key-metrics';
+process.env.COGNIVAULT_DATA_DIR = path.join(tmpDir, 'data-metrics');
+
+const { buildApp } = await import('../../app.js');
+
+describe('/metrics endpoint', () => {
+  let app: FastifyInstance;
+
+  beforeAll(async () => {
+    app = await buildApp({ logger: false });
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns 200 without Authorization header (no auth required)', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+    });
+    expect(response.statusCode).toBe(200);
+  });
+
+  it('returns Prometheus text format with correct content-type', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+    });
+    expect(response.headers['content-type']).toContain('text/plain');
+  });
+
+  it('response contains cognivault_search_duration_seconds metric', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+    });
+    expect(response.body).toContain('cognivault_search_duration_seconds');
+  });
+
+  it('response contains cognivault_search_requests_total metric', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+    });
+    expect(response.body).toContain('cognivault_search_requests_total');
+  });
+
+  it('response contains cognivault_index_queue_depth metric', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+    });
+    expect(response.body).toContain('cognivault_index_queue_depth');
+  });
+
+  it('response contains cognivault_stale_vector_cleanups_total metric', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+    });
+    expect(response.body).toContain('cognivault_stale_vector_cleanups_total');
+  });
+
+  it('response contains process default metrics (nodejs_ prefix)', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+    });
+    // Default metrics collected by prom-client include nodejs_ metrics
+    expect(response.body).toMatch(/process_cpu|nodejs_/);
+  });
+});
