@@ -254,7 +254,7 @@ async function processCreatedOrUpdated(
         return;
 
       case '.pdf': {
-        const vaultRoot = (fastify.vault as unknown as { rootPath: string }).rootPath;
+        const vaultRoot = fastify.vault.vaultRootPath;
         const absPath = path.join(vaultRoot, event.path);
         const buffer = await fs.readFile(absPath);
         const filename = path.basename(event.path, ext);

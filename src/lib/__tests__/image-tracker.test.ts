@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { IMAGE_EXTENSIONS, extractImageBacklinks } from '../image-tracker.js';
+import { extractImageBacklinks, IMAGE_EXTENSIONS } from '../image-tracker.js';
 
 describe('IMAGE_EXTENSIONS', () => {
   it('contains .png', () => {

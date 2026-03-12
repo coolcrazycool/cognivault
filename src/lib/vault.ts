@@ -88,6 +88,10 @@ export class VaultManager {
   private readonly rootPath: string;
   private realRootPath: string;
 
+  get vaultRootPath(): string {
+    return this.rootPath;
+  }
+
   constructor(rootPath: string) {
     this.rootPath = path.resolve(rootPath);
     this.realRootPath = this.rootPath;

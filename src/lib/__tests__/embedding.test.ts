@@ -72,9 +72,7 @@ describe('OpenAIEmbeddingProvider', () => {
 
     it('returns embeddings array of correct shape', async () => {
       mockEmbeddingsCreate.mockResolvedValueOnce({
-        data: [
-          { index: 0, embedding: new Array(1536).fill(0.1) },
-        ],
+        data: [{ index: 0, embedding: new Array(1536).fill(0.1) }],
       });
 
       const provider = new OpenAIEmbeddingProvider({

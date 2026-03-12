@@ -48,7 +48,9 @@ async function errorHandlerPlugin(fastify: FastifyInstance): Promise<void> {
 
     // Check if this is a health/readiness route — those always return JSON
     // Auth 401 errors flow through here — TOON-awareness applies to all error codes including UNAUTHORIZED
-    const routeConfig = request.routeOptions?.config as unknown as Record<string, unknown> | undefined;
+    const routeConfig = request.routeOptions?.config as unknown as
+      | Record<string, unknown>
+      | undefined;
     const isHealthRoute = routeConfig?.skipAuth === true;
 
     if (wantToon && !isHealthRoute) {

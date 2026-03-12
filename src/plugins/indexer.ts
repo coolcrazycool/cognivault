@@ -23,8 +23,11 @@ async function indexerPlugin(fastify: FastifyInstance): Promise<void> {
 
   fastify.decorate('indexer', indexer);
 
-  // Start the scan — does NOT block (scan runs in background per design)
-  indexer.start();
+  // Start the scan AFTER all plugins are registered (onReady), so pipeline
+  // listener is in place before events are emitted.
+  fastify.addHook('onReady', async () => {
+    indexer.start();
+  });
 
   fastify.addHook('onClose', async () => {
     indexer.stop();

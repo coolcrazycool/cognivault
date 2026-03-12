@@ -11,7 +11,11 @@ process.env.OPENAI_API_KEY = 'test-openai-key';
 const mockIsIndexingValue = { value: false };
 const mockStop = vi.fn();
 const mockStart = vi.fn();
+const mockRestart = vi.fn();
 const mockIndexerEmit = vi.fn();
+const mockIndexerOn = vi.fn();
+const mockIndexerOnce = vi.fn();
+const mockIndexerRemoveListener = vi.fn();
 
 const mockIndexer = {
   get isIndexing() {
@@ -19,7 +23,11 @@ const mockIndexer = {
   },
   stop: mockStop,
   start: mockStart,
+  restart: mockRestart,
   emit: mockIndexerEmit,
+  on: mockIndexerOn,
+  once: mockIndexerOnce,
+  removeListener: mockIndexerRemoveListener,
 };
 
 const mockDbSelect = vi.fn().mockReturnValue({

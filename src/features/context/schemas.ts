@@ -6,12 +6,8 @@ import { ErrorResponseSchema } from '../vault/schemas.js';
 
 export const ContextRequestBodySchema = Type.Object({
   query: Type.String({ minLength: 1 }),
-  token_budget: Type.Optional(
-    Type.Integer({ minimum: 1000, maximum: 128000, default: 32000 }),
-  ),
-  min_score: Type.Optional(
-    Type.Number({ minimum: 0, maximum: 1, default: 0.3 }),
-  ),
+  token_budget: Type.Optional(Type.Integer({ minimum: 1000, maximum: 128000, default: 32000 })),
+  min_score: Type.Optional(Type.Number({ minimum: 0, maximum: 1, default: 0.3 })),
   filters: Type.Optional(SearchFiltersSchema),
 });
 

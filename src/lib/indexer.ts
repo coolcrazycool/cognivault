@@ -42,6 +42,7 @@ interface FileStat {
 
 interface IndexerEvents {
   changes: [events: FileChangeEvent[]];
+  scanComplete: [filesScanned: number, eventsEmitted: number];
 }
 
 const BATCH_SIZE = 100;
@@ -104,7 +105,7 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
     this.config = opts.config;
     this.logger = opts.logger;
     // Access vault's root path for building absolute paths
-    this.vaultRoot = (opts.vault as unknown as { rootPath: string }).rootPath;
+    this.vaultRoot = opts.vault.vaultRootPath;
   }
 
   get isIndexing(): boolean {
@@ -147,6 +148,19 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
       this.logger.error(err, 'Initial scan failed');
       this._isIndexing = false;
     });
+  }
+
+  // ── Public: Restart (stop + reset running flag + start) ──
+  // When force=true, clears indexed_files so every file is treated as 'created'.
+
+  restart(force = false): void {
+    this.stop();
+    if (force) {
+      this.db.delete(indexedFiles).run();
+      this.logger.info('Cleared indexed_files table for forced reindex');
+    }
+    this.running = true;
+    this.start();
   }
 
   // ── Private: Initial scan ──
@@ -256,6 +270,9 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
 
       // Emit events in chunks
       this.emitInChunks(events);
+
+      // Notify listeners that the scan is complete (filesScanned, eventsEmitted)
+      this.emit('scanComplete', fileStats.length, events.length);
     } catch (err: unknown) {
       this._isIndexing = false;
       throw err;

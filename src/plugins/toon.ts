@@ -39,7 +39,9 @@ async function toonPlugin(fastify: FastifyInstance): Promise<void> {
     'onSend',
     async (request: FastifyRequest, reply: FastifyReply, payload: unknown): Promise<unknown> => {
       // Skip TOON encoding for health/readiness routes (skipAuth routes return JSON always)
-      const routeConfig = request.routeOptions?.config as unknown as Record<string, unknown> | undefined;
+      const routeConfig = request.routeOptions?.config as unknown as
+        | Record<string, unknown>
+        | undefined;
       if (routeConfig?.skipAuth) {
         return payload;
       }

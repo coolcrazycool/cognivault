@@ -8,8 +8,8 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => {
   };
 });
 
-import { chunkPdf, extractPdfPages } from '../pdf-chunker.js';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { chunkPdf, extractPdfPages } from '../pdf-chunker.js';
 
 // Helper to create a mock page with given text content
 function makeMockPage(text: string) {
