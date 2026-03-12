@@ -17,6 +17,9 @@ interface MockVaultEntry {
 function createMockVault(vaultRoot: string) {
   return {
     rootPath: vaultRoot,
+    get vaultRootPath() {
+      return vaultRoot;
+    },
     async listFiles(opts?: {
       recursive?: boolean;
       ext?: string;

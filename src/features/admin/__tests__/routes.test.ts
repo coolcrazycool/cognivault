@@ -42,6 +42,16 @@ const mockDb = {
   select: mockDbSelect,
 };
 
+const mockQdrantDelete = vi.fn().mockResolvedValue(undefined);
+const mockQdrant = {
+  delete: mockQdrantDelete,
+};
+
+const mockPipelineQueueOnIdle = vi.fn().mockResolvedValue(undefined);
+const mockPipelineQueue = {
+  onIdle: mockPipelineQueueOnIdle,
+};
+
 // ── App builder ──
 
 async function buildTestApp(): Promise<FastifyInstance> {
@@ -53,6 +63,10 @@ async function buildTestApp(): Promise<FastifyInstance> {
   app.decorate('indexer', mockIndexer as any);
   // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial DB
   app.decorate('db', mockDb as any);
+  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial Qdrant client
+  app.decorate('qdrant', mockQdrant as any);
+  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial PQueue
+  app.decorate('pipelineQueue', mockPipelineQueue as any);
 
   // Register error handler first
   const { default: errorHandler } = await import('../../../plugins/error-handler.js');
@@ -84,6 +98,8 @@ describe('admin reindex routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsIndexingValue.value = false;
+    mockQdrantDelete.mockResolvedValue(undefined);
+    mockPipelineQueueOnIdle.mockResolvedValue(undefined);
     mockDbSelect.mockReturnValue({
       from: vi.fn().mockReturnValue({
         where: vi.fn().mockReturnValue({

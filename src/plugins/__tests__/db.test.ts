@@ -68,20 +68,9 @@ describe('db plugin', () => {
     expect(stat.size).toBeGreaterThan(0);
   });
 
-  it('closes database connection on app.close() without error', async () => {
-    // This is tested implicitly by afterAll calling app.close() successfully
-    // Create a separate app instance to test close explicitly
-    const testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'db-close-test-'));
-    const testDataDir = path.join(testDir, 'data');
-    try {
-      process.env.COGNIVAULT_DATA_DIR = testDataDir;
-      // Re-import to get fresh instance with new env
-      // Since modules are cached, we test close() on current app which works fine
-      // The close test is validated by afterAll completing without error
-      expect(true).toBe(true);
-    } finally {
-      process.env.COGNIVAULT_DATA_DIR = dataDir;
-      await fs.rm(testDir, { recursive: true, force: true });
-    }
-  });
+  // Close behavior verified by afterAll block completing without error.
+  // vi.resetModules() cannot be used here because config.ts is a singleton that
+  // requires OPENAI_API_KEY at module load time, and cache invalidation would
+  // cause a ZodError. The afterAll block calls app.close() successfully,
+  // which constitutes the close coverage for this plugin.
 });

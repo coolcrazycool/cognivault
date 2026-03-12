@@ -107,6 +107,7 @@ async function buildTestApp(opts?: {
         f.decorate('vault', {
           readContent,
           rootPath: vaultRootPath,
+          vaultRootPath,
         } as unknown as FastifyInstance['vault']);
         f.decorate('embedder', {
           dimensions: 1536,
