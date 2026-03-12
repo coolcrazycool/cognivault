@@ -194,13 +194,12 @@ Plans:
   2. Prometheus /metrics endpoint exposes search latency, throughput, index queue depth, and stale vector cleanup counts
   3. OpenTelemetry traces span request lifecycle from API entry through Qdrant/embedding calls
   4. Admin can trigger full reindex or partial reindex (by path or folder) via API endpoint
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 11-01: Structured JSON logging with pino and request context
-- [ ] 11-02: Prometheus metrics endpoint with prom-client
-- [ ] 11-03: OpenTelemetry tracing integration
-- [ ] 11-04: Manual reindex endpoints (full, by path, by folder)
+- [ ] 11-01-PLAN.md — Structured logging enrichment (X-Request-ID, redaction) and Prometheus metrics plugin with search/pipeline instrumentation
+- [ ] 11-02-PLAN.md — Admin reindex API endpoints (full, path, folder scopes with async job pattern)
+- [ ] 11-03-PLAN.md — OpenTelemetry tracing with conditional SDK init, manual spans, and trace ID log injection
 
 ## Progress
 
@@ -220,4 +219,4 @@ Note: Phases 9, 10, 11 depend on earlier phases but are independent of each othe
 | 8. Context Pack Assembly | 2/2 | Complete   | 2026-03-11 |
 | 9. TOON + API Polish | 2/2 | Complete   | 2026-03-12 |
 | 10. Multi-Format Indexing | 3/3 | Complete    | 2026-03-12 |
-| 11. Observability + Admin | 0/4 | Not started | - |
+| 11. Observability + Admin | 0/3 | Not started | - |
