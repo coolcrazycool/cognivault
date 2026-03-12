@@ -1,9 +1,12 @@
+import { getEncoding } from 'js-tiktoken';
 import OpenAI from 'openai';
 
 export const DIMENSION_MAP: Record<string, number> = {
   'text-embedding-3-small': 1536,
   'text-embedding-3-large': 3072,
 };
+
+const MAX_EMBEDDING_TOKENS = 8191;
 
 export interface EmbeddingProvider {
   embed(texts: string[]): Promise<number[][]>;
@@ -46,9 +49,18 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
       return [];
     }
 
+    const enc = getEncoding('cl100k_base');
+    const truncated = texts.map((text) => {
+      const tokens = enc.encode(text);
+      if (tokens.length <= MAX_EMBEDDING_TOKENS) {
+        return text;
+      }
+      return enc.decode(tokens.slice(0, MAX_EMBEDDING_TOKENS));
+    });
+
     const response = await this.client.embeddings.create({
       model: this.model,
-      input: texts,
+      input: truncated,
     });
 
     return response.data
