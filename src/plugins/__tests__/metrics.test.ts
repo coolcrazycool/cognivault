@@ -113,4 +113,28 @@ describe('/metrics endpoint', () => {
     // Default metrics collected by prom-client include nodejs_ metrics
     expect(response.body).toMatch(/process_cpu|nodejs_/);
   });
+
+  it('response contains cognivault_embedding_requests_total metric', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+    });
+    expect(response.body).toContain('cognivault_embedding_requests_total');
+  });
+
+  it('response contains cognivault_chunks_processed_total metric', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+    });
+    expect(response.body).toContain('cognivault_chunks_processed_total');
+  });
+
+  it('response contains cognivault_pipeline_duration_seconds metric', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+    });
+    expect(response.body).toContain('cognivault_pipeline_duration_seconds');
+  });
 });

@@ -1,12 +1,15 @@
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
-import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
+import { Counter, collectDefaultMetrics, Gauge, Histogram, Registry } from 'prom-client';
 
 interface MetricsCollection {
   searchDuration: Histogram<'type'>;
   searchRequests: Counter<'type'>;
   indexQueueDepth: Gauge;
   staleVectorCleanups: Counter;
+  embeddingRequests: Counter;
+  chunksProcessed: Counter;
+  pipelineDuration: Histogram;
 }
 
 declare module 'fastify' {
@@ -53,12 +56,37 @@ async function metricsPlugin(fastify: FastifyInstance): Promise<void> {
     registers: [register],
   });
 
+  // Total embedding API calls counter
+  const embeddingRequests = new Counter({
+    name: 'cognivault_embedding_requests_total',
+    help: 'Total number of embedding API calls made',
+    registers: [register],
+  });
+
+  // Total chunks processed through the indexing pipeline counter
+  const chunksProcessed = new Counter({
+    name: 'cognivault_chunks_processed_total',
+    help: 'Total number of chunks processed through the indexing pipeline',
+    registers: [register],
+  });
+
+  // End-to-end per-file pipeline processing duration histogram
+  const pipelineDuration = new Histogram({
+    name: 'cognivault_pipeline_duration_seconds',
+    help: 'End-to-end duration of file processing through the indexing pipeline',
+    buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+    registers: [register],
+  });
+
   // Decorate fastify with the metrics collection
   fastify.decorate('metrics', {
     searchDuration,
     searchRequests,
     indexQueueDepth,
     staleVectorCleanups,
+    embeddingRequests,
+    chunksProcessed,
+    pipelineDuration,
   });
 
   // Register /metrics route — skips auth (Prometheus scraping does not send auth headers)
