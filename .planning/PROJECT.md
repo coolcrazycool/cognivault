@@ -37,10 +37,19 @@ AI agents can find and retrieve the right knowledge from an Obsidian vault in un
 
 ### Active
 
-- [ ] Cross-encoder reranking (Cohere/BGE) for top-K precision (RET-04, deferred from v1.0)
-- [ ] Multi-vault support with isolation between vaults
-- [ ] Embedding model version tracking and upgrade path
-- [ ] Read-only vs write/admin role separation in auth
+- [ ] Multi-user deployment: per-user CogniVault+Obsidian container with shared Qdrant
+- [ ] Containerized Obsidian with VNC access for visual vault management
+- [ ] Obsidian Sync integration for per-user vault synchronization
+- [ ] Per-user API key authentication with tenant isolation in Qdrant
+- [ ] Management CLI (cognivault-ctl) for user lifecycle management
+- [ ] Shared metrics infrastructure (Prometheus + Grafana) across all users
+
+### Deferred
+
+- Cross-encoder reranking (Cohere/BGE) for top-K precision (RET-04, deferred from v1.0)
+- Multi-vault support per user — single vault per user sufficient for now
+- Embedding model version tracking and upgrade path
+- Read-only vs write/admin role separation in auth
 
 ### Out of Scope
 
@@ -93,5 +102,15 @@ AI agents can find and retrieve the right knowledge from an Obsidian vault in un
 | pdfjs-dist for PDF extraction | Mature, no native deps | ✓ Good — works in Docker |
 | Heading-aware chunking | Preserves section context | ✓ Good — high retrieval quality |
 
+## Current Milestone: v2.0 Multi-User
+
+**Goal:** Transform CogniVault from a single-user service into a multi-user platform where each user gets their own CogniVault+Obsidian container with VNC access, sharing a common Qdrant and monitoring infrastructure.
+
+**Target features:**
+- Per-user container (CogniVault + Obsidian + VNC) with Obsidian Sync
+- Tenant-isolated Qdrant (shared instance, per-user data separation via API key)
+- Management CLI for user lifecycle (add, remove, list)
+- Shared Prometheus + Grafana with per-user metrics labeling
+
 ---
-*Last updated: 2026-03-13 after v1.0 milestone*
+*Last updated: 2026-03-13 after v2.0 milestone start*
