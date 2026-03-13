@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A unified self-hosted REST API service that serves as the knowledge access layer for AI agents working with Obsidian vaults. CogniVault combines Obsidian-compatible file operations, continuous vector indexing into Qdrant, hybrid retrieval (semantic + lexical + metadata), and structured context pack assembly — all in a single deployable service. Agents interact via standard REST or TOON (Token-Oriented Object Notation) for token-efficient communication.
+A self-hosted REST API service that serves as the knowledge access layer for AI agents working with Obsidian vaults. CogniVault provides Obsidian-compatible file CRUD, continuous vector indexing into Qdrant, hybrid retrieval (semantic + lexical + RRF fusion), structured context pack assembly, and multi-format support (Markdown, PDF, Canvas, Excalidraw, CSV, images) — all in a single Docker-deployable service. Agents interact via standard REST or TOON (Token-Oriented Object Notation) for ~40% token savings.
 
 ## Core Value
 
@@ -12,87 +12,86 @@ AI agents can find and retrieve the right knowledge from an Obsidian vault in un
 
 ### Validated
 
-(None yet — ship to validate)
+- ✓ REST API for Obsidian note/file CRUD operations — v1.0
+- ✓ Frontmatter read/write for freeform YAML metadata — v1.0
+- ✓ Built-in indexing subsystem with filesystem polling change detection — v1.0
+- ✓ Markdown-aware chunking with section hierarchy preservation — v1.0
+- ✓ Multi-format indexing: PDF, Canvas, Excalidraw, CSV, image metadata — v1.0
+- ✓ Qdrant vector storage with rich payload schema — v1.0
+- ✓ SQLite-based index state tracking — v1.0
+- ✓ Semantic search via Qdrant with OpenAI embeddings — v1.0
+- ✓ Keyword/lexical search for exact terms and mixed-language queries — v1.0
+- ✓ Hybrid retrieval with RRF fusion — v1.0
+- ✓ Metadata filtering: project, type, tags, status, folder path — v1.0
+- ✓ Context pack assembly with configurable token budget — v1.0
+- ✓ TOON content negotiation (request + response) — v1.0
+- ✓ API key authentication — v1.0
+- ✓ Async write path with automatic reindexing — v1.0
+- ✓ Stale vector cleanup on reindex — v1.0
+- ✓ Manual reindex endpoints (full, path, folder) — v1.0
+- ✓ Path traversal protection — v1.0
+- ✓ Structured JSON logs, Prometheus metrics, OpenTelemetry tracing — v1.0
+- ✓ Docker deployment with Qdrant sidecar — v1.0
+- ✓ Health and readiness endpoints — v1.0
+- ✓ Prometheus + Grafana monitoring dashboards — v1.0
 
 ### Active
 
-- [ ] REST API for Obsidian note/file CRUD operations (list, read, create, update, append/prepend/patch, delete, rename/move)
-- [ ] Frontmatter read/write for freeform YAML metadata
+- [ ] Cross-encoder reranking (Cohere/BGE) for top-K precision (RET-04, deferred from v1.0)
 - [ ] Multi-vault support with isolation between vaults
-- [ ] Built-in indexing subsystem: full + incremental, filesystem change detection via polling (Obsidian Sync compatible)
-- [ ] Markdown-aware chunking with section hierarchy preservation
-- [ ] Multi-format indexing: .md, PDF text extraction, Canvas JSON parsing, Excalidraw text extraction, CSV, image metadata
-- [ ] Qdrant vector storage with concrete payload schema (path, title, chunk_id, section_path, tags, project, status, content_hash, etc.)
-- [ ] SQLite-based index state tracking (hashes, timestamps, embedding model versions)
-- [ ] Semantic search via Qdrant with embedding provider abstraction (start with OpenAI, swappable)
-- [ ] Keyword/lexical search for exact technical terms, acronyms, mixed-language queries
-- [ ] Hybrid retrieval with RRF fusion + Cohere/BGE cross-encoder reranking
-- [ ] Metadata filtering: project, type, tags, status, folder path
-- [ ] Context pack assembly endpoint: structured knowledge bundle for downstream agents (~32K token budget, configurable)
-- [ ] TOON notation support for both request and response (content negotiation: Accept: text/toon vs application/json)
-- [ ] API key authentication with read-only vs write/admin role separation
-- [ ] Async write path: file writes on disk, watcher triggers reindexing
-- [ ] Stale vector cleanup: detect obsolete chunks on reindex, propagate deletes, handle renames
 - [ ] Embedding model version tracking and upgrade path
-- [ ] Manual reindex endpoints (full, by path, by folder)
-- [ ] Path traversal protection and safe filesystem operations
-- [ ] Full observability: structured JSON logs, Prometheus metrics, OpenTelemetry tracing
-- [ ] Docker deployment: single service + Qdrant in docker-compose
-- [ ] Health and readiness endpoints
+- [ ] Read-only vs write/admin role separation in auth
 
 ### Out of Scope
 
 - Wikilink/backlink graph navigation — agents use retrieval, not graph traversal
 - Real-time WebSocket push — agents poll or use request/response
 - Obsidian plugin — this is a standalone server-side service
-- User authentication / multi-user — local agents only, API key sufficient
-- UI/dashboard — admin via REST endpoints and metrics
-- Aggressive query caching — Qdrant is fast enough, cache invalidation adds complexity
+- Multi-user authentication — local agents only, API key sufficient
+- UI/dashboard — admin via REST endpoints and Grafana
+- Aggressive query caching — Qdrant is fast enough at this scale
 
 ## Context
 
-**Current state:** There is an existing custom REST API for Obsidian data and Smart Connections for semantic search. CogniVault replaces and unifies both into one robust service.
+**Shipped:** v1.0 MVP on 2026-03-13
+**Codebase:** 12,704 LOC TypeScript across 232 files
+**Tech stack:** Fastify 5, TypeBox, Drizzle ORM + SQLite, Qdrant, OpenAI embeddings, prom-client, @opentelemetry/sdk, pdfjs-dist, PapaParse, @toon-format/toon
+**Deployment:** Docker Compose (CogniVault + Qdrant + Prometheus + Grafana)
 
 **Vault characteristics:**
 - 500-5,000 notes, growing
-- Freeform structure (no PARA or fixed folder convention)
-- Freeform frontmatter (no standardized schema across notes)
-- 80%+ Russian content, mixed with English technical terminology
-- Synced via Obsidian Sync from phone, laptop, desktop
-- Contains .md, PDFs, Canvas, Excalidraw, CSV, Excel, images
+- Freeform structure and frontmatter
+- 80%+ Russian content, mixed with English technical terms
+- Synced via Obsidian Sync
+- Contains .md, PDFs, Canvas, Excalidraw, CSV, images
 
-**Agent ecosystem:** 1-3 concurrent agents. Framework-agnostic — any agent that speaks REST/TOON can use the service. Hot path: hybrid search > read note > context pack > create/update.
-
-**TOON format:** Token-Oriented Object Notation (https://github.com/toon-format/toon). Compact, human-readable, schema-aware JSON alternative for LLM prompts. Uses indentation + field headers + tabular arrays. ~40% fewer tokens than JSON. Service supports content negotiation (Accept: text/toon returns TOON, default JSON).
-
-**Multilingual retrieval challenge:** Vault contains queries like "Compass catalog ui filters", "как устроен ingestion metadata routes", "SLA ownership tabs", "schema evolution rules" — mix of Russian prose, English technical terms, abbreviations, project names. Retrieval must handle exact matching of short technical identifiers alongside semantic similarity.
+**Agent ecosystem:** 1-3 concurrent agents, framework-agnostic REST/TOON interface
 
 ## Constraints
 
-- **Deployment**: Single Docker-deployable service + Qdrant sidecar, self-hosted server
+- **Deployment**: Single Docker-deployable service + Qdrant sidecar, self-hosted
 - **Latency**: < 1 second for hybrid search requests
 - **Consistency**: Vault on disk is source of truth; Qdrant must not contain stale vectors
-- **Sync method**: Obsidian Sync — no git diffs available, must use filesystem polling + content hashing
+- **Sync method**: Obsidian Sync — filesystem polling + content hashing
 - **Token budget**: Context packs default ~32K tokens, configurable per request
 - **Concurrency**: 1-3 simultaneous agent connections
-- **Embedding**: Provider abstraction required; start with OpenAI text-embedding-3, must be swappable to local models (BGE, nomic-embed)
-- **Reranker**: Cross-encoder reranking (Cohere/BGE) for precision on top-K results
+- **Embedding**: Start with OpenAI text-embedding-3, must be swappable to local models
 - **State storage**: SQLite for index state — atomic, fast lookups, zero config
-- **Write model**: Async — writes go to disk, filesystem watcher triggers reindexing
 
 ## Key Decisions
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Replace existing API entirely | Clean slate allows unified design without backward compatibility hacks | — Pending |
-| Multi-vault from v1 | User requirement; vault_name as namespace in Qdrant collection + SQLite | — Pending |
-| SQLite for index state | ACID, fast path lookups, no external dependency, survives crashes | — Pending |
-| TOON content negotiation | Both input and output; Accept header determines format; reduces agent token usage by ~40% | — Pending |
-| Async write-then-index | Decouples write latency from embedding latency; watcher ensures consistency | — Pending |
-| Filesystem polling (not inotify) | Obsidian Sync doesn't trigger FS events reliably; polling + content hash is robust | — Pending |
-| Cross-encoder reranking | Significant precision improvement for mixed-language technical queries | — Pending |
-| No query caching | Qdrant latency acceptable; cache invalidation complexity not worth it at this scale | — Pending |
-| No backlink/graph support | Agents use retrieval, not graph traversal; simplifies architecture | — Pending |
+| Replace existing API entirely | Clean slate allows unified design | ✓ Good — clean architecture |
+| SQLite for index state | ACID, fast, no external dependency | ✓ Good — reliable, zero config |
+| TOON content negotiation | Reduces agent token usage ~40% | ✓ Good — works in both directions |
+| Async write-then-index | Decouples write latency from embedding | ✓ Good — responsive writes |
+| Filesystem polling (not inotify) | Obsidian Sync compatible | ✓ Good — reliable change detection |
+| RRF fusion without reranking | Simpler, good enough for v1 | ✓ Good — deferred reranking to v2 |
+| No query caching | Qdrant latency acceptable at scale | ✓ Good — avoided complexity |
+| Per-instance prom-client Registry | Prevents test pollution | ✓ Good — clean test isolation |
+| pdfjs-dist for PDF extraction | Mature, no native deps | ✓ Good — works in Docker |
+| Heading-aware chunking | Preserves section context | ✓ Good — high retrieval quality |
 
 ---
-*Last updated: 2026-03-10 after initialization*
+*Last updated: 2026-03-13 after v1.0 milestone*
