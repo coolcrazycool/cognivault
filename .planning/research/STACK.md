@@ -1,276 +1,323 @@
 # Technology Stack
 
-**Project:** CogniVault
-**Researched:** 2026-03-10
+**Project:** CogniVault v2.0 — Multi-User Deployment
+**Researched:** 2026-03-13
+**Confidence:** HIGH (core recommendations verified against official docs and active sources)
 
-## Recommended Stack
+---
 
-### Runtime & Language
+> This file covers **new stack additions only** for v2.0 multi-user deployment.
+> The v1.0 stack (Fastify 5, TypeBox, Drizzle ORM + SQLite, Qdrant, OpenAI embeddings,
+> prom-client, @opentelemetry/sdk, Docker Compose) is validated and unchanged.
 
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| Node.js | 22 LTS | Runtime | LTS with good performance, native fetch, stable ESM. v22 is current LTS through April 2027. | HIGH |
-| TypeScript | 5.7+ | Language | Type safety across the entire codebase. Fastify, Drizzle, Zod all have first-class TS support. | HIGH |
-| ESM-only | - | Module system | All modern deps (Fastify v5, chokidar v5, Zod v4) are ESM-first. No CommonJS compatibility headaches. | HIGH |
+---
 
-### Web Framework
+## New Stack: What Gets Added
 
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| Fastify | 5.8.x | REST API framework | 2-3x faster than Express, schema-based validation (integrates with Zod), encapsulated plugin architecture, first-class TypeScript, built-in JSON serialization optimization. Actively maintained (5.8.2 released March 2026). v4 retired June 2025 -- v5 is the only path. | HIGH |
+### Containerized Obsidian with Browser-Based Access
 
-**Why not Express:** Slower, middleware-based architecture is messier for a service with distinct domains (files, search, indexing). Express 5 has been in beta for years.
+| Technology | Version | Purpose | Why Recommended | Confidence |
+|------------|---------|---------|-----------------|------------|
+| `lscr.io/linuxserver/obsidian` | `:latest` | Obsidian desktop in Docker | KasmVNC-based, actively maintained by LinuxServer.io, auto-updated with Obsidian releases, ARM64 + x86-64 support, browser-accessible on ports 3000/3001, per-container credential isolation via `CUSTOM_USER`/`PASSWORD` env vars | HIGH |
 
-**Why not Hono:** Good for edge/serverless, but CogniVault is a long-running Docker service with filesystem access. Fastify's plugin encapsulation is better for this architecture.
+**Chosen over `sytone/obsidian-remote`:** obsidian-remote uses KasmVNC too, but last release was October 2022 with limited recent activity. linuxserver/obsidian is actively maintained, updated continuously with new Obsidian versions, and has mature multi-architecture support.
 
-### Validation
+**Chosen over `kasmweb/obsidian`:** Kasm Workspaces image is part of the commercial Kasm platform — heavy dependencies, session management overhead. linuxserver is a standalone container ideal for per-user deployment.
 
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| Zod | 4.3.x | Schema validation & type inference | 14x faster string parsing vs Zod 3, `.toJSONSchema()` for OpenAPI generation, native Fastify integration via `fastify-type-provider-zod`. Dual use: request validation + config validation. | HIGH |
+**How browser access works:** KasmVNC streams the Obsidian Electron desktop as video to a browser. Users connect to `https://<host>:3001/` (HTTPS required for WebCodecs). Each container is one user session. Per-user isolation is natural: each user = one container with their own `/config` volume mount and unique `CUSTOM_USER`/`PASSWORD`.
 
-**Why not Ajv directly:** Fastify uses Ajv internally, but Zod gives TypeScript type inference from schemas. Use `fastify-type-provider-zod` to bridge Zod schemas to Fastify's Ajv-based validation.
+**Critical requirement:** `shm_size: "1gb"` is required — Electron apps (Obsidian) crash without shared memory. This must be set on every Obsidian container.
 
-### Database (Index State)
+**Obsidian Sync compatibility:** Obsidian Sync uses the Obsidian client running inside the container to sync. The vault lives at `/config/data/` inside the container (the path Obsidian opens by default). CogniVault mounts the same host path as a read-write bind mount. Sync happens via the running Obsidian instance inside the container — no separate sync daemon needed.
 
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| better-sqlite3 | 11.x | SQLite driver | Synchronous API (perfect for index state checks in hot path), zero config, ACID, fastest SQLite driver for Node.js. | HIGH |
-| Drizzle ORM | 0.45.x | Type-safe query builder | SQL-centric (not ActiveRecord-style), uses better-sqlite3 as driver, type-safe schema definitions, migration support via drizzle-kit, sync API support. Lightweight -- not a heavy ORM. | HIGH |
-| drizzle-kit | latest | Schema migrations | Generates SQL migrations from schema diffs. Essential for schema evolution. | HIGH |
-
-**Why not Prisma:** Too heavy for index state management. Prisma Client adds ~2MB, requires engine binary, async-only. Drizzle is <100KB, sync-capable, SQL-first.
-
-**Why not raw better-sqlite3:** Works fine, but Drizzle adds type-safe queries and migration management with negligible overhead. The schema (file hashes, embedding versions, timestamps) will evolve.
-
-### Vector Database
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| Qdrant | 1.15+ (Docker) | Vector storage & search | Native sparse vector support (BM25 built-in since 1.15.2), Query API for hybrid search server-side, multilingual tokenizer with Russian stemming support, payload filtering, collection-level multi-vault isolation. | HIGH |
-| @qdrant/js-client-rest | latest (aligned with Qdrant version) | Qdrant client | Official REST client, typed API, lightweight. REST is simpler to debug than gRPC for this scale. | HIGH |
-
-**Why not Weaviate/Pinecone/Milvus:** Qdrant has native BM25 sparse vectors (no external BM25 computation needed), built-in Russian language stemming, and the Query API handles RRF fusion server-side. Self-hosted, no cloud dependency. Other options would require client-side BM25 + separate fusion logic.
-
-**Critical for this project:** Qdrant 1.15+ has built-in multilingual BM25 with Russian stemming and stopwords. This eliminates the need for a separate lexical search engine (no Elasticsearch/MeiliSearch sidecar needed). Hybrid search (dense + sparse) with RRF fusion happens entirely server-side via the Query API.
-
-### Embedding
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| openai (SDK) | 6.x | OpenAI API client | Official SDK, typed, handles retries/rate limiting. Used for text-embedding-3-small/large. | HIGH |
-| text-embedding-3-small | - | Default embedding model | 1536 dimensions, strong multilingual performance (Russian + English), cheap ($0.02/M tokens), supports dimension reduction via API parameter. | HIGH |
-
-**Embedding provider abstraction:** Define an `EmbeddingProvider` interface (`embed(texts: string[]): Promise<number[][]>`) with an OpenAI implementation first. Future providers (BGE-M3 via Ollama, nomic-embed) implement the same interface. Store provider name + model version in SQLite for reindex tracking.
-
-**Why text-embedding-3-small over large:** For 500-5K notes, small is sufficient. Cost is 5x lower. Can upgrade to large later without code changes (just config + reindex).
-
-### Reranking
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| cohere-ai | latest | Cross-encoder reranking | Cohere Rerank 3.5+ has excellent multilingual support, simple API (query + documents in, scored list out). TypeScript SDK available. | HIGH |
-
-**Reranker abstraction:** Same pattern as embeddings. `Reranker` interface with Cohere implementation. Future: local BGE-reranker-v2 via ONNX or API.
-
-**Why not skip reranking:** Mixed Russian/English technical queries benefit enormously from cross-encoder reranking. BM25 finds "Compass catalog" exactly; dense finds semantically similar notes; reranker sorts the combined results by actual relevance to the full query.
-
-### File Processing
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| pdf-parse | 2.4.x | PDF text extraction | Pure TypeScript, no native deps, supports Node 22. Good enough for text extraction from vault PDFs. | MEDIUM |
-| gray-matter | 4.x | YAML frontmatter parsing | De facto standard for parsing markdown frontmatter. Used by Astro, Gatsby, Hugo toolchains. | HIGH |
-| csv-parse | 5.x | CSV parsing | Streaming parser, handles edge cases (quoted fields, BOM). Part of the well-maintained csv ecosystem. | HIGH |
-
-**Markdown chunking:** Build custom. No existing library handles Obsidian-specific markdown (wikilinks, callouts, embeds) with section hierarchy preservation well enough. Use a markdown tokenizer (marked or markdown-it) to detect headings, then chunk by section with configurable max token size. Track section path (e.g., `# Parent > ## Child > ### Subsection`) as metadata for each chunk.
-
-**Why custom chunking over LangChain/LlamaIndex TS:** Those frameworks are designed for full RAG pipelines. CogniVault only needs the chunking step. Pulling in langchain adds massive dependency weight for one function. A ~200-line custom chunker with heading-aware splitting is simpler and more maintainable.
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| marked | 15.x | Markdown tokenizer | Fast, extensible, produces AST tokens. Use for heading detection and section boundary identification, not rendering. | MEDIUM |
-
-**Canvas/Excalidraw:** Custom parsers. Canvas is JSON (parse, extract text from nodes). Excalidraw is JSON (extract text elements). Both are simple enough to handle with 50-100 lines each.
-
-### Filesystem Watching
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| Custom polling | - | Filesystem change detection | Obsidian Sync doesn't trigger FS events reliably. Polling + content hashing is the only robust approach per PROJECT.md constraints. No chokidar needed. | HIGH |
-
-**Implementation:** Poll vault directories on configurable interval (default 30s). Compare file mtimes against SQLite state. For changed files, compute content hash (xxhash via xxhash-wasm for speed) and compare against stored hash. Queue changed files for reindexing.
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| xxhash-wasm | 1.x | Fast content hashing | WASM-based xxHash, ~10x faster than crypto.createHash('sha256') for content comparison. No native deps. | MEDIUM |
-
-**Why not chokidar:** PROJECT.md explicitly states Obsidian Sync doesn't trigger FS events reliably. Polling is the correct approach. chokidar adds complexity for a mechanism that won't work for the primary use case.
-
-### TOON Support
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| @toon-format/toon | 3.x | TOON serialization/deserialization | Official SDK. JSON-to-TOON and TOON-to-JSON conversion. Content negotiation: `Accept: text/toon` triggers TOON response serialization. | HIGH |
-
-### Observability
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| @opentelemetry/sdk-node | 0.57+ | OTel SDK | Official Node.js SDK. Auto-instrumentation for HTTP, Fastify, better-sqlite3. | HIGH |
-| @opentelemetry/instrumentation-fastify | latest | Fastify tracing | Auto-instruments Fastify routes. Note: OTel team deprecated their version June 2025; use `@fastify/otel` (official Fastify plugin) instead. | HIGH |
-| @opentelemetry/instrumentation-http | latest | HTTP tracing | Required alongside Fastify instrumentation for proper span parenting. | HIGH |
-| @opentelemetry/exporter-trace-otlp-http | latest | Trace export | Export traces to any OTLP-compatible backend (Jaeger, Grafana Tempo). | HIGH |
-| @opentelemetry/exporter-metrics-otlp-http | latest | Metrics export | Export metrics to OTLP-compatible backend. | HIGH |
-| prom-client | 15.x | Prometheus metrics | De facto standard Node.js Prometheus client. Expose `/metrics` endpoint for Prometheus scraping. Default metrics (event loop lag, GC, memory). Custom metrics (search latency, index queue size, embedding API calls). | HIGH |
-| pino | 9.x | Structured logging | Fastify's default logger. JSON output, low overhead, child loggers for request context. | HIGH |
-
-**Why pino over winston:** Fastify uses pino natively. Zero config. 5x faster than winston. Structured JSON by default.
-
-**Observability strategy:**
-- **Logs:** pino (JSON, stdout, collected by Docker logging driver)
-- **Metrics:** prom-client exposed at `/metrics` + OTLP export
-- **Traces:** OpenTelemetry with OTLP export to Jaeger/Tempo
-
-### Authentication
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| @fastify/bearer-auth | latest | API key auth | Simple bearer token validation. Supports multiple keys with role metadata (read-only vs admin). Fastify plugin, minimal code. | HIGH |
-
-**Why not JWT/OAuth:** Overkill. 1-3 local agents, no user auth needed. API keys stored in config, validated per-request via Fastify hook.
-
-### Docker & Deployment
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| Node.js 22-slim | - | Base Docker image | Alpine has native module issues with better-sqlite3. Slim is small enough (~180MB) and avoids compilation problems. | HIGH |
-| docker-compose | 3.8+ | Service orchestration | CogniVault service + Qdrant sidecar. Simple, standard. | HIGH |
-| Qdrant | 1.15+ | Vector DB container | `qdrant/qdrant:latest` from Docker Hub. Persistent volume for data. | HIGH |
-
-### Development
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| tsx | latest | TypeScript execution | Run TS directly in dev without compilation step. Fast, ESM-native. | HIGH |
-| vitest | 3.x | Testing | Fast, ESM-native, TypeScript-first, built-in mocking. Works with Fastify's `inject()` for API testing. | HIGH |
-| @biomejs/biome | latest | Linting & formatting | Single tool replaces ESLint + Prettier. Faster (Rust-based), zero-config for most cases. | MEDIUM |
-
-**Why not Jest:** Jest has poor ESM support and requires transforms for TypeScript. Vitest is designed for ESM + TS.
-
-**Why not ESLint + Prettier:** Biome is a single Rust-based tool that handles both. 10-100x faster. Fewer config files.
-
-## Full Dependency List
-
-### Production Dependencies
-
-```bash
-# Core framework
-npm install fastify @fastify/bearer-auth @fastify/cors @fastify/swagger @fastify/swagger-ui
-
-# Validation
-npm install zod fastify-type-provider-zod
-
-# Database
-npm install better-sqlite3 drizzle-orm
-
-# Vector DB
-npm install @qdrant/js-client-rest
-
-# Embedding & Reranking
-npm install openai cohere-ai
-
-# File processing
-npm install gray-matter pdf-parse csv-parse marked
-
-# TOON format
-npm install @toon-format/toon
-
-# Hashing
-npm install xxhash-wasm
-
-# Observability
-npm install pino prom-client @opentelemetry/sdk-node @opentelemetry/instrumentation-fastify @opentelemetry/instrumentation-http @opentelemetry/exporter-trace-otlp-http @opentelemetry/exporter-metrics-otlp-http @fastify/otel
+```yaml
+# Per-user Obsidian container example
+obsidian-user1:
+  image: lscr.io/linuxserver/obsidian:latest
+  environment:
+    - PUID=1000
+    - PGID=1000
+    - TZ=UTC
+    - CUSTOM_USER=user1
+    - PASSWORD=<generated>
+  volumes:
+    - /data/vaults/user1:/config
+  ports:
+    - "3101:3001"   # HTTPS browser access, per-user port offset
+  shm_size: "1gb"
+  restart: unless-stopped
 ```
 
-### Dev Dependencies
+---
 
-```bash
-npm install -D typescript tsx vitest @biomejs/biome drizzle-kit @types/better-sqlite3 @types/node
+### Qdrant Multi-Tenancy: Payload Filtering (Single Collection)
+
+**Decision: payload-based partitioning with `is_tenant=true` index — NOT collection-per-tenant.**
+
+| Technology | Purpose | Notes | Confidence |
+|------------|---------|-------|------------|
+| Qdrant 1.17.0 | Shared vector store, per-user data isolation | Same instance already deployed in v1.0 | HIGH |
+| `tenant_id` keyword payload field | Isolates user vectors | Add `is_tenant=true` flag on index creation | HIGH |
+
+**Why NOT collection-per-tenant:**
+Qdrant explicitly warns against this: "creating a separate collection for each user leads to high costs, performance degradation and cluster instability." Each collection has its own HNSW index overhead. At 10-50 users, this creates 10-50x the index memory footprint for the same total data.
+
+**Why payload filtering:**
+- A query with a `tenant_id` payload filter is faster than a full collection scan
+- `is_tenant=true` tells Qdrant to build per-tenant sub-indexes, making filtered search faster than global search
+- Supports unlimited tenants in a single collection
+- Simpler operations: one collection to back up, monitor, and maintain
+
+**Implementation:**
+```typescript
+// On collection creation, add tenant payload index
+await qdrantClient.createPayloadIndex(COLLECTION_NAME, {
+  field_name: "tenant_id",
+  field_schema: {
+    type: "keyword",
+    is_tenant: true,   // Critical: enables per-tenant HNSW sub-index
+  },
+});
+
+// All inserts include tenant_id in payload
+await qdrantClient.upsert(COLLECTION_NAME, {
+  points: chunks.map(chunk => ({
+    id: chunk.id,
+    vector: { dense: chunk.embedding, sparse: chunk.sparseVector },
+    payload: {
+      tenant_id: userId,   // e.g. "user_abc123"
+      ...chunk.metadata,
+    },
+  })),
+});
+
+// All queries filter by tenant_id
+await qdrantClient.query(COLLECTION_NAME, {
+  prefetch: [
+    { query: denseVector, using: "dense", filter: { must: [{ key: "tenant_id", match: { value: userId } }] } },
+    { query: sparseVector, using: "sparse", filter: { must: [{ key: "tenant_id", match: { value: userId } }] } },
+  ],
+  query: { fusion: "rrf" },
+  filter: { must: [{ key: "tenant_id", match: { value: userId } }] },
+});
 ```
+
+**Migration from v1.0:** The existing collection uses per-vault collection names (one collection per vault). For v2.0, migrate to a single shared collection with `tenant_id` payload. This is a one-time reindex. Existing single-user deployment maps `tenant_id` to the sole user's ID.
+
+**Global HNSW note:** The multitenancy article recommends setting `m: 0` in the collection's HNSW config to disable the global index when using tenant-only queries. This is only beneficial when you never do cross-tenant search (which CogniVault never does). Apply at collection creation time.
+
+---
+
+### Per-User API Key Management
+
+**Decision: Extend existing `@fastify/bearer-auth` pattern with SQLite-backed key-to-user lookup.**
+
+The v1.0 stack uses `@fastify/bearer-auth` with keys from config. For v2.0, keys must map to users (and thus to `tenant_id` for Qdrant filtering).
+
+| Technology | Version | Purpose | Why | Confidence |
+|------------|---------|---------|-----|------------|
+| Drizzle ORM + better-sqlite3 | Already in stack | API key store | Extend existing SQLite DB with `api_keys` table: `(key_hash, user_id, created_at, label)` | HIGH |
+| `node:crypto` built-in | - | Key generation + hashing | `crypto.randomBytes(32).toString('hex')` for key generation; `crypto.createHash('sha256')` for storage — no new dependency | HIGH |
+| `@fastify/bearer-auth` | Already in stack | Auth hook | Switch from static config to dynamic lookup via `allowedKeys` function | HIGH |
+
+**`@fastify/bearer-auth` supports dynamic lookup:** Pass an async function instead of a Set. The function receives the key, queries SQLite, and returns true/false. Attach the resolved `userId` to the request via `fastify.decorateRequest('userId', '')`.
+
+```typescript
+// api_keys table schema (Drizzle)
+export const apiKeys = sqliteTable('api_keys', {
+  keyHash: text('key_hash').primaryKey(),   // SHA-256 of the raw key
+  userId:  text('user_id').notNull(),
+  label:   text('label'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+
+// Fastify auth hook
+fastify.register(bearerAuthPlugin, {
+  keys: new Set(),  // not used when addHook is set
+  auth: async (key, request) => {
+    const keyHash = crypto.createHash('sha256').update(key).digest('hex');
+    const row = db.select().from(apiKeys).where(eq(apiKeys.keyHash, keyHash)).get();
+    if (!row) return false;
+    request.userId = row.userId;   // attach for downstream use
+    return true;
+  },
+});
+```
+
+**Why NOT `fastify-api-key` npm package:** The `arkerone/fastify-api-key` plugin uses HMAC signatures (HTTP Signature draft spec) — overkill for this use case and requires clients to sign requests. CogniVault agents use simple Bearer tokens. Implementing directly on `@fastify/bearer-auth` with a custom `auth` function is 20 lines and uses the already-present dependency.
+
+---
+
+### Management CLI (cognivault-ctl)
+
+**Decision: Commander.js 14 with `yaml` package for Docker Compose generation.**
+
+| Technology | Version | Purpose | Why | Confidence |
+|------------|---------|---------|-----|------------|
+| `commander` | 14.0.x | CLI argument parsing and subcommands | 213M weekly downloads, 0 dependencies, ~180KB install size, full TypeScript + ESM support, v14 is current stable (v15 moves to ESM-only May 2026), git-style subcommands, zero startup overhead | HIGH |
+| `yaml` | 2.x | YAML read/write for docker-compose files | Pure TypeScript, actively maintained, `YAML.parse()` + `YAML.stringify()` API, supports comments preservation, minimum TypeScript 5.9 — ideal for generating and updating docker-compose.yml files | HIGH |
+
+**Why Commander over alternatives:**
+
+- **vs Yargs:** Commander has 0 deps vs Yargs' 7 deps + 850KB. For a sysadmin CLI, startup time matters.
+- **vs Oclif:** Oclif adds 12MB and 30+ deps. It's designed for Salesforce-scale plugin ecosystems. cognivault-ctl has 5 commands.
+- **vs Clipanion (Yarn):** Good but less ecosystem familiarity, better suited for plugin-based CLIs.
+
+**Why `yaml` over `js-yaml`:**
+`js-yaml` v4 types (`@types/js-yaml`) were last updated 2+ years ago. The `yaml` package has built-in TypeScript types, active maintenance, comment preservation (important for human-readable compose files), and native `stringify` support.
+
+**CLI command structure:**
+
+```
+cognivault-ctl user add <username> [--port-offset <n>]
+cognivault-ctl user remove <username>
+cognivault-ctl user list
+cognivault-ctl compose generate          # writes docker-compose.yml from SQLite user registry
+cognivault-ctl compose apply             # runs docker compose up -d
+```
+
+**Compose generation approach:** Store user registry in the existing SQLite DB (new `users` table: `user_id`, `username`, `port_offset`, `created_at`). `compose generate` reads all users and builds the docker-compose YAML programmatically using `yaml` package. This avoids maintaining fragile template files.
+
+```typescript
+// packages/cognivault-ctl/src/compose.ts
+import YAML from 'yaml';
+
+export function generateComposeYaml(users: User[]): string {
+  const services: Record<string, unknown> = {
+    qdrant: { image: 'qdrant/qdrant:latest', ... },
+    prometheus: { ... },
+    grafana: { ... },
+  };
+
+  for (const user of users) {
+    services[`cognivault-${user.username}`] = buildCogniVaultService(user);
+    services[`obsidian-${user.username}`] = buildObsidianService(user);
+  }
+
+  return YAML.stringify({ services });
+}
+```
+
+**CLI packaging:** Standalone Node.js script with a `bin` entry in `package.json`. Does NOT need to be a compiled binary — `node cognivault-ctl` or `pnpm exec cognivault-ctl` is sufficient for a sysadmin tool. Add to project's `packages/` directory (pnpm workspace).
+
+---
+
+## Supporting Infrastructure Changes
+
+### Docker Compose Architecture (v2.0)
+
+The v1.0 single-file `docker-compose.yml` becomes a generated file. The architecture expands to:
+
+```
+docker-compose.yml (generated by cognivault-ctl compose generate)
+├── qdrant           (shared, existing)
+├── prometheus       (shared, existing)
+├── grafana          (shared, existing)
+├── cognivault-user1 (per-user CogniVault instance)
+├── obsidian-user1   (per-user Obsidian+KasmVNC)
+├── cognivault-user2
+├── obsidian-user2
+└── ...
+```
+
+**Port allocation strategy:** Each user gets a port offset. Base ports:
+- CogniVault API: 3000 + offset
+- Obsidian HTTPS (KasmVNC): 3001 + (offset * 100)
+
+With 50 users and offset=0 through 49, CogniVault ports 3000-3049, Obsidian ports 3001, 3101, 3201, ... 5901.
+
+**Prometheus per-user metrics:** Each CogniVault instance exposes `/metrics`. Prometheus scrapes all of them. Each CogniVault instance labels its metrics with `user_id="user1"` (via prom-client `defaultLabels`). No stack change needed — just configuration.
+
+### SQLite Schema Additions (v2.0)
+
+```typescript
+// users table
+export const users = sqliteTable('users', {
+  userId:      text('user_id').primaryKey(),       // UUID, used as Qdrant tenant_id
+  username:    text('username').notNull().unique(),
+  portOffset:  integer('port_offset').notNull().unique(),
+  createdAt:   integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+
+// api_keys table (replaces single-key config)
+export const apiKeys = sqliteTable('api_keys', {
+  keyHash:   text('key_hash').primaryKey(),
+  userId:    text('user_id').notNull().references(() => users.userId),
+  label:     text('label'),
+  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+});
+```
+
+---
+
+## What NOT to Add
+
+| Avoid | Why | Use Instead |
+|-------|-----|-------------|
+| Collection-per-user in Qdrant | Official Qdrant docs: causes instability and performance degradation at scale, each collection has HNSW index overhead | Single collection with `tenant_id` payload field + `is_tenant=true` index |
+| `sytone/obsidian-remote` Docker image | Last release October 2022, limited recent activity, maintenance unclear | `lscr.io/linuxserver/obsidian` — actively maintained, auto-updated |
+| `kasmweb/obsidian` | Commercial Kasm platform image, heavy platform dependencies | `lscr.io/linuxserver/obsidian` — same KasmVNC technology, standalone |
+| Oclif CLI framework | 12MB, 30+ dependencies for 5 commands — startup overhead in a sysadmin tool | Commander.js 14 — 0 deps, 180KB, full TypeScript + ESM |
+| `fastify-api-key` npm package | HMAC signature scheme (HTTP Signature spec), requires clients to sign requests — incompatible with simple Bearer token pattern agents use | Extend `@fastify/bearer-auth` with custom `auth` function (already in stack) |
+| JWT/OAuth for user auth | Overkill — agents authenticate, not humans; no SSO needed | API keys with SQLite lookup |
+| `js-yaml` for compose generation | Types stale (2+ years), less active maintenance | `yaml` package — built-in TypeScript types, active, comment preservation |
+| Separate VNC sidecar container | Extra container per user for no benefit | KasmVNC is built into `lscr.io/linuxserver/obsidian` |
+| Kubernetes / Helm | Deployment target is a single host with Docker Compose | Docker Compose with generated per-user services |
+
+---
 
 ## Alternatives Considered
 
-| Category | Recommended | Alternative | Why Not |
-|----------|-------------|-------------|---------|
-| Framework | Fastify v5 | Express v5 | Slower, less structured plugin system, middleware hell |
-| Framework | Fastify v5 | Hono | Designed for edge/serverless, not long-running FS-access services |
-| ORM | Drizzle | Prisma | Too heavy (~2MB engine), async-only, overkill for index state |
-| ORM | Drizzle | Raw SQL | Loses type safety and migration tooling for marginal perf gain |
-| Vector DB | Qdrant | Weaviate | No built-in BM25 sparse vectors, heavier resource usage |
-| Vector DB | Qdrant | Milvus | More complex setup, less JS ecosystem support |
-| Lexical search | Qdrant BM25 | Elasticsearch | Separate sidecar adds operational complexity; Qdrant BM25 handles it in one service |
-| Lexical search | Qdrant BM25 | MeiliSearch | Same -- extra service for what Qdrant now handles natively |
-| Chunking | Custom | LangChain TS | Massive dependency for one function; doesn't handle Obsidian-specific markdown |
-| Chunking | Custom | Chonkie-TS | Too generic; no heading-aware hierarchy preservation |
-| Logger | pino | winston | Fastify native; 5x faster; structured JSON by default |
-| Test | vitest | Jest | Poor ESM support; requires babel/ts-jest transforms |
-| Lint | Biome | ESLint+Prettier | Two tools vs one; 10-100x slower |
-| FS watch | Polling | chokidar | Obsidian Sync doesn't trigger FS events; polling is required |
-| Validation | Zod v4 | Ajv | Zod gives TS type inference; Ajv is used under the hood by Fastify anyway |
-| Docker base | node:22-slim | node:22-alpine | better-sqlite3 native module compilation issues on Alpine |
+| Category | Recommended | Alternative | When Alternative Makes Sense |
+|----------|-------------|-------------|-------------------------------|
+| Obsidian Docker image | `lscr.io/linuxserver/obsidian` | `sytone/obsidian-remote` | If you need an older Obsidian version pinned; obsidian-remote uses the same KasmVNC but with less frequent updates |
+| Qdrant tenancy | Payload filtering with `is_tenant=true` | Collection per user | Only if you need strict data isolation guarantees for compliance/security reasons AND have a small fixed number of users (<10) |
+| Qdrant tenancy | Payload filtering | Tiered multitenancy (Qdrant 1.16+) | If user base grows large (100+) with some power users generating 100x more data than others — promotes large tenants to dedicated shards |
+| CLI framework | Commander.js 14 | Yargs | If you need built-in type coercion, typo suggestions, and don't mind 850KB; Yargs is solid for complex argument schemas |
+| Compose generation | `yaml` package + programmatic | Handlebars/EJS templates | If compose file needs heavy human customization between uses — templates are more readable for partial edits |
 
-## Architecture-Relevant Stack Notes
+---
 
-### Qdrant Collection Design
+## Version Compatibility
 
-One collection per vault (multi-vault isolation). Each collection has:
-- **Dense vector:** `text-embedding-3-small` (1536 dims) for semantic search
-- **Sparse vector:** Qdrant built-in BM25 for keyword/lexical search (with Russian stemming configured)
-- **Payload fields:** path, title, chunk_id, section_path, tags, project, status, content_hash, content_type, vault_name
+| Package | Version | Compatible With | Notes |
+|---------|---------|-----------------|-------|
+| `lscr.io/linuxserver/obsidian` | `:latest` | Docker Compose v2 | Requires `shm_size: "1gb"` — do not omit |
+| `qdrant/qdrant` | `1.17.0` | `@qdrant/js-client-rest` latest | `is_tenant` field on payload index available since 1.12+; `1.17.0` is current stable as of Feb 2026 |
+| `commander` | `14.0.x` | Node.js 22, ESM, TypeScript 5.x | v14 is current stable; v15 (ESM-only) expected May 2026 — v14 in maintenance through May 2027 |
+| `yaml` | `2.x` | TypeScript 5.9+, ESM and CJS | Built-in types, no `@types/yaml` needed |
 
-Hybrid search uses Qdrant's Query API with `prefetch` (dense + sparse) and RRF fusion, all server-side. No client-side fusion code needed.
+---
 
-### Embedding Provider Interface
+## Installation (New Dependencies Only)
 
-```typescript
-interface EmbeddingProvider {
-  readonly name: string;
-  readonly model: string;
-  readonly dimensions: number;
-  embed(texts: string[]): Promise<number[][]>;
-}
+```bash
+# Production — cognivault service
+pnpm add yaml  # if not already present for config reading
+
+# CLI package (packages/cognivault-ctl)
+pnpm add commander yaml
+pnpm add -D @types/node tsx
+
+# No new prod deps for Obsidian containers or Qdrant tenancy
+# (Qdrant client already in stack; tenancy is a configuration change)
 ```
 
-### Reranker Interface
-
-```typescript
-interface Reranker {
-  readonly name: string;
-  readonly model: string;
-  rerank(query: string, documents: string[], topK?: number): Promise<RankedResult[]>;
-}
-```
-
-### SQLite Schema (Core Tables)
-
-- `vaults` -- vault name, root path, collection name
-- `indexed_files` -- path, content_hash, mtime, last_indexed_at, embedding_model, chunk_count
-- `index_runs` -- vault, type (full/incremental), started_at, completed_at, files_processed, errors
+---
 
 ## Sources
 
-- [Fastify official site](https://fastify.dev/) -- v5.8.2, March 2026
-- [Qdrant text search docs](https://qdrant.tech/documentation/guides/text-search/) -- BM25 native support
-- [Qdrant 1.15 release](https://qdrant.tech/blog/qdrant-1.15.x/) -- multilingual tokenizer, Russian stemming
-- [Qdrant JS client](https://github.com/qdrant/qdrant-js) -- official TypeScript SDK
-- [OpenAI embedding models](https://platform.openai.com/docs/models/text-embedding-3-small) -- text-embedding-3-small specs
-- [Cohere Rerank docs](https://docs.cohere.com/docs/rerank) -- Rerank 3.5, multilingual
-- [Cohere TypeScript SDK](https://github.com/cohere-ai/cohere-typescript) -- official SDK
-- [Zod v4 release](https://zod.dev/v4) -- v4.3.x, performance improvements
-- [Drizzle ORM SQLite](https://orm.drizzle.team/docs/get-started-sqlite) -- better-sqlite3 integration
-- [OpenTelemetry Node.js](https://opentelemetry.io/docs/languages/js/getting-started/nodejs/) -- SDK setup
-- [@fastify/otel](https://github.com/fastify/otel) -- official Fastify OTel plugin
-- [TOON format](https://github.com/toon-format/toon) -- v3.0, official npm package
-- [pdf-parse](https://github.com/mehmet-kozan/pdf-parse) -- v2.4.x, pure TypeScript
-- [prom-client](https://github.com/siimon/prom-client) -- Prometheus metrics for Node.js
+- [linuxserver/docker-obsidian GitHub](https://github.com/linuxserver/docker-obsidian) — active maintenance, KasmVNC architecture confirmed
+- [LinuxServer.io Obsidian docs](https://docs.linuxserver.io/images/docker-obsidian/) — port 3000/3001, `CUSTOM_USER`/`PASSWORD`, `shm_size` requirement, KasmVNC access
+- [corelab.tech Obsidian Docker Compose guide (2026)](https://corelab.tech/obsidian/) — `lscr.io/linuxserver/obsidian:latest` recommended in 2026 guide, MEDIUM confidence
+- [Qdrant Multitenancy docs](https://qdrant.tech/documentation/guides/multitenancy/) — payload filtering recommendation, `is_tenant=true` flag, collection-per-tenant warning
+- [Qdrant multitenancy article](https://qdrant.tech/articles/multitenancy/) — `group_id` field name, HNSW `m=0` recommendation for tenant-only queries
+- [Qdrant 1.16 tiered multitenancy](https://qdrant.tech/blog/qdrant-1.16.x/) — tiered multitenancy, tenant promotion mechanism
+- [Qdrant releases](https://github.com/qdrant/qdrant/releases) — v1.17.0 is current stable (Feb 2026)
+- [commander npm](https://www.npmjs.com/package/commander) — v14.0.x current, 213M weekly downloads, v15 ESM-only May 2026
+- [yaml npm](https://www.npmjs.com/package/yaml) — actively maintained, TypeScript 5.9+, `YAML.stringify()` API
+- [fastify-api-key GitHub](https://github.com/arkerone/fastify-api-key) — HMAC signature scheme confirmed, not suitable for simple Bearer auth
+
+---
+*Stack research for: CogniVault v2.0 multi-user deployment additions*
+*Researched: 2026-03-13*

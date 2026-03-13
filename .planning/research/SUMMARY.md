@@ -1,222 +1,199 @@
 # Project Research Summary
 
-**Project:** CogniVault
-**Domain:** Agent-facing knowledge access layer — Obsidian vault API with hybrid vector retrieval
-**Researched:** 2026-03-10
-**Confidence:** HIGH
+**Project:** CogniVault v2.0 — Multi-User Deployment
+**Domain:** Multi-tenant containerized API service with per-user Obsidian+VNC access
+**Researched:** 2026-03-13
+**Confidence:** HIGH (core architecture and stack decisions verified against official docs; VNC routing and compose templating patterns MEDIUM)
 
 ## Executive Summary
 
-CogniVault occupies a clearly defined gap in the personal knowledge management tooling landscape: every existing RAG product is either file-aware-but-not-searchable (Obsidian Local REST API) or search-capable-but-not-file-aware (Khoj, PrivateGPT, Onyx, AnythingLLM). None is designed agent-first. The recommended approach is a single-process Node.js/TypeScript service using Fastify v5, Qdrant 1.15+, and SQLite (via Drizzle ORM) as the canonical index state tracker. The architecture is deliberately monolithic — a long-running Docker service, not a distributed system — and this is correct for the target scale of 500–5,000 notes with 1–3 concurrent agents. Qdrant 1.15+'s native BM25 sparse vectors with Russian stemming eliminate the need for a separate lexical search sidecar, which is the single most important technology selection insight from the research.
+CogniVault v2.0 is an additive milestone on an already-working v1.0 foundation. The goal is to expand a single-user Fastify REST API with Qdrant-backed semantic search into a multi-user platform where each user gets isolated vault storage, isolated compute (per-user containers), and optional browser-based Obsidian access via VNC — all managed from a single operator CLI. The v1.0 architecture is preserved wholesale; no redesign is required. New components wrap around it: a shared Qdrant collection gains tenant-scoped payload filtering, Docker Compose gains generated per-user service blocks, and a new `cognivault-ctl` CLI handles user lifecycle (add/remove/list).
 
-The recommended build order is bottom-up: Vault Manager and File Ops first (no external dependencies), then index state and filesystem polling (SQLite + content hashing), then the full indexing pipeline (chunking → embedding → Qdrant), then retrieval (semantic + lexical + RRF fusion + reranking), and finally context pack assembly and observability polish. This ordering is dictated by hard data flow dependencies: retrieval cannot be built before indexing, indexing cannot be built before change detection, and change detection cannot be built before the vault abstraction. Skipping ahead creates integration bottlenecks that compound into architectural debt.
+The recommended approach is a three-tier isolation model: per-user Docker Compose service stacks (each with a CogniVault instance + optional Obsidian VNC container) sharing a single Qdrant instance (with `user_id` payload filtering + `is_tenant: true` index), shared Prometheus/Grafana monitoring, and Caddy as the single VNC ingress point. Obsidian Sync is handled via the new official `obsidian-headless` client (released February 2026), which runs as a sidecar container without requiring VNC — decoupling sync from GUI access entirely. The management CLI uses Commander.js + the `yaml` package to generate compose fragments and Caddyfile blocks programmatically, eliminating manual YAML editing as an error-prone anti-pattern.
 
-The three highest-risk decisions that must be made correctly in Phase 1 are: (1) markdown-aware chunking with section hierarchy preservation — wrong chunking is catastrophically expensive to fix later because it forces a full vault reindex; (2) deterministic Qdrant point IDs derived from vault + path + chunk index — without this, re-indexing creates duplicates rather than idempotent upserts; and (3) SQLite embedding model version tracking — without this, switching embedding models causes silent garbage retrieval with no detection mechanism. All three are cheap to implement correctly upfront and expensive to retrofit.
+The central risk is data isolation: Qdrant has no row-level security, so every code path that touches Qdrant must inject a `user_id` filter. A `QdrantTenantClient` wrapper class is mandatory — it eliminates the entire class of silent cross-tenant data leakage errors. Secondary risks are operational: Electron-in-Docker rendering failures (`shm_size: 1gb` is non-negotiable, image version must be pinned), VNC port security (Caddy proxy with internal-only container networking, never direct port exposure), and API key storage (Docker secrets, not compose environment blocks). All of these must be addressed in the initial compose template design — retrofitting network isolation or resource limits after per-user containers are provisioned requires restarting every container.
 
 ## Key Findings
 
 ### Recommended Stack
 
-The stack is mature and well-justified. Fastify v5 (v5.8.x, current as of March 2026) provides schema-based request validation via Zod v4, a plugin architecture that maps to CogniVault's distinct domains (file ops, indexing, retrieval), and superior performance versus Express. Qdrant 1.15+ is the decisive vector database choice: its native multilingual BM25 sparse vectors with Russian stemming built in means no Elasticsearch/MeiliSearch sidecar is needed — hybrid search with RRF fusion runs entirely server-side via Qdrant's Query API. Drizzle ORM with better-sqlite3 provides type-safe synchronous access to the index state database without the runtime overhead of Prisma. OpenAI text-embedding-3-small is the default embedding model (1536 dims, strong multilingual performance, $0.02/M tokens), with Cohere Rerank 3.5 for cross-encoder reranking. Both are abstracted behind provider interfaces to allow future migration to local models without business logic changes.
+The v1.0 stack (Fastify 5, TypeBox, Drizzle ORM + SQLite, Qdrant, OpenAI embeddings, prom-client, OpenTelemetry, Docker Compose) is unchanged. V2.0 adds five technologies.
 
-For filesystem change detection, the research is unambiguous: polling + content hashing is the only correct approach. Obsidian Sync does not trigger reliable filesystem events. chokidar is explicitly out. Custom polling at 5–10 second intervals with a two-pass stability check (mtime/size stable across two consecutive polls before reading) handles Obsidian Sync's multi-step writes without reading partial content.
+**Core new technologies:**
+- `lscr.io/linuxserver/obsidian:latest` (pinned tag): Obsidian desktop in Docker via KasmVNC/Selkies browser access — the only actively maintained Electron-in-Docker option (ARM64 + x86-64, s6-overlay process supervision); requires `shm_size: "1gb"` which is mandatory and non-negotiable; chosen over `sytone/obsidian-remote` (abandoned Oct 2022) and `kasmweb/obsidian` (commercial platform dependencies)
+- `obsidianmd/obsidian-headless` (npm, pinned version): Official Obsidian headless sync client released Feb 2026; `ob sync --continuous` as sidecar process; auth via `OBSIDIAN_AUTH_TOKEN` env var; still in beta — pin the exact version; requires active Obsidian Sync subscription per user (~$8/month)
+- `commander` 14.0.x: CLI argument parsing for `cognivault-ctl`; 0 dependencies, 180KB, full ESM + TypeScript support; v14 in maintenance through May 2027
+- `yaml` 2.x: YAML read/write for programmatic compose fragment generation; built-in TypeScript types, comment preservation; chosen over `js-yaml` (stale types)
+- Caddy: VNC reverse proxy in shared infrastructure stack; automatic WebSocket upgrade handling (zero-config vs Nginx's explicit Upgrade header requirement), path-based routing to per-user Obsidian containers, graceful reload without dropping active WebSocket connections
 
-**Core technologies:**
-- **Fastify v5.8.x**: REST API framework — 2-3x faster than Express, schema-based validation via Zod, plugin encapsulation per domain
-- **Zod v4.3.x**: Schema validation + type inference — 14x faster than Zod 3, dual-use for request validation and config validation
-- **Qdrant 1.15+ (Docker)**: Vector store — native BM25 sparse vectors with Russian stemming, Query API handles RRF fusion server-side
-- **better-sqlite3 + Drizzle ORM**: Index state — synchronous API, type-safe queries, migration support, <100KB overhead
-- **OpenAI text-embedding-3-small**: Embeddings — strong multilingual performance, dimension reduction API support, low cost
-- **Cohere Rerank 3.5**: Cross-encoder reranking — excellent multilingual support, simple API
-- **Custom polling + xxhash-wasm**: Filesystem change detection — content hashing over mtimes because Obsidian Sync updates metadata without changing content
-- **pino v9**: Structured logging — Fastify native, JSON output, 5x faster than winston
-- **prom-client v15**: Prometheus metrics — event loop lag, custom search latency, index queue size metrics
-- **Node.js 22 LTS + TypeScript 5.7+ + ESM-only**: Runtime — all key dependencies are ESM-first; Alpine avoided for Docker base (use node:22-slim for better-sqlite3 native module compatibility)
+**What NOT to add:** No collection-per-user in Qdrant (official Qdrant docs explicitly warn this causes cluster instability and performance degradation), no Kubernetes (single-host Docker Compose target), no OAuth/SSO (agents use API keys, not browser auth), no web UI for user management (CLI is sufficient at this scale), no Oclif CLI framework (12MB + 30 deps for 5 commands).
+
+**See:** `.planning/research/STACK.md` for version compatibility table, installation commands, and full alternative comparison.
 
 ### Expected Features
 
-CogniVault's unique position is the combination of Obsidian-native file CRUD with hybrid vector retrieval in a single agent-facing API. No competitor does this. The context pack assembly endpoint — token-budget-aware structured knowledge bundles with source attribution — is a unique differentiator that no existing product offers.
+V2.0 must ship six table-stakes features for the multi-user platform to be operationally safe. Three additional differentiators follow in v2.x patches.
 
-**Must have (table stakes — P1 for v1 launch):**
-- Note CRUD (list, read, create, update, delete, append) — agents cannot function without this
-- Frontmatter read/write — YAML metadata extraction and update without corruption
-- Document ingestion with Markdown-aware chunking — section hierarchy preservation (not generic token splitting)
-- Semantic search via Qdrant — embedding pipeline + ANN search with metadata filters
-- Keyword/lexical search — exact term matching via SQLite FTS5 for technical identifiers, acronyms, mixed-language queries
-- Hybrid retrieval with RRF fusion — combine semantic + lexical results
-- Incremental indexing — filesystem polling + content hashing (not full reindex on every change)
-- Stale vector cleanup — delete/rename propagation to prevent ghost data accumulation
-- Metadata filtering — filter by tags, project, folder path, status on all search endpoints
-- API key authentication — read-only vs write roles
-- Health/readiness endpoints — required for Docker deployment
+**Must have (v2.0 launch — P1):**
+- Qdrant tenant isolation (`user_id` payload field + keyword index + `is_tenant: true` + filter on every upsert and query) — the data boundary; must be the first code change made, everything else builds on it
+- Per-user container provisioning (CogniVault + obsidian-headless sidecar per user, generated compose fragment) — the isolation unit
+- Per-user API key authentication (key generated at provisioning time, mapped to `user_id` in `users.db`) — the auth boundary
+- Container resource limits (`deploy.resources.limits` in Compose with CPU + memory) — noisy neighbor prevention; one Electron memory leak OOM-kills all users without this
+- Vault data persistence (named Docker volumes per user with scoped names: `cognivault_alice_vault`) — data durability
+- `cognivault-ctl add/remove/list` CLI — operator lifecycle management; manual YAML editing at scale is catastrophically error-prone
 
-**Should have (v1.x — add after core retrieval is validated):**
-- Cross-encoder reranking — add Cohere/BGE; significant precision improvement for mixed Russian/English queries
-- Context pack assembly — structured token-budgeted knowledge bundles (unique differentiator)
-- TOON content negotiation — ~40% token reduction; add when token costs become a concern
-- Multi-vault activation — data model designed from v1, activate when second vault needed
-- Multi-format indexing (PDF, CSV, Canvas) — extend beyond Markdown
-- Prometheus metrics + OpenAPI docs — operational observability
+**Should have (v2.x, add after core is validated — P2):**
+- VNC/browser Obsidian GUI per user (`linuxserver/obsidian`) — optional; agents do not need it; add when users request visual vault access
+- Per-user metrics labels + Grafana `$tenant` template variable — add when per-user performance debugging becomes necessary
+- Graceful user removal with volume backup (`--backup` flag) — add before first user offboarding event
 
-**Defer (v2+):**
-- Embedding model migration tooling — only needed when switching providers
-- OpenTelemetry distributed tracing — useful at scale, unnecessary for 1-3 agents
-- Local embedding model support (BGE/nomic-embed) — OpenAI is sufficient initially
-- Excalidraw/image metadata extraction — low-volume, high-complexity
+**Defer (v3+):**
+- Cross-user search with explicit permission grants (requires a new access control model)
+- Tiered Qdrant multitenancy with dedicated shards for heavy users (only relevant at 50+ users with uneven load distributions)
+- Kubernetes/Helm deployment (not justified until single-host Docker Compose hits its ceiling)
 
-**Anti-features (explicitly do not build):**
-- LLM chat/completions endpoint — agents have their own LLM; coupling to providers adds complexity without value
-- Real-time WebSocket push — agents are request/response; polling search is sufficient
-- UI/admin dashboard — API-first + Prometheus/Grafana is better
-- Wikilink graph traversal — semantic search achieves "find related" more reliably
+**Critical discovery:** `obsidianmd/obsidian-headless` decouples VNC from sync. VNC is now a UI convenience feature only — sync works without it. The v2.0 MVP can ship with headless sync sidecars and defer VNC entirely, reducing Phase 1 scope significantly.
+
+**See:** `.planning/research/FEATURES.md` for the full feature dependency graph and prioritization matrix.
 
 ### Architecture Approach
 
-CogniVault is a single-process Node.js service with internally modular subsystems communicating via in-process calls and a simple event emitter (FS Poller → Indexing Pipeline). No microservices, no message queues. The filesystem is the single source of truth; Qdrant and SQLite are derived state that can be fully reconstructed from a full reindex. Writes always go to disk first (atomic temp-file + rename), return immediately to the agent, and trigger async reindexing via the polling cycle — embedding latency (100–500ms per batch) never blocks write acknowledgment. The Qdrant collection uses payload-based tenant isolation (`vault_id` with `is_tenant: true`) rather than one collection per vault, following Qdrant's official multitenancy recommendation.
+V2.0 is architecturally additive: the existing Fastify monolith, Qdrant collection, and Docker Compose stack are all preserved. New components insert around them. The topology is N user stacks (each: `cognivault-{user}` + `obsidian-headless-{user}`, optionally `obsidian-gui-{user}`) sharing four infrastructure services (Qdrant, Prometheus, Grafana, Caddy) via a Docker bridge network. SQLite remains per-container — one uniquely named volume per user, no shared SQLite across containers. Qdrant remains a single shared instance with payload-based tenant filtering.
 
 **Major components:**
-1. **API Layer (Fastify)** — HTTP routing, bearer auth, content negotiation (JSON/TOON), Zod request validation; stateless
-2. **Vault Manager** — multi-vault registry, path resolution, path traversal protection; owns vault config
-3. **File Ops Module** — note/file CRUD, frontmatter parsing, atomic writes; filesystem is source of truth
-4. **FS Poller** — periodic scanning with two-pass stability check, content hashing (xxhash), change event emission
-5. **Indexing Pipeline** — format-specific chunking, embedding batching with backpressure, Qdrant upsert, stale cleanup; driven by bounded queue (p-queue, concurrency 1-3)
-6. **Retrieval Pipeline** — hybrid search orchestration: parallel semantic + lexical, RRF fusion, cross-encoder reranking; stateless query path
-7. **Context Pack Assembler** — token-budget-aware assembly with relevance floor filtering, deduplication, source attribution; stateless
-8. **Observability** — pino structured logging, prom-client Prometheus metrics, OpenTelemetry traces (deferred to v2)
+1. **cognivault-ctl** (new) — Management CLI; maintains `users.db` (host-side SQLite, not inside any user container); generates `docker-compose.users.yml`, `Caddyfile` blocks, and `monitoring/prometheus/targets/users.json`; calls `docker compose up/down` for user lifecycle
+2. **QdrantTenantClient wrapper** (new, modifies `src/plugins/qdrant.ts`) — wraps raw Qdrant client; injects `user_id` filter into every operation automatically; `TENANT_ID` env var injected at container startup; makes unfiltered cross-tenant queries structurally impossible
+3. **Caddy reverse proxy** (new shared service) — single ingress point for all VNC sessions; path-based routing (`/vnc/{username}/` → `obsidian-{username}:3000`); handles WebSocket upgrades transparently; updated by `cognivault-ctl` on add/remove via `caddy reload`
+4. **Prometheus file_sd_configs** (modifies `prometheus.yml`) — replaces static scrape targets with file-based service discovery reading `monitoring/prometheus/targets/users.json`; users added/removed without Prometheus restart (30s refresh interval)
+5. **Per-user container stacks** (new, generated by CLI) — two containers per user in `docker-compose.users.yml`; share a named vault volume; each with scoped resource limits and isolated Docker network
+
+**Architecture rules established by research:**
+- CogniVault and Obsidian run in separate containers sharing a named vault volume — never combine into one container (forces forking linuxserver base image, couples Electron crash/restart to CogniVault uptime)
+- Never publish VNC ports directly to host — all Obsidian containers on internal Docker network only
+- Always set `COMPOSE_PROJECT_NAME` per user to prevent volume and network name collisions
+- `TENANT_ID` is injected as env var at container startup; no per-request DB lookup needed for tenant context
+
+**Suggested build order from research:** Qdrant tenant isolation first (foundation for all per-user data isolation), then manual compose structure with 1-2 users (validate before automating), then Prometheus multi-tenant metrics, then `cognivault-ctl` CLI (automate what was validated manually), then obsidian-headless sync integration.
+
+**See:** `.planning/research/ARCHITECTURE.md` for full component diagram, all five anti-patterns with explanations, data flow changes, and integration point breakdown.
 
 ### Critical Pitfalls
 
-1. **Naive markdown chunking destroys retrieval quality** — Fixed-size token splitting achieves faithfulness scores of 0.47–0.51 vs 0.79–0.82 for structure-aware chunking. Split on heading boundaries first, preserve `section_path` metadata (e.g., `["Note Title", "## Architecture", "### Data Flow"]`), never split mid-code-block or mid-table, carry section context into oversized chunk splits. This decision is catastrophically expensive to fix later (requires full reindex).
+Eight pitfalls identified; five are Phase 1 concerns that must be built into the initial compose template:
 
-2. **Stale vectors accumulate silently** — File edits/renames/deletes leave ghost vectors in Qdrant that pollute results. Prevention: content hash per file in SQLite; on change, delete all chunks for that path then re-chunk and re-embed; detect renames via hash match at different path (update payload vs delete+reindex); add `cognivault_stale_vectors_cleaned_total` Prometheus metric. Must be built into the core indexing loop, not bolted on.
+1. **Qdrant tenant filter omission leaks all user data** — Every Qdrant operation without a `user_id` filter is a silent cross-tenant data breach; Qdrant has no row-level security. Prevention: `QdrantTenantClient` wrapper class that injects the filter at the call site; integration test asserting user A's search never returns user B's results. This is the highest-severity issue in the entire milestone — a missing filter compiles and runs without errors while silently exposing all vaults.
 
-3. **Multilingual embedding bias silently degrades Russian retrieval** — OpenAI embedding models have measurably lower recall for cross-language queries (English query → Russian content). Lexical search (BM25/FTS5) is the primary safety net — exact term matching catches technical identifiers regardless of embedding quality. Build a 30–50 query evaluation harness in the same phase as retrieval, not after. Never defer lexical search to a later phase.
+2. **Electron/Obsidian black screen and seccomp crashes** — `shm_size: "1gb"` is mandatory in every Obsidian compose service block; missing it crashes Chromium silently. The `:latest` image tag has had rendering regressions; pin a validated version tag. Set `DISPLAY_WIDTH=1920 DISPLAY_HEIGHT=1080` to prevent 4-8GB framebuffer allocation at the default 16K virtual resolution.
 
-4. **Filesystem polling race conditions** — Obsidian Sync writes files in chunks; reading during sync yields partial/corrupt content. Use a two-pass stability check: record `(path, mtime, size)` on each poll; only process files whose mtime/size was stable across two consecutive polls. Poll at 5–10 second interval (not shorter, macOS stat() is slow on thousands of files).
+3. **VNC ports exposed without encryption or network isolation** — Docker Compose port bindings default to `0.0.0.0`, exposing VNC sessions on the public IP. Never expose VNC ports directly; all Obsidian containers on internal Docker network only; Caddy is the sole ingress point with HTTPS. In a 10-user deployment, sequential direct VNC ports are discoverable in a single subnet scan.
 
-5. **SQLite–Qdrant index state divergence** — SQLite writes and Qdrant writes are not atomic; crashes between operations leave state inconsistent. Prevention: upsert new vectors first → verify count → delete stale vectors → update SQLite. Enable WAL mode (`PRAGMA journal_mode=WAL`) and `busy_timeout=5000`. Use deterministic point IDs so upserts are idempotent. Build a reconciliation endpoint for periodic consistency verification.
+4. **SQLite corruption from shared volume mounts** — Generic volume names (`db_data`) reused across user compose files cause multiple containers to write to the same SQLite file, resulting in corruption (not just "database is locked" — actual data corruption on macOS Docker Desktop and network volumes where `fcntl()` locking is unreliable across containers). Always prefix with user: `cognivault_alice_db`. Set `COMPOSE_PROJECT_NAME` per user.
 
-6. **Embedding model version mismatch causes silent garbage retrieval** — Switching models without tracking which vectors use which model causes cosine similarity comparisons across incompatible spaces. Prevention: store `embedding_model_version` in SQLite per-file from day one; verify query model matches stored model before searching; use Qdrant collection aliases for zero-downtime migration.
+5. **Per-user resource exhaustion kills all users** — No resource limits means one Electron memory leak triggers the OOM killer on the host, killing containers from other users. Set `memory: "2g"`, `cpus: "1.5"` per Obsidian container; `memory: "1g"`, `cpus: "1.0"` per CogniVault container. Must be in the initial compose template — adding later requires restarting all running containers.
+
+6. **obsidian-headless auth token requires interactive setup** — `ob login` cannot run inside a non-interactive Docker container; there is no programmatic API for token generation. The provisioning workflow must include a mandatory manual step: operator runs `ob login` interactively, captures token from `~/.obsidian-headless/auth_token`, stores as Docker secret. Design `cognivault-ctl add-user` output to print explicit instructions for this step.
+
+7. **API key plaintext in compose environment blocks** — Keys in `environment:` blocks are visible via `docker inspect`. Use Docker secrets (`/run/secrets/`) or `chmod 600` `.env` files never committed to git. Store hashed keys (SHA-256) in `users.db`, never plaintext.
+
+8. **Docker Compose port conflicts and container name collisions** — Hardcoded sequential ports in a shared compose file collide when adding the second user. `cognivault-ctl` must maintain a port registry and generate per-user compose fragments. Never set `container_name` in user templates — let Docker Compose derive it from `COMPOSE_PROJECT_NAME` + service name.
+
+**See:** `.planning/research/PITFALLS.md` for the full "looks done but isn't" checklist, per-pitfall recovery strategies, and phase mapping.
 
 ## Implications for Roadmap
 
-Based on the dependency graph from ARCHITECTURE.md and the pitfall phase mappings from PITFALLS.md, five phases are the natural structure. The ordering is non-negotiable due to hard data flow dependencies.
+The research dependency graph enforces a specific build order. Phase 1 must establish all safety and isolation boundaries before any user containers are created. Retrofitting data isolation, network isolation, or resource limits after containers are provisioned is expensive and requires full restarts. The architecture research explicitly recommends validating the compose structure manually before building the CLI that generates it.
 
-### Phase 1: Foundation — Vault + File Ops + Project Skeleton
+### Phase 1: Qdrant Tenant Isolation + Compose Safety Boundaries
+**Rationale:** Every subsequent component depends on Qdrant being tenant-aware and on the compose template having correct safety properties. Running two CogniVault containers against a non-tenant-aware Qdrant would cause immediate cross-user data contamination. All five Phase 1 pitfalls (Qdrant filter omission, shm_size, VNC network exposure, SQLite volume naming, resource limits) must be embedded in the initial template before any users are provisioned.
+**Delivers:** A modified CogniVault that can run as one of N isolated instances against shared Qdrant (`TENANT_ID` env var, `QdrantTenantClient` wrapper, `user_id` payload index); migration script for existing single-user data (`user_id="default"` on all existing points); a validated base compose template with correct volume naming, resource limits, and network isolation; integration tests asserting zero cross-tenant data leakage.
+**Features addressed:** Qdrant tenant isolation, vault data persistence (volume naming scheme), container resource limits.
+**Code changes required:** `src/config.ts` (add `TENANT_ID` required env var), `src/plugins/qdrant.ts` (tenant wrapper + payload index creation), all `src/features/*/service.ts` touching Qdrant (add `user_id` to all payloads and filter all queries), `docker-compose.yml` (add Caddy service, isolate container networks).
+**Pitfalls addressed:** Tenant filter omission (wrapper class), SQLite volume collision (naming scheme), resource exhaustion (limits in template), VNC network exposure (internal-only container networking baked in from the start).
 
-**Rationale:** Zero external dependencies; testable in complete isolation. All subsequent phases depend on the vault abstraction. Chunking strategy and data model schema must be established here because they are expensive to change later (full reindex required).
-**Delivers:** A working Obsidian vault REST API (note CRUD, frontmatter read/write) inside a properly scaffolded Fastify service with Docker support.
-**Addresses (from FEATURES.md):** Note CRUD, frontmatter read/write, API key auth, health/readiness endpoints; multi-vault data model designed (even if single vault operational).
-**Stack used:** Fastify v5, Zod v4, `@fastify/bearer-auth`, TypeScript 5.7, ESM, node:22-slim Docker image.
-**Pitfalls addressed:** Path traversal protection (Vault Manager), multi-format chunking interface (`ChunkingStrategy` abstraction even if only markdown implemented), embedding model version tracking schema in SQLite, deterministic point ID function (implemented but not yet wired to Qdrant).
-**Research flag:** Standard patterns — no additional research needed. Fastify docs and file I/O patterns are well-established.
+### Phase 2: Multi-User Compose Stack (Manual Validation with 2 Users)
+**Rationale:** Before building the CLI that generates compose configurations, validate the compose structure manually with 2 real users. This catches VNC routing issues, vault volume sharing problems, Caddy path-prefix behavior, and obsidian-headless interactive auth requirements before the CLI encodes wrong assumptions. ARCHITECTURE.md explicitly recommends this order.
+**Delivers:** A working 2-user deployment validated end-to-end: browser → Caddy → Obsidian VNC, two CogniVault instances → shared Qdrant with proven tenant isolation, per-user SQLite files with scoped volumes, resource limits verified via `docker inspect`. The per-user compose fragment structure that `cognivault-ctl` will later automate.
+**Stack used:** `lscr.io/linuxserver/obsidian` (pinned validated tag), Caddy reverse proxy, `obsidian-headless` sidecar.
+**Pitfalls addressed:** Electron rendering (validated on target host architecture before building CLI on top), VNC port exposure (Caddy-only ingress confirmed), obsidian-headless interactive auth (manual token injection documented as a first-class provisioning step), port collision pattern (port registry approach validated manually first).
 
-### Phase 2: Index State + Change Detection + Indexing Pipeline
+### Phase 3: Prometheus Multi-Tenant Metrics
+**Rationale:** Convert Prometheus scrape config from static to file-based service discovery before building the CLI. This way `cognivault-ctl add-user` can write to `targets/users.json` and get dynamic scrape configuration automatically. Converting after the CLI would require a second pass over CLI code.
+**Delivers:** Prometheus scraping all user containers dynamically without restarts; `monitoring/prometheus/targets/users.json` as the generated target list; Grafana dashboard updated with `$tenant` variable for per-user metric filtering.
+**Code changes:** `monitoring/prometheus/prometheus.yml` (replace `static_configs` with `file_sd_configs`), create `monitoring/prometheus/targets/users.json` with validated structure.
+**Pitfalls addressed:** Metric cardinality explosion (consistent `tenant` label schema established from the start, limiting per-user metric dimensions).
 
-**Rationale:** Retrieval is impossible without indexed data. Change detection must be solid before adding the embedding layer on top. This is the most complex phase — chunking, embedding, Qdrant integration, and stale cleanup all ship together because they are tightly coupled.
-**Delivers:** Fully automated vault indexing: filesystem polling detects changes, Markdown-aware chunker splits content with section hierarchy, embeddings generated via OpenAI API (batched, rate-limited), vectors upserted to Qdrant with rich payload, stale vectors cleaned on edit/rename/delete.
-**Addresses (from FEATURES.md):** Document ingestion with Markdown-aware chunking, incremental indexing, stale vector cleanup, SQLite index state.
-**Stack used:** better-sqlite3, Drizzle ORM, drizzle-kit, Qdrant 1.15+, `@qdrant/js-client-rest`, OpenAI SDK, xxhash-wasm, p-queue for backpressure control.
-**Pitfalls addressed:** Naive chunking (heading-aware splitter, code-block preservation, section_path metadata); stale vectors (content hash → delete old → upsert new → update SQLite); polling race conditions (two-pass stability check); SQLite/Qdrant divergence (WAL mode, deterministic IDs, ordered operations); version tracking (embedding_model_version in SQLite from first write).
-**Research flag:** Likely needs `/gsd:research-phase` during planning. Qdrant collection setup specifics (payload index configuration for `is_tenant`, BM25 sparse vector configuration), OpenAI batch embedding API limits, and p-queue concurrency tuning for rate limits may need verification against current docs.
+### Phase 4: cognivault-ctl CLI
+**Rationale:** Only after the compose structure, VNC routing, and Prometheus targets are manually validated should the CLI codify that structure. The CLI is a code generator — generating wrong configs for 10 users is worse than manually managing correct configs for 2 users. The template must be right before automation begins.
+**Delivers:** `cognivault-ctl add/remove/list`; programmatic compose fragment generation using the `yaml` package; port registry (SQLite-backed) preventing collisions; Caddyfile block generation + graceful reload; Prometheus target generation; API key generation (SHA-256 hashed, stored in `users.db`); explicit CLI output instructing operators to capture obsidian-headless auth tokens manually.
+**Stack used:** Commander.js 14.0.x, `yaml` 2.x, `users.db` SQLite file (host-side, separate from per-user container DBs).
+**Pitfalls addressed:** Port conflicts (port registry in `users.db`), name collisions (`COMPOSE_PROJECT_NAME` per user embedded in generated files), API key plaintext (Docker secrets or `chmod 600` `.env` files, hashed storage in `users.db`).
 
-### Phase 3: Retrieval — Hybrid Search + RRF Fusion
-
-**Rationale:** Once data is indexed, the retrieval layer can be built and validated. Semantic search first, then lexical, then fuse — each layer is independently testable before combining. Lexical search via SQLite FTS5 must ship in this phase (not deferred) because it is the primary defense against multilingual embedding bias.
-**Delivers:** A search API returning ranked, filtered results. Parallel semantic search (Qdrant ANN) + lexical search (SQLite FTS5) with RRF fusion. Metadata filtering by tags, project, folder, status. An evaluation harness (30–50 queries) measuring recall@10 separately for Russian, English, and mixed-language queries.
-**Addresses (from FEATURES.md):** Semantic search, keyword/lexical search, hybrid retrieval with RRF fusion, metadata filtering.
-**Stack used:** Qdrant Query API (prefetch + RRF fusion), SQLite FTS5 (unicode61 tokenizer for Russian + English), Zod-validated search request schema.
-**Pitfalls addressed:** Multilingual embedding bias (lexical search as safety net, evaluation harness built in same phase); hybrid fusion weighting (RRF k parameter configurable per request, query classifier for semantic vs lexical boost); Qdrant global HNSW without tenant pre-filtering (is_tenant payload index configuration).
-**Research flag:** Likely needs `/gsd:research-phase` during planning. SQLite FTS5 tokenization for mixed Russian/English content and Qdrant Query API RRF configuration details may need verification.
-
-### Phase 4: Reranking + Context Pack Assembly
-
-**Rationale:** Cross-encoder reranking requires working hybrid retrieval to rerank. Context pack assembly requires reranker scores for its relevance floor filtering — without scores, the assembler degrades to token-greedy bin-packing, which is precisely the failure mode documented in PITFALLS.md Pitfall 6.
-**Delivers:** Reranked search results via Cohere Rerank 3.5 (with graceful fallback to RRF-only if Cohere unavailable). Context pack assembly endpoint with token budget, relevance floor, deduplication, position-aware relevance ordering (high-relevance chunks at start and end to mitigate "lost in the middle" effect), and per-chunk source attribution.
-**Addresses (from FEATURES.md):** Cross-encoder reranking, context pack assembly, TOON content negotiation.
-**Stack used:** cohere-ai SDK, `@toon-format/toon`, Reranker provider interface (strategy pattern).
-**Pitfalls addressed:** Context pack token-greedy filling (relevance floor filtering, diminishing returns threshold, configurable max-chunks per request); reranker latency (only rerank top-20 from initial retrieval, make reranking optional per request flag).
-**Research flag:** Likely needs `/gsd:research-phase` during planning. Cohere Rerank 3.5 API rate limits, TOON library stability, and token-budgeting algorithm details may need verification.
-
-### Phase 5: Multi-Format + Observability + Multi-Vault Activation
-
-**Rationale:** Once the core pipeline is proven on Markdown, extend to other file formats using the `ChunkingStrategy` interface established in Phase 1. Activate multi-vault support (data model is already in place). Add Prometheus metrics and structured logging to make the service production-ready.
-**Delivers:** PDF, CSV, and Canvas file indexing. Full multi-vault isolation (activate second vault namespace). Prometheus `/metrics` endpoint with search latency, index queue depth, stale vector cleanup counts, and OpenTelemetry traces. OpenAPI spec endpoint.
-**Addresses (from FEATURES.md):** Multi-format indexing, multi-vault activation, Prometheus metrics, OpenAPI documentation.
-**Stack used:** pdf-parse, csv-parse, gray-matter (already used), prom-client, `@opentelemetry/sdk-node`, `@fastify/otel`.
-**Pitfalls addressed:** Multi-format as afterthought (ChunkingStrategy interface from Phase 1 means no core pipeline changes needed; each format plugs in independently).
-**Research flag:** Standard patterns for Prometheus/OTel. PDF text extraction quality may need empirical testing with real vault PDFs (pdf-parse confidence is MEDIUM vs HIGH for other libraries).
+### Phase 5: obsidian-headless Sync Integration
+**Rationale:** The headless sync sidecar is independent of VNC (per FEATURES.md critical discovery) and can be integrated after the container stack is validated. The interactive auth token requirement is a known constraint; this phase formalizes the provisioning workflow with the manual step as a first-class requirement.
+**Delivers:** Per-user Obsidian Sync sidecar (`ob sync --continuous`) added to the compose template; auth token injected as Docker secret; container configured to fail fast and loudly without valid token; `cognivault-ctl add-user` output includes explicit operator instructions for the manual token capture step; `obsidian-headless` package pinned to a specific validated version.
+**Pitfalls addressed:** obsidian-headless interactive auth (explicit manual step in CLI output, not hidden in automation), beta package breakage (pinned version), token security (Docker secrets at `/run/secrets/obsidian_auth_token`, not environment variables).
 
 ### Phase Ordering Rationale
 
-- **Foundation before indexing:** Vault Manager and path safety must exist before any component touches the filesystem for indexing purposes.
-- **Indexing before retrieval:** Cannot search what isn't indexed; incremental indexing and stale cleanup must be solid before retrieval is layered on top.
-- **Lexical search in Phase 3, not deferred:** Multilingual embedding bias makes lexical search a correctness requirement, not a nice-to-have. Deferring it means shipping retrieval that silently fails for Russian-query-to-Russian-content scenarios.
-- **Reranking in Phase 4, not Phase 3:** Cross-encoder reranking depends on hybrid retrieval working first; context assembly depends on reranker scores for quality filtering — these two are correctly grouped.
-- **Multi-format in Phase 5:** The `ChunkingStrategy` interface abstraction from Phase 1 means adding formats in Phase 5 requires zero changes to the core pipeline; only new strategy implementations are added.
-- **Chunking strategy is irreversible:** Any change to chunk size, splitting logic, or section_path format requires a full vault reindex. This is why getting chunking right in Phase 1 (the interface) and Phase 2 (the Markdown implementation) is the highest-priority design decision in the project.
+- **Data isolation before anything else:** Qdrant tenant filtering is a cross-cutting code change touching every search and index operation. Any interim test data from multiple containers without tenant filtering is cross-contaminated and requires full reindex to resolve.
+- **Manual validation before automation:** The CLI generates compose configs. Generating wrong configs for 10 users is worse than manually writing correct configs for 2 users. Validate the template by hand first, then automate it.
+- **Infrastructure setup before CLI encoding it:** Prometheus file_sd_configs must be working before the CLI writes to the target file — Phase 3 before Phase 4.
+- **VNC GUI is explicitly out of v2.0 scope:** The obsidian-headless sidecar provides sync without VNC. The optional `linuxserver/obsidian` GUI container is a P2 feature that can be added as a `--with-gui` flag to `cognivault-ctl add-user` in a v2.x patch with no architectural changes required.
+- **All Phase 1 pitfalls are template decisions:** `shm_size`, network isolation, resource limits, and volume naming are compose template properties. There is no safe way to add them after containers are provisioned; they require restarting every running container.
 
 ### Research Flags
 
-Phases likely needing deeper research during planning:
-- **Phase 2 (Indexing Pipeline):** Qdrant collection configuration details (BM25 sparse vector setup, `is_tenant` payload index syntax in JS client), OpenAI batch embedding limits and rate limit headers, p-queue integration patterns with async backpressure. The integration surface between multiple new technologies in a single phase warrants upfront API research.
-- **Phase 3 (Retrieval):** SQLite FTS5 with `unicode61` tokenizer for mixed Cyrillic/Latin content — Russian-specific tokenization behavior needs verification; Qdrant Query API RRF `k` parameter defaults and configuration syntax in the JS client.
-- **Phase 4 (Reranking + Context):** Cohere Rerank 3.5 API rate limits and cost structure; TOON library v3 stability and API surface.
+Phases likely needing `/gsd:research-phase` during planning:
+- **Phase 2 (Obsidian container validation):** Image tag pinning requires checking `linuxserver/docker-obsidian` releases for the current stable tag at planning time. ARM64 rendering issues are host-architecture-specific and may require targeted investigation if the deployment host is ARM64.
+- **Phase 5 (obsidian-headless):** Beta package — auth flow has changed between releases. Needs current version verification and validation of the token capture workflow before writing the provisioning runbook.
 
-Phases with standard patterns (skip research-phase):
-- **Phase 1 (Foundation):** Fastify v5 setup, Zod integration, bearer auth — comprehensive official docs, stable patterns, no novel integration surface.
-- **Phase 5 (Multi-format + Observability):** prom-client and OpenTelemetry for Node.js are well-documented; PDF/CSV parsing with existing libraries follows established patterns.
+Phases with well-documented standard patterns (skip deep research):
+- **Phase 1 (Qdrant tenant isolation):** Official Qdrant multitenancy docs are complete and unambiguous; `is_tenant: true` API is stable since v1.11.0 (current deployed version is v1.17.0).
+- **Phase 3 (Prometheus file_sd_configs):** Standard Prometheus pattern, fully documented, no CogniVault-specific edge cases.
+- **Phase 4 (CLI with Commander.js + yaml):** Both libraries have stable, clear APIs; no edge cases identified in research.
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| Stack | HIGH | All primary technologies verified against official docs and current releases (March 2026). Qdrant 1.15 BM25 support confirmed from release blog. Fastify v5.8.2 current. Zod v4 released. Only pdf-parse is MEDIUM — pure TS alternative, extraction quality needs empirical validation with real PDFs. |
-| Features | HIGH | Multiple competitors analyzed; feature table comprehensive. Table stakes derived from 6 product comparisons. Differentiators clearly gap-filled vs competitors. Anti-features explicitly justified — no hand-waving. |
-| Architecture | HIGH | Qdrant multitenancy approach from official Qdrant docs. Build order from dependency graph analysis, not opinion. Single-process monolith is the correct call for 1-3 agents; no speculative distributed design. |
-| Pitfalls | HIGH (core), MEDIUM (CogniVault-specific combinations) | Core RAG pitfalls (chunking, stale vectors, multilingual bias) well-documented across multiple independent sources. CogniVault-specific combinations (Obsidian Sync + polling + Qdrant) are medium confidence because fewer real-world deployments exist at this exact intersection. |
+| Stack | HIGH | Core recommendations verified against official docs: Qdrant multitenancy guide, linuxserver.io docs, Commander.js npm, yaml npm, obsidianmd/obsidian-headless GitHub. Version compatibility table in STACK.md confirmed. |
+| Features | MEDIUM-HIGH | P1 features (Qdrant isolation, container provisioning, CLI, resource limits) are well-defined with clear implementation paths. P2 features (VNC, per-user metrics) follow standard patterns. obsidian-headless is HIGH for core sync capability but MEDIUM for operational stability given beta status. |
+| Architecture | HIGH | Qdrant single-collection tenancy is the official recommendation with explicit warnings against the alternative. Caddy WebSocket proxying is fully documented. Separate containers vs combined image decision confirmed correct. Compose fragment generation pattern is established. SQLite per-container isolation reasoning is sound. |
+| Pitfalls | MEDIUM-HIGH | Container/VNC/Electron pitfalls are well-documented with real GitHub issues and CVE references. Qdrant isolation pitfall confirmed from official docs. obsidian-headless auth pitfall is MEDIUM (beta + community forum sourcing, not official documentation). |
 
 **Overall confidence:** HIGH
 
 ### Gaps to Address
 
-- **PDF text extraction quality:** pdf-parse v2.4.x is rated MEDIUM confidence. Real-world quality on Obsidian vault PDFs (research papers, scanned docs, complex layouts) needs empirical testing in Phase 5. May need to evaluate alternatives (pdfjs-dist, offloading to a preprocessing step) if quality is insufficient.
-- **SQLite FTS5 Russian tokenization:** The `unicode61` tokenizer handles Russian/English Unicode but may not perform BM25 stemming as well as Qdrant's native multilingual BM25. The retrieval evaluation harness in Phase 3 will reveal whether FTS5 lexical search quality is acceptable or whether Qdrant BM25 sparse vectors should also be used for lexical retrieval alongside FTS5.
-- **RRF k-parameter tuning:** The optimal `k` value for CogniVault's mixed Russian/English technical content is unknown without empirical testing. Research confirms default values (k=60) may under-weight lexical results for short technical term queries. The evaluation harness and configurable-per-request design mitigates this, but real tuning data does not exist pre-build.
-- **Obsidian Sync polling behavior on macOS vs Docker host vs Linux:** The two-pass stability check design is sound, but specific timing characteristics of Obsidian Sync file write patterns across platforms have limited documented precedent. May need adjustment to poll interval or stability window based on observed behavior in early testing.
+- **obsidian-headless stability:** The headless sync client is in beta (2026-03). The auth flow has changed between beta releases. Mitigation: pin the exact npm package version at planning time; build the sidecar container to fail fast with a clear error on auth failure. Validate token capture workflow before writing `cognivault-ctl add-user` code.
+- **linuxserver/obsidian image tag:** Research used `:latest` throughout. At planning time, identify and pin a specific stable version tag. Do not use `:latest` in production compose templates — upstream rendering regressions have occurred in minor releases.
+- **Target host architecture:** Research notes ARM64 rendering issues with `linuxserver/obsidian` (black screen on some Raspberry Pi and Apple Silicon VM configurations). If the deployment host is ARM64, additional GPU/Mesa flag validation is needed before committing to the compose template.
+- **Obsidian Sync subscription cost:** `obsidian-headless` requires an active Obsidian Sync subscription per user (~$8/month). This is an ongoing per-user external cost — not a technical gap, but a business constraint that `cognivault-ctl add-user` output should surface explicitly to operators.
+- **VNC GUI as truly optional:** The roadmap should treat `linuxserver/obsidian` as an optional service block enabled via `cognivault-ctl add-user --with-gui`. Phase 2 should validate it, but the default provisioning path should not require it.
 
 ## Sources
 
 ### Primary (HIGH confidence)
-- [Fastify official docs](https://fastify.dev/) — v5.8.2, March 2026; plugin architecture, TOON negotiation approach
-- [Qdrant text search docs](https://qdrant.tech/documentation/guides/text-search/) — BM25 native sparse vector support, Query API
-- [Qdrant 1.15 release blog](https://qdrant.tech/blog/qdrant-1.15.x/) — multilingual tokenizer, Russian stemming/stopwords confirmation
-- [Qdrant multitenancy guide](https://qdrant.tech/documentation/guides/multitenancy/) — payload-based isolation recommendation, `is_tenant` field
-- [Qdrant collection aliases](https://qdrant.tech/documentation/concepts/collections/) — zero-downtime migration strategy
-- [OpenAI embedding models](https://platform.openai.com/docs/models/text-embedding-3-small) — text-embedding-3-small specs, multilingual performance
-- [Cohere Rerank docs](https://docs.cohere.com/docs/rerank) — Rerank 3.5 multilingual support, API interface
-- [Zod v4 release](https://zod.dev/v4) — 14x performance improvement, `.toJSONSchema()` for OpenAPI
-- [Drizzle ORM SQLite](https://orm.drizzle.team/docs/get-started-sqlite) — better-sqlite3 sync integration
-- [OpenTelemetry Node.js](https://opentelemetry.io/docs/languages/js/getting-started/nodejs/) — SDK setup; @fastify/otel for Fastify-specific instrumentation
-- [Obsidian Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) — competitive baseline; feature gap analysis
-- [Khoj documentation](https://docs.khoj.dev/) — competitive analysis; semantic search without file ops
-- [Onyx documentation](https://docs.onyx.app/welcome) — competitive analysis; hybrid search architecture
-- [PrivateGPT documentation](https://docs.privategpt.dev/api-reference) — competitive analysis; ingestion + chunking patterns
-- [AnythingLLM documentation](https://docs.anythingllm.com/) — competitive analysis; workspace-based isolation
+- [Qdrant Multitenancy Guide](https://qdrant.tech/documentation/guides/multitenancy/) — single-collection recommendation, `is_tenant: true` payload index, collection-per-tenant warning
+- [Qdrant 1.16 Tiered Multitenancy](https://qdrant.tech/blog/qdrant-1.16.x/) — shard promotion mechanism for large tenants
+- [linuxserver/docker-obsidian GitHub](https://github.com/linuxserver/docker-obsidian) — s6-overlay architecture, Selkies base, shm_size requirement, ARM64 rendering issues (#25)
+- [LinuxServer.io Obsidian Docs](https://docs.linuxserver.io/images/docker-obsidian/) — environment variables, port layout, CUSTOM_USER/PASSWORD
+- [obsidianmd/obsidian-headless GitHub](https://github.com/obsidianmd/obsidian-headless) — OBSIDIAN_AUTH_TOKEN, `ob sync --continuous`, Node.js 22 requirement
+- [Prometheus file_sd_configs docs](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#file_sd_config) — dynamic target discovery pattern
+- [Caddy reverse_proxy directive](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy) — WebSocket automatic upgrade, path strip
+- [Docker Resource Constraints](https://docs.docker.com/engine/containers/resource_constraints/) — deploy.resources.limits syntax
 
 ### Secondary (MEDIUM confidence)
-- [Firecrawl chunking best practices 2026](https://www.firecrawl.dev/blog/best-chunking-strategies-rag) — heading-based chunking performance data (faithfulness 0.47 naive vs 0.79 structure-aware)
-- [Building production RAG systems 2026](https://brlikhon.engineer/blog/building-production-rag-systems-in-2026-complete-architecture-guide) — modular RAG architecture patterns
-- [SBERT retrieve & re-rank](https://sbert.net/examples/sentence_transformer/applications/retrieve_rerank/README.html) — two-stage retrieval pipeline pattern
-- [Building multilingual RAG systems (Microsoft)](https://medium.com/data-science-at-microsoft/building-and-evaluating-multilingual-rag-systems-943c290ab711) — multilingual bias measurement methodology
-- [Superlinked hybrid search + reranking](https://superlinked.com/vectorhub/articles/optimizing-rag-with-hybrid-search-reranking) — RRF fusion + cross-encoder pipeline
-- [SQLite concurrent writes](https://tenthousandmeters.com/blog/sqlite-concurrent-writes-and-database-is-locked-errors/) — WAL mode and busy_timeout configuration
-- [Migrating vector embeddings to Qdrant](https://0xhagen.medium.com/migrating-vector-embeddings-from-postgresql-to-qdrant-challenges-learnings-and-insights-f101f42f78f5) — embedding model migration strategy
+- [corelab.tech Obsidian Docker Compose guide (2026)](https://corelab.tech/obsidian/) — `lscr.io/linuxserver/obsidian:latest` as 2026 community recommendation
+- [Obsidian Sync Headless Client announcement](https://devops-geek.net/devops-lab/obsidian-sync-gets-a-headless-client-a-game-changer-for-linux-automation-and-devops-workflows/) — February 2026 release confirmation
+- [Obsidian Forum: Headless Sync auth token](https://forum.obsidian.md/t/headless-sync-how-to-get-obsidian-auth-token-variable/111740) — interactive auth requirement confirmed by community
+- [SQLite per-tenant database pattern](https://turso.tech/blog/give-each-of-your-users-their-own-sqlite-database-b74445f4) — per-user SQLite isolation rationale
+- [Docker Compose project isolation best practices](https://www.kubeblogs.com/how-to-avoid-issues-with-docker-compose-due-to-same-folder-names-project-isolation-best-practices/) — COMPOSE_PROJECT_NAME pattern
 
-### Tertiary (LOW confidence)
-- [Syncthing polling vs filesystem watch forum](https://forum.syncthing.net/t/polling-vs-file-system-watch/953) — analog for Obsidian Sync polling behavior; not CogniVault-specific
-- [Cross-lingual retrieval biases in RAG (arxiv)](https://arxiv.org/html/2507.07543) — multilingual embedding bias quantification; research paper, not production data
+### Tertiary (LOW confidence — validate during implementation)
+- [Electron SIGSEGV in Docker issue #41975](https://github.com/electron/electron/issues/41975) — seccomp/sandbox crash mechanism; host-specific, needs validation on target architecture
+- [VNC password encryption weakness — FortiGuard](https://www.fortiguard.com/encyclopedia/ips/21976/vnc-server-weak-password-encryption) — VNC 8-char truncation; mitigated by using KasmVNC HTTPS layer instead of raw VNC auth
 
 ---
-*Research completed: 2026-03-10*
+*Research completed: 2026-03-13*
 *Ready for roadmap: yes*
