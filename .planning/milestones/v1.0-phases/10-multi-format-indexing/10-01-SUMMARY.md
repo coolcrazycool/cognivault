@@ -129,3 +129,14 @@ None - no external service configuration required.
 ---
 *Phase: 10-multi-format-indexing*
 *Completed: 2026-03-12*
+
+## Self-Check: PASSED
+
+- src/lib/pdf-chunker.ts: FOUND
+- src/lib/csv-chunker.ts: FOUND
+- src/lib/__tests__/pdf-chunker.test.ts: FOUND
+- src/lib/__tests__/csv-chunker.test.ts: FOUND
+- .planning/phases/10-multi-format-indexing/10-01-SUMMARY.md: FOUND
+- Commit 4303d30 (PDF chunker): FOUND
+- Commit f197c09 (CSV chunker): FOUND
+- Commit 7c906a1 (metadata): FOUND
