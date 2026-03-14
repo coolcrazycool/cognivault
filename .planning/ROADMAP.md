@@ -3,7 +3,7 @@
 ## Milestones
 
 - ✅ **v1.0 MVP** — Phases 1-14 (shipped 2026-03-13)
-- 🚧 **v2.0 Multi-User** — Phases 15-20 (in progress)
+- 🚧 **v2.0 Multi-User** — Phases 15-22 (in progress)
 
 ## Phases
 
@@ -33,7 +33,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 
 </details>
 
-### 🚧 v2.0 Multi-User (Phases 15-20)
+### 🚧 v2.0 Multi-User (Phases 15-22)
 
 **Milestone Goal:** Transform CogniVault from a single-user service into a single-container multi-tenant platform where each user's vault is synced via obsidian-headless, all users share one CogniVault process with tenant-isolated Qdrant, and operators manage users via CLI.
 
@@ -43,6 +43,8 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 - [x] **Phase 18: Per-User Indexing and Routes** - Multi-tenant indexing pipeline and API route migration (completed 2026-03-14)
 - [ ] **Phase 19: CLI and Vault Sync** - Operator CLI for user lifecycle and obsidian-headless sync management
 - [x] **Phase 20: Docker and Integration Hardening** - Container rewrite with tini, end-to-end isolation tests, multi-tenant observability dashboards (completed 2026-03-14)
+- [ ] **Phase 21: CLI-Server Event Wiring & Metric Fix** - Fix CLI→server event propagation, indexer vault path race, commit OBS-03 metric fix *(Gap Closure)*
+- [ ] **Phase 22: Milestone Verification Closure** - Create Phase 19 VERIFICATION.md, update Phase 20 VERIFICATION.md, close all audit gaps *(Gap Closure)*
 
 ## Phase Details
 
@@ -140,6 +142,28 @@ Plans:
 - [ ] 20-03-PLAN.md — Tenant isolation integration test and Docker smoke test
 - [ ] 20-04-PLAN.md — Gap closure: align verification truths with v2.0 architecture
 
+### Phase 21: CLI-Server Event Wiring & Metric Fix
+**Goal**: CLI commands propagate user lifecycle events to the live server reliably, and OBS-03 metric fix is committed
+**Depends on**: Phase 20
+**Requirements**: CLI-01, CLI-02, CLI-04, SYNC-01, OBS-03
+**Gap Closure:** Closes gaps from audit
+**Success Criteria** (what must be TRUE):
+  1. `UserRegistry.addUser()` and `removeUser()` emit `user-added`/`user-removed` events directly, not only via fs.watch hot-reload
+  2. The indexer handles vault paths that don't exist yet at `user-added` time without silently dropping the user
+  3. OBS-03 sync metric `.remove()` change is committed to HEAD (not just in working tree)
+**Plans:** 0/? plans (not yet planned)
+
+### Phase 22: Milestone Verification Closure
+**Goal**: All v2.0 requirements have formal verification evidence; no requirement is marked complete without VERIFICATION.md proof
+**Depends on**: Phase 21
+**Requirements**: CLI-01, CLI-02, CLI-03, CLI-04, SYNC-01, SYNC-02, SYNC-03, SYNC-04, OBS-03
+**Gap Closure:** Closes gaps from audit
+**Success Criteria** (what must be TRUE):
+  1. Phase 19 has a VERIFICATION.md that verifies all 8 CLI/SYNC requirements against the codebase
+  2. Phase 20 VERIFICATION.md reflects OBS-03 as resolved
+  3. All 19 v2.0 requirements show "satisfied" in a 3-source cross-reference
+**Plans:** 0/? plans (not yet planned)
+
 ## Progress
 
 **Execution Order:**
@@ -167,3 +191,5 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 18. Per-User Indexing and Routes | 3/3 | Complete    | 2026-03-14 | - |
 | 19. CLI and Vault Sync | 2/3 | In Progress|  | - |
 | 20. Docker and Integration Hardening | 4/4 | Complete   | 2026-03-14 | - |
+| 21. CLI-Server Event Wiring & Metric Fix | 0/? | Not Started | | - |
+| 22. Milestone Verification Closure | 0/? | Not Started | | - |

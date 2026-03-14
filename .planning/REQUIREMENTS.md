@@ -20,23 +20,23 @@ Requirements for multi-user deployment. Each maps to roadmap phases.
 
 ### Vault Sync
 
-- [x] **SYNC-01**: Each user's vault is synced via `ob sync --continuous` child process with per-user auth token injected as env var
-- [x] **SYNC-02**: Sync processes restart automatically with exponential backoff on failure
-- [x] **SYNC-03**: Stale `.obsidian/.sync.lock` files are cleaned up before each sync process start
-- [x] **SYNC-04**: Sync process failures are logged with structured context and exposed as Prometheus metrics
+- [ ] **SYNC-01**: Each user's vault is synced via `ob sync --continuous` child process with per-user auth token injected as env var
+- [ ] **SYNC-02**: Sync processes restart automatically with exponential backoff on failure
+- [ ] **SYNC-03**: Stale `.obsidian/.sync.lock` files are cleaned up before each sync process start
+- [ ] **SYNC-04**: Sync process failures are logged with structured context and exposed as Prometheus metrics
 
 ### CLI Management
 
-- [x] **CLI-01**: `cognivault-ctl add-user <name>` creates a user with `--obsidian-email`, `--obsidian-password`, `--vault`, `--openai-key` flags
-- [x] **CLI-02**: `cognivault-ctl remove-user <name>` stops sync, removes user from registry
-- [x] **CLI-03**: `cognivault-ctl list-users` shows all users with sync status and vault path
-- [x] **CLI-04**: `add-user` performs `ob login` + `ob sync-setup` inline and stores auth token in registry
+- [ ] **CLI-01**: `cognivault-ctl add-user <name>` creates a user with `--obsidian-email`, `--obsidian-password`, `--vault`, `--openai-key` flags
+- [ ] **CLI-02**: `cognivault-ctl remove-user <name>` stops sync, removes user from registry
+- [ ] **CLI-03**: `cognivault-ctl list-users` shows all users with sync status and vault path
+- [ ] **CLI-04**: `add-user` performs `ob login` + `ob sync-setup` inline and stores auth token in registry
 
 ### Observability
 
 - [x] **OBS-01**: Every metric emitted carries a user_id label matching the request's tenant
 - [x] **OBS-02**: Prometheus scrapes single CogniVault instance; Grafana filters by user_id template variable
-- [x] **OBS-03**: Per-user sync process health is exposed as a gauge metric
+- [ ] **OBS-03**: Per-user sync process health is exposed as a gauge metric
 
 ### Container Infrastructure
 
@@ -92,17 +92,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TENANT-03 | Phase 15 | Complete |
 | DATA-01 | Phase 17 | Complete |
 | DATA-02 | Phase 17 | Complete |
-| SYNC-01 | Phase 19 | Complete |
-| SYNC-02 | Phase 19 | Complete |
-| SYNC-03 | Phase 19 | Complete |
-| SYNC-04 | Phase 19 | Complete |
-| CLI-01 | Phase 19 | Complete |
-| CLI-02 | Phase 19 | Complete |
-| CLI-03 | Phase 19 | Complete |
-| CLI-04 | Phase 19 | Complete |
+| SYNC-01 | Phase 19 → 21, 22 | Pending |
+| SYNC-02 | Phase 19 → 22 | Pending |
+| SYNC-03 | Phase 19 → 22 | Pending |
+| SYNC-04 | Phase 19 → 22 | Pending |
+| CLI-01 | Phase 19 → 21, 22 | Pending |
+| CLI-02 | Phase 19 → 21, 22 | Pending |
+| CLI-03 | Phase 19 → 22 | Pending |
+| CLI-04 | Phase 19 → 21, 22 | Pending |
 | OBS-01 | Phase 18 | Complete |
 | OBS-02 | Phase 20 | Complete |
-| OBS-03 | Phase 20 | Complete |
+| OBS-03 | Phase 20 → 21 | Pending |
 | INFRA-01 | Phase 20 | Complete |
 | INFRA-02 | Phase 20 | Complete |
 | INFRA-03 | Phase 20 | Complete |
@@ -110,6 +110,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 **Coverage:**
 - v2.0 requirements: 19 total
 - Mapped to phases: 19
+- Satisfied: 10
+- Pending (gap closure): 9
 - Unmapped: 0
 
 ---
