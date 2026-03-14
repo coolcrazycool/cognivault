@@ -14,7 +14,6 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - COGNIVAULT_DATA_DIR=/data
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       - cognivault_data:/data
     networks:
