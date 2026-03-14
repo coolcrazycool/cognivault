@@ -285,23 +285,34 @@ describe('indexer plugin (per-user)', () => {
       await app.close();
     });
 
-    it('skips indexer creation if new user vault path does not exist', async () => {
+    it('skips indexer creation if new user vault path never appears (timeout)', async () => {
       const app = await buildTestApp();
       await app.ready();
 
-      // Override fs.access to fail
+      // Override fs.access to always fail — vault never materialises
       const fsAccess = fs.access as ReturnType<typeof vi.fn>;
-      fsAccess.mockRejectedValueOnce(new Error('ENOENT'));
+      fsAccess.mockRejectedValue(new Error('ENOENT'));
 
       const listeners = getRegistryListeners(app);
       const addedHandlers = listeners.get('user-added') ?? [];
 
       const newUser = createMockUser('bad-path-user', '/nonexistent');
-      for (const handler of addedHandlers) {
-        await (handler as (user: MockUser) => Promise<void>)(newUser);
-      }
 
-      expect(app.indexers.has('bad-path-user')).toBe(false);
+      vi.useFakeTimers();
+      try {
+        const handlerPromise = Promise.all(
+          addedHandlers.map((h) => (h as (user: MockUser) => Promise<void>)(newUser)),
+        );
+
+        // Advance past the 30 second retry window
+        await vi.advanceTimersByTimeAsync(31000);
+
+        await handlerPromise;
+
+        expect(app.indexers.has('bad-path-user')).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
 
       await app.close();
     });
@@ -377,6 +388,103 @@ describe('indexer plugin (per-user)', () => {
       // VaultIndexer.on should have been called with 'changes'
       const onCall = mockVaultIndexerOn.mock.calls.find((c: unknown[]) => c[0] === 'changes');
       expect(onCall).toBeDefined();
+
+      await app.close();
+    });
+  });
+
+  describe('vault path retry on user-added', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(async () => {
+      vi.useRealTimers();
+    });
+
+    it('retries vault path and starts indexer when path appears on 2nd attempt', async () => {
+      const app = await buildTestApp();
+      await app.ready();
+
+      const fsAccess = fs.access as ReturnType<typeof vi.fn>;
+      // Fail twice, then succeed
+      fsAccess.mockRejectedValueOnce(new Error('ENOENT'));
+      fsAccess.mockRejectedValueOnce(new Error('ENOENT'));
+      fsAccess.mockResolvedValue(undefined);
+
+      mockVaultIndexerStart.mockClear();
+
+      const listeners = getRegistryListeners(app);
+      const addedHandlers = listeners.get('user-added') ?? [];
+      const newUser = createMockUser('retry-user', '/tmp/retry-vault');
+
+      // Fire handler but don't await — it will run async with fake timers
+      const handlerPromise = Promise.all(
+        addedHandlers.map((h) => (h as (user: MockUser) => Promise<void>)(newUser)),
+      );
+
+      // Advance timers by 2s for each retry
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(2000);
+
+      await handlerPromise;
+
+      expect(app.indexers.has('retry-user')).toBe(true);
+      expect(mockVaultIndexerStart).toHaveBeenCalledTimes(1);
+
+      await app.close();
+    });
+
+    it('gives up after max wait time if vault never appears', async () => {
+      const app = await buildTestApp();
+      await app.ready();
+
+      const fsAccess = fs.access as ReturnType<typeof vi.fn>;
+      // Always fail
+      fsAccess.mockRejectedValue(new Error('ENOENT'));
+
+      mockVaultIndexerStart.mockClear();
+
+      const listeners = getRegistryListeners(app);
+      const addedHandlers = listeners.get('user-added') ?? [];
+      const newUser = createMockUser('timeout-user', '/tmp/timeout-vault');
+
+      const handlerPromise = Promise.all(
+        addedHandlers.map((h) => (h as (user: MockUser) => Promise<void>)(newUser)),
+      );
+
+      // Advance past 30 second timeout
+      await vi.advanceTimersByTimeAsync(31000);
+
+      await handlerPromise;
+
+      expect(app.indexers.has('timeout-user')).toBe(false);
+      expect(mockVaultIndexerStart).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('starts immediately when vault path exists (no retry delay)', async () => {
+      const app = await buildTestApp();
+      await app.ready();
+
+      const fsAccess = fs.access as ReturnType<typeof vi.fn>;
+      // Succeed immediately
+      fsAccess.mockResolvedValue(undefined);
+
+      mockVaultIndexerStart.mockClear();
+
+      const listeners = getRegistryListeners(app);
+      const addedHandlers = listeners.get('user-added') ?? [];
+      const newUser = createMockUser('immediate-user', '/tmp/immediate-vault');
+
+      // Fire and await directly — should not need timer advancement
+      await Promise.all(
+        addedHandlers.map((h) => (h as (user: MockUser) => Promise<void>)(newUser)),
+      );
+
+      expect(app.indexers.has('immediate-user')).toBe(true);
+      expect(mockVaultIndexerStart).toHaveBeenCalledTimes(1);
 
       await app.close();
     });

@@ -32,7 +32,10 @@ async function createUserIndexer(
   try {
     await fs.access(vaultPath);
   } catch {
-    fastify.log.warn({ userId, vaultPath }, 'Vault path does not exist — skipping indexer creation');
+    fastify.log.warn(
+      { userId, vaultPath },
+      'Vault path does not exist — skipping indexer creation',
+    );
     return null;
   }
 
@@ -78,11 +81,42 @@ async function indexerPlugin(fastify: FastifyInstance): Promise<void> {
   });
 
   // Registry event: user-added
+  // Wait briefly for db plugin's user-added handler to create the database
+  // (both handlers fire concurrently on the same EventEmitter)
   fastify.registry.on('user-added', async (user) => {
-    const entry = await createUserIndexer(fastify, user.userId, user.vaultPath);
-    if (entry) {
-      entry.indexer.start();
-      fastify.log.info({ userId: user.userId }, 'Started per-user indexer');
+    try {
+      for (let i = 0; i < 10; i++) {
+        try {
+          fastify.getUserDbById(user.userId);
+          break;
+        } catch {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+
+      // Retry vault path access — ob sync creates directory lazily
+      const MAX_VAULT_WAIT_MS = 30_000;
+      const VAULT_POLL_INTERVAL_MS = 2_000;
+      const deadline = Date.now() + MAX_VAULT_WAIT_MS;
+
+      let entry: IndexerEntry | null = null;
+      while (Date.now() < deadline) {
+        entry = await createUserIndexer(fastify, user.userId, user.vaultPath);
+        if (entry) break;
+        await new Promise((r) => setTimeout(r, VAULT_POLL_INTERVAL_MS));
+      }
+
+      if (entry) {
+        entry.indexer.start();
+        fastify.log.info({ userId: user.userId }, 'Started per-user indexer');
+      } else {
+        fastify.log.warn(
+          { userId: user.userId, vaultPath: user.vaultPath },
+          'Vault path not available after 30s — indexer not started',
+        );
+      }
+    } catch (err) {
+      fastify.log.error({ userId: user.userId, err }, 'Failed to create indexer for user');
     }
   });
 
