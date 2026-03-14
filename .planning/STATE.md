@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
-status: completed
-stopped_at: Phase 19 context gathered
-last_updated: "2026-03-14T10:48:19.127Z"
-last_activity: 2026-03-14 — Phase 18 Plan 03 (Route Migration & Plugin Re-enablement) complete
+status: in-progress
+stopped_at: Completed 19-01-PLAN.md
+last_updated: "2026-03-14T11:40:56Z"
+last_activity: 2026-03-14 — Phase 19 Plan 01 (CLI User Management) complete
 progress:
   total_phases: 6
   completed_phases: 4
-  total_plans: 8
-  completed_plans: 8
-  percent: 100
+  total_plans: 11
+  completed_plans: 9
+  percent: 82
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-14)
 
 **Core value:** AI agents can find and retrieve the right knowledge from an Obsidian vault in under one second, with high precision across mixed Russian/English content, exact technical terms, and freeform metadata.
-**Current focus:** v2.0 Multi-User — Phase 18: Per-User Indexing and Routes
+**Current focus:** v2.0 Multi-User — Phase 19: CLI and Vault Sync
 
 ## Current Position
 
-Phase: 18 of 20 (Per-User Indexing and Routes) — fourth of 6 v2.0 phases
-Plan: 03 of 03 complete (Route Migration & Plugin Re-enablement)
-Status: Phase 18 complete
-Last activity: 2026-03-14 — Phase 18 Plan 03 (Route Migration & Plugin Re-enablement) complete
+Phase: 19 of 20 (CLI and Vault Sync) — fifth of 6 v2.0 phases
+Plan: 01 of 03 complete (CLI User Management)
+Status: in-progress
+Last activity: 2026-03-14 — Phase 19 Plan 01 (CLI User Management) complete
 
-Progress: [██████████] 100%
+Progress: [███░░░░░░░] 33%
 
 ## Performance Metrics
 
@@ -72,6 +72,9 @@ All decisions logged in PROJECT.md Key Decisions table.
 - [Phase 18]: Admin reindex uses processFileChanges instead of indexer.emit for path/folder (2026-03-14)
 - [Phase 18]: Pipeline registered before indexer in app.ts (indexer fp() deps include 'pipeline') (2026-03-14)
 - [Phase 18]: Health readiness endpoint iterates per-user indexers Map for indexing status (2026-03-14)
+- [Phase 19]: Extract CLI handler functions from Commander actions for direct testability (2026-03-14)
+- [Phase 19]: SYNC_STATUS always 'unknown' in CLI -- no server access from offline CLI (2026-03-14)
+- [Phase 19]: Use promisify(execFile) for subprocess calls to ob CLI (2026-03-14)
 
 ### Roadmap Evolution
 
@@ -89,6 +92,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T10:48:19.124Z
-Stopped at: Phase 19 context gathered
-Resume file: .planning/phases/19-cli-and-vault-sync/19-CONTEXT.md
+Last session: 2026-03-14T11:40:56Z
+Stopped at: Completed 19-01-PLAN.md
+Resume file: .planning/phases/19-cli-and-vault-sync/19-01-SUMMARY.md

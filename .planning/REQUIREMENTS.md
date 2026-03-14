@@ -27,10 +27,10 @@ Requirements for multi-user deployment. Each maps to roadmap phases.
 
 ### CLI Management
 
-- [ ] **CLI-01**: `cognivault-ctl add-user <name>` creates a user with `--obsidian-email`, `--obsidian-password`, `--vault`, `--openai-key` flags
-- [ ] **CLI-02**: `cognivault-ctl remove-user <name>` stops sync, removes user from registry
-- [ ] **CLI-03**: `cognivault-ctl list-users` shows all users with sync status and vault path
-- [ ] **CLI-04**: `add-user` performs `ob login` + `ob sync-setup` inline and stores auth token in registry
+- [x] **CLI-01**: `cognivault-ctl add-user <name>` creates a user with `--obsidian-email`, `--obsidian-password`, `--vault`, `--openai-key` flags
+- [x] **CLI-02**: `cognivault-ctl remove-user <name>` stops sync, removes user from registry
+- [x] **CLI-03**: `cognivault-ctl list-users` shows all users with sync status and vault path
+- [x] **CLI-04**: `add-user` performs `ob login` + `ob sync-setup` inline and stores auth token in registry
 
 ### Observability
 
@@ -96,10 +96,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SYNC-02 | Phase 19 | Pending |
 | SYNC-03 | Phase 19 | Pending |
 | SYNC-04 | Phase 19 | Pending |
-| CLI-01 | Phase 19 | Pending |
-| CLI-02 | Phase 19 | Pending |
-| CLI-03 | Phase 19 | Pending |
-| CLI-04 | Phase 19 | Pending |
+| CLI-01 | Phase 19 | Complete |
+| CLI-02 | Phase 19 | Complete |
+| CLI-03 | Phase 19 | Complete |
+| CLI-04 | Phase 19 | Complete |
 | OBS-01 | Phase 18 | Complete |
 | OBS-02 | Phase 20 | Pending |
 | OBS-03 | Phase 20 | Pending |
