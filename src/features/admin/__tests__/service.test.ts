@@ -114,13 +114,25 @@ describe('ReindexService', () => {
       const service = new ReindexService(mockFastify);
 
       await expect(
-        service.createJob('full', undefined, mockUserDb as never, mockUserQdrant as never, TEST_USER_ID),
+        service.createJob(
+          'full',
+          undefined,
+          mockUserDb as never,
+          mockUserQdrant as never,
+          TEST_USER_ID,
+        ),
       ).rejects.toThrow();
     });
 
     it('calls indexer.restart() for full reindex', async () => {
       const service = new ReindexService(mockFastify);
-      await service.createJob('full', undefined, mockUserDb as never, mockUserQdrant as never, TEST_USER_ID);
+      await service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
 
       expect(mockRestart).toHaveBeenCalledOnce();
     });
@@ -155,7 +167,13 @@ describe('ReindexService', () => {
 
     it('full reindex calls queue.onIdle() before marking completed', async () => {
       const service = new ReindexService(mockFastify);
-      await service.createJob('full', undefined, mockUserDb as never, mockUserQdrant as never, TEST_USER_ID);
+      await service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
 
       // Find the scanComplete handler registered via mockOn
       const scanCompleteCall = mockOn.mock.calls.find((call) => call[0] === 'scanComplete');
@@ -174,7 +192,13 @@ describe('ReindexService', () => {
 
     it('full reindex uses .on() (not .once()) for scanComplete listener', async () => {
       const service = new ReindexService(mockFastify);
-      await service.createJob('full', undefined, mockUserDb as never, mockUserQdrant as never, TEST_USER_ID);
+      await service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
 
       // .on() should have been called for scanComplete
       const onCalls = mockOn.mock.calls.filter((call) => call[0] === 'scanComplete');
@@ -228,7 +252,13 @@ describe('ReindexService', () => {
       mockDbGet.mockReturnValue({ contentHash: 'abc123', path: 'notes/foo.md' });
 
       const service = new ReindexService(mockFastify);
-      await service.createJob('path', 'notes/foo.md', mockUserDb as never, mockUserQdrant as never, TEST_USER_ID);
+      await service.createJob(
+        'path',
+        'notes/foo.md',
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
 
       expect(mockProcessFileChanges).toHaveBeenCalledOnce();
       const callArgs = mockProcessFileChanges.mock.calls[0]!;

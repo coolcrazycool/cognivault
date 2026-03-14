@@ -11,11 +11,9 @@ import authPlugin from './plugins/auth.js';
 import dbPlugin from './plugins/db.js';
 import embeddingPlugin from './plugins/embedding.js';
 import errorHandler from './plugins/error-handler.js';
-// TODO Phase 18: Re-enable indexer with per-user context
-// import indexerPlugin from './plugins/indexer.js';
+import indexerPlugin from './plugins/indexer.js';
 import metricsPlugin from './plugins/metrics.js';
-// TODO Phase 18: Re-enable pipeline with per-user indexing
-// import pipelinePlugin from './plugins/pipeline.js';
+import pipelinePlugin from './plugins/pipeline.js';
 import qdrantPlugin from './plugins/qdrant.js';
 import registryPlugin from './plugins/registry.js';
 import swaggerPlugin from './plugins/swagger.js';
@@ -108,9 +106,8 @@ export async function buildApp(opts?: BuildAppOptions): Promise<FastifyInstance>
   await app.register(qdrantPlugin);
   await app.register(embeddingPlugin);
   await app.register(dbPlugin);
-  // TODO Phase 18: Re-enable indexer and pipeline with per-user context
-  // await app.register(indexerPlugin);
-  // await app.register(pipelinePlugin);
+  await app.register(pipelinePlugin);
+  await app.register(indexerPlugin);
 
   // Feature routes
   await app.register(healthRoutes);

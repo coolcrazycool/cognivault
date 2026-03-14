@@ -70,10 +70,12 @@ async function buildTestApp(): Promise<FastifyInstance> {
     indexer: mockIndexer as any,
     // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial PQueue
     queue: mockPipelineQueue as any,
+    // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally empty VaultManager
     vault: {} as any,
   });
   app.decorate('indexers', indexersMap);
-  app.decorate('processFileChanges', vi.fn());
+  // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial processFileChanges
+  app.decorate('processFileChanges', vi.fn() as any);
 
   const { default: fp } = await import('fastify-plugin');
 

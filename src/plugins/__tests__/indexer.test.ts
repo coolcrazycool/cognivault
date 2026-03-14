@@ -128,24 +128,41 @@ async function buildTestApp(opts?: {
           removeListener: vi.fn(),
         } as unknown as FastifyInstance['registry']);
 
-        f.decorate('getUserDbById', vi.fn().mockReturnValue({
-          select: vi.fn().mockReturnValue({ from: vi.fn().mockReturnValue({ all: vi.fn().mockReturnValue([]) }) }),
-          update: vi.fn().mockReturnValue({ set: vi.fn().mockReturnValue({ where: vi.fn().mockReturnValue({ run: vi.fn() }) }) }),
-          insert: vi.fn().mockReturnValue({ values: vi.fn().mockReturnValue({ onConflictDoUpdate: vi.fn().mockReturnValue({ run: vi.fn() }) }) }),
-          delete: vi.fn().mockReturnValue({ where: vi.fn().mockReturnValue({ run: vi.fn() }) }),
-        }) as unknown as FastifyInstance['getUserDbById']);
+        f.decorate(
+          'getUserDbById',
+          vi.fn().mockReturnValue({
+            select: vi.fn().mockReturnValue({
+              from: vi.fn().mockReturnValue({ all: vi.fn().mockReturnValue([]) }),
+            }),
+            update: vi.fn().mockReturnValue({
+              set: vi.fn().mockReturnValue({ where: vi.fn().mockReturnValue({ run: vi.fn() }) }),
+            }),
+            insert: vi.fn().mockReturnValue({
+              values: vi.fn().mockReturnValue({
+                onConflictDoUpdate: vi.fn().mockReturnValue({ run: vi.fn() }),
+              }),
+            }),
+            delete: vi.fn().mockReturnValue({ where: vi.fn().mockReturnValue({ run: vi.fn() }) }),
+          }) as unknown as FastifyInstance['getUserDbById'],
+        );
 
-        f.decorate('createTenantQdrant', vi.fn().mockReturnValue({
-          upsert: vi.fn().mockResolvedValue({}),
-          delete: vi.fn().mockResolvedValue({}),
-          search: vi.fn().mockResolvedValue([]),
-          setPayload: vi.fn().mockResolvedValue({}),
-        }) as unknown as FastifyInstance['createTenantQdrant']);
+        f.decorate(
+          'createTenantQdrant',
+          vi.fn().mockReturnValue({
+            upsert: vi.fn().mockResolvedValue({}),
+            delete: vi.fn().mockResolvedValue({}),
+            search: vi.fn().mockResolvedValue([]),
+            setPayload: vi.fn().mockResolvedValue({}),
+          }) as unknown as FastifyInstance['createTenantQdrant'],
+        );
 
-        f.decorate('getUserEmbedder', vi.fn().mockReturnValue({
-          embed: vi.fn().mockResolvedValue([[0.1, 0.2]]),
-          dimensions: 1536,
-        }) as unknown as FastifyInstance['getUserEmbedder']);
+        f.decorate(
+          'getUserEmbedder',
+          vi.fn().mockReturnValue({
+            embed: vi.fn().mockResolvedValue([[0.1, 0.2]]),
+            dimensions: 1536,
+          }) as unknown as FastifyInstance['getUserEmbedder'],
+        );
 
         f.decorate('metrics', {
           indexQueueDepth: { set: vi.fn() },
@@ -158,7 +175,10 @@ async function buildTestApp(opts?: {
         } as unknown as FastifyInstance['metrics']);
 
         // processFileChanges is decorated by pipeline plugin
-        f.decorate('processFileChanges', vi.fn() as unknown as FastifyInstance['processFileChanges']);
+        f.decorate(
+          'processFileChanges',
+          vi.fn() as unknown as FastifyInstance['processFileChanges'],
+        );
       },
       { name: 'test-deps' },
     ),
@@ -212,7 +232,10 @@ describe('indexer plugin (per-user)', () => {
     });
 
     it('creates indexers for existing registry users on ready', async () => {
-      const users = [createMockUser('user-1', '/tmp/vault1'), createMockUser('user-2', '/tmp/vault2')];
+      const users = [
+        createMockUser('user-1', '/tmp/vault1'),
+        createMockUser('user-2', '/tmp/vault2'),
+      ];
       const app = await buildTestApp({ users });
       await app.ready();
 
@@ -306,9 +329,9 @@ describe('indexer plugin (per-user)', () => {
       expect(mockVaultIndexerStop).toHaveBeenCalled();
       expect(mockQueueClear).toHaveBeenCalled();
       expect(mockQueueOnIdle).toHaveBeenCalled();
-      expect(
-        (app.metrics.removeUserMetrics as ReturnType<typeof vi.fn>),
-      ).toHaveBeenCalledWith('user-1');
+      expect(app.metrics.removeUserMetrics as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(
+        'user-1',
+      );
 
       await app.close();
     });
@@ -352,9 +375,7 @@ describe('indexer plugin (per-user)', () => {
       await app.ready();
 
       // VaultIndexer.on should have been called with 'changes'
-      const onCall = mockVaultIndexerOn.mock.calls.find(
-        (c: unknown[]) => c[0] === 'changes',
-      );
+      const onCall = mockVaultIndexerOn.mock.calls.find((c: unknown[]) => c[0] === 'changes');
       expect(onCall).toBeDefined();
 
       await app.close();

@@ -138,25 +138,34 @@ async function buildTestApp(opts?: {
     fp(
       async (f) => {
         // Per-user DB accessor
-        f.decorate('getUserDbById', vi.fn().mockReturnValue({
-          update: dbUpdate,
-          select: dbSelect,
-        }) as unknown as FastifyInstance['getUserDbById']);
+        f.decorate(
+          'getUserDbById',
+          vi.fn().mockReturnValue({
+            update: dbUpdate,
+            select: dbSelect,
+          }) as unknown as FastifyInstance['getUserDbById'],
+        );
 
         // Per-user embedder accessor
-        f.decorate('getUserEmbedder', vi.fn().mockReturnValue({
-          embed,
-          dimensions: 1536,
-        }) as unknown as FastifyInstance['getUserEmbedder']);
+        f.decorate(
+          'getUserEmbedder',
+          vi.fn().mockReturnValue({
+            embed,
+            dimensions: 1536,
+          }) as unknown as FastifyInstance['getUserEmbedder'],
+        );
 
         // Tenant Qdrant factory
-        f.decorate('createTenantQdrant', vi.fn().mockReturnValue({
-          upsert,
-          delete: qdrantDelete,
-          setPayload,
-          search: vi.fn().mockResolvedValue([]),
-          scroll: vi.fn().mockResolvedValue({ points: [] }),
-        }) as unknown as FastifyInstance['createTenantQdrant']);
+        f.decorate(
+          'createTenantQdrant',
+          vi.fn().mockReturnValue({
+            upsert,
+            delete: qdrantDelete,
+            setPayload,
+            search: vi.fn().mockResolvedValue([]),
+            scroll: vi.fn().mockResolvedValue({ points: [] }),
+          }) as unknown as FastifyInstance['createTenantQdrant'],
+        );
 
         f.decorate('metrics', metricsObj as unknown as FastifyInstance['metrics']);
 
@@ -205,7 +214,11 @@ async function buildTestApp(opts?: {
 }
 
 // Helper: invoke processFileChanges with userId
-async function processChanges(app: FastifyInstance, userId: string, events: FileChangeEvent[]): Promise<void> {
+async function processChanges(
+  app: FastifyInstance,
+  userId: string,
+  events: FileChangeEvent[],
+): Promise<void> {
   app.processFileChanges(userId, events);
   // Let queue microtasks settle
   await new Promise<void>((resolve) => setTimeout(resolve, 50));
@@ -263,9 +276,7 @@ describe('pipeline plugin (per-user)', () => {
       expect(embed).toHaveBeenCalled();
 
       // Upsert should be called on tenant Qdrant (no collection name arg)
-      expect(upsert).toHaveBeenCalledWith(
-        expect.objectContaining({ points: expect.any(Array) }),
-      );
+      expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ points: expect.any(Array) }));
 
       // Stale cleanup on tenant Qdrant
       expect(qdrantDelete).toHaveBeenCalledWith(
@@ -298,7 +309,9 @@ describe('pipeline plugin (per-user)', () => {
       expect(call).toBeDefined();
       const firstId = call?.[0].points[0]?.id;
       expect(firstId).toBeDefined();
-      expect(firstId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+      expect(firstId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
 
       await app.close();
     });

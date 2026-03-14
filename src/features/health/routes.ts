@@ -38,8 +38,16 @@ export async function healthRoutes(fastify: FastifyInstance): Promise<void> {
       // Per-user DBs: readiness checks vault only (DB is per-user, no global DB)
       const dbOk = true;
 
-      // TODO Phase 18: Re-enable indexer status check
-      const indexing = false;
+      // Check if any per-user indexer is currently indexing
+      let indexing = false;
+      if (fastify.indexers) {
+        for (const [, entry] of fastify.indexers) {
+          if (entry.indexer.isIndexing) {
+            indexing = true;
+            break;
+          }
+        }
+      }
 
       const ready = vaultOk && dbOk;
       const status = ready ? 'ready' : 'not_ready';
