@@ -22,4 +22,4 @@ async function embeddingPlugin(fastify: FastifyInstance): Promise<void> {
   fastify.decorate('embedder', provider);
 }
 
-export default fp(embeddingPlugin, { name: 'embedder', dependencies: ['db'] });
+export default fp(embeddingPlugin, { name: 'embedder' });

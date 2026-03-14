@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { eq, like } from 'drizzle-orm';
+import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type { FastifyInstance } from 'fastify';
+import type * as schema from '../../db/schema.js';
 import { indexedFiles } from '../../db/schema.js';
+import type { TenantQdrantClient } from '../../lib/tenant-qdrant-client.js';
 
 // ── Types ──
 
@@ -16,6 +19,10 @@ export interface ReindexJob {
   completedAt?: string;
 }
 
+// TODO Phase 18: Re-enable reindex with per-user indexer and pipeline
+// Currently reindex is non-functional because pipeline is disabled.
+// The service compiles but createFullJob will fail at runtime (no pipelineQueue).
+
 export class ReindexService {
   private readonly fastify: FastifyInstance;
   private readonly jobs = new Map<string, ReindexJob>();
@@ -24,18 +31,23 @@ export class ReindexService {
     this.fastify = fastify;
   }
 
-  async createJob(scope: 'full' | 'path' | 'folder', target?: string): Promise<ReindexJob> {
+  async createJob(
+    scope: 'full' | 'path' | 'folder',
+    target: string | undefined,
+    userDb: BetterSQLite3Database<typeof schema>,
+    userQdrant: TenantQdrantClient,
+  ): Promise<ReindexJob> {
     if (scope === 'full') {
-      return this.createFullJob();
+      return this.createFullJob(userQdrant);
     } else if (scope === 'path') {
-      return this.createPathJob(target ?? '');
+      return this.createPathJob(target ?? '', userDb);
     } else {
-      return this.createFolderJob(target ?? '');
+      return this.createFolderJob(target ?? '', userDb);
     }
   }
 
-  private async createFullJob(): Promise<ReindexJob> {
-    if (this.fastify.indexer.isIndexing) {
+  private async createFullJob(userQdrant: TenantQdrantClient): Promise<ReindexJob> {
+    if (this.fastify.indexer?.isIndexing) {
       throw Object.assign(new Error('Reindex already in progress'), {
         code: 'REINDEX_IN_PROGRESS',
         statusCode: 409,
@@ -69,28 +81,31 @@ export class ReindexService {
         job.filesProcessed = filesScanned;
       }
       // Wait for all queued pipeline tasks to finish before marking completed
-      await this.fastify.pipelineQueue.onIdle();
+      await this.fastify.pipelineQueue?.onIdle();
       job.status = 'completed';
       job.completedAt = new Date().toISOString();
-      this.fastify.indexer.removeListener('changes', onChanges);
-      this.fastify.indexer.removeListener('scanComplete', onScanComplete);
+      this.fastify.indexer?.removeListener('changes', onChanges);
+      this.fastify.indexer?.removeListener('scanComplete', onScanComplete);
     };
 
-    this.fastify.indexer.on('changes', onChanges);
-    this.fastify.indexer.on('scanComplete', onScanComplete);
+    this.fastify.indexer?.on('changes', onChanges);
+    this.fastify.indexer?.on('scanComplete', onScanComplete);
 
-    // Clear all existing vectors so stale data doesn't persist
-    await this.fastify.qdrant.delete('cognivault', {
+    // Clear all existing vectors for this user so stale data doesn't persist
+    await userQdrant.delete({
       filter: { must: [{ key: 'chunk_index', range: { gte: 0 } }] },
     });
 
     // restart(true) clears DB so every file is treated as 'created' and re-embedded
-    this.fastify.indexer.restart(true);
+    this.fastify.indexer?.restart(true);
 
     return job;
   }
 
-  private async createPathJob(filePath: string): Promise<ReindexJob> {
+  private async createPathJob(
+    filePath: string,
+    userDb: BetterSQLite3Database<typeof schema>,
+  ): Promise<ReindexJob> {
     const job: ReindexJob = {
       id: randomUUID(),
       scope: 'path',
@@ -105,17 +120,13 @@ export class ReindexService {
 
     try {
       // Look up the real contentHash from indexed_files (fall back to '' if not found)
-      const row = this.fastify.db
-        .select()
-        .from(indexedFiles)
-        .where(eq(indexedFiles.path, filePath))
-        .get();
+      const row = userDb.select().from(indexedFiles).where(eq(indexedFiles.path, filePath)).get();
 
       const contentHash = row?.contentHash ?? '';
 
       // Emit a synthetic updated event for the specific file
       // The indexer (and pipeline) will handle re-processing
-      this.fastify.indexer.emit('changes', [
+      this.fastify.indexer?.emit('changes', [
         {
           path: filePath,
           type: 'updated',
@@ -135,7 +146,10 @@ export class ReindexService {
     return job;
   }
 
-  private async createFolderJob(folderPrefix: string): Promise<ReindexJob> {
+  private async createFolderJob(
+    folderPrefix: string,
+    userDb: BetterSQLite3Database<typeof schema>,
+  ): Promise<ReindexJob> {
     const job: ReindexJob = {
       id: randomUUID(),
       scope: 'folder',
@@ -150,7 +164,7 @@ export class ReindexService {
 
     try {
       // Query DB for all files matching the folder prefix
-      const files = this.fastify.db
+      const files = userDb
         .select()
         .from(indexedFiles)
         .where(like(indexedFiles.path, `${folderPrefix}%`))
@@ -160,7 +174,7 @@ export class ReindexService {
 
       if (files.length > 0) {
         // Emit batch of synthetic updated events for all files in the folder
-        this.fastify.indexer.emit(
+        this.fastify.indexer?.emit(
           'changes',
           files.map((f) => ({
             path: f.path,

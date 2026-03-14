@@ -91,24 +91,37 @@ describe('db plugin', () => {
 
     // Register vault plugin dependency (stub)
     await app.register(
-      fp(async (f) => {
-        f.decorate('vault', { vaultRootPath: testVaultDir } as unknown as Record<string, unknown>);
-      }, { name: 'vault' }),
+      fp(
+        async (f) => {
+          // biome-ignore lint/suspicious/noExplicitAny: test mock
+          f.decorate('vault', { vaultRootPath: testVaultDir } as any);
+        },
+        { name: 'vault' },
+      ),
     );
 
     // Register registry plugin dependency
     await app.register(
-      fp(async (f) => {
-        f.decorate('registry', registry as unknown as Record<string, unknown>);
-      }, { name: 'registry' }),
+      fp(
+        async (f) => {
+          // biome-ignore lint/suspicious/noExplicitAny: test mock
+          f.decorate('registry', registry as any);
+        },
+        { name: 'registry' },
+      ),
     );
 
     // Register qdrant plugin dependency (stubs)
     await app.register(
-      fp(async (f) => {
-        f.decorate('createTenantQdrant', mockCreateTenantQdrant);
-        f.decorate('purgeUserVectors', mockPurgeUserVectors);
-      }, { name: 'qdrant' }),
+      fp(
+        async (f) => {
+          // biome-ignore lint/suspicious/noExplicitAny: test mock
+          f.decorate('createTenantQdrant', mockCreateTenantQdrant as any);
+          // biome-ignore lint/suspicious/noExplicitAny: test mock
+          f.decorate('purgeUserVectors', mockPurgeUserVectors as any);
+        },
+        { name: 'qdrant' },
+      ),
     );
 
     return { app, registry, mockCreateTenantQdrant, mockPurgeUserVectors };

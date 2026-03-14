@@ -38,13 +38,17 @@ const mockDbSelect = vi.fn().mockReturnValue({
   }),
 });
 
-const mockDb = {
+const mockUserDb = {
   select: mockDbSelect,
 };
 
-const mockQdrantDelete = vi.fn().mockResolvedValue(undefined);
-const mockQdrant = {
-  delete: mockQdrantDelete,
+const mockUserQdrantDelete = vi.fn().mockResolvedValue(undefined);
+const mockUserQdrant = {
+  search: vi.fn(),
+  scroll: vi.fn(),
+  upsert: vi.fn(),
+  delete: mockUserQdrantDelete,
+  setPayload: vi.fn(),
 };
 
 const mockPipelineQueueOnIdle = vi.fn().mockResolvedValue(undefined);
@@ -59,13 +63,9 @@ async function buildTestApp(): Promise<FastifyInstance> {
 
   const app = Fastify({ logger: false });
 
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial VaultIndexer
+  // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial VaultIndexer
   app.decorate('indexer', mockIndexer as any);
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial DB
-  app.decorate('db', mockDb as any);
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial Qdrant client
-  app.decorate('qdrant', mockQdrant as any);
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial PQueue
+  // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial PQueue
   app.decorate('pipelineQueue', mockPipelineQueue as any);
 
   const { default: fp } = await import('fastify-plugin');
@@ -110,6 +110,15 @@ async function buildTestApp(): Promise<FastifyInstance> {
   const { default: authPlugin } = await import('../../../plugins/auth.js');
   await app.register(authPlugin);
 
+  // Add onRequest hook to provide getUserDb and getUserQdrant on authenticated requests
+  app.addHook('onRequest', async (request) => {
+    if (request.user) {
+      request.getUserDb = () => mockUserDb as unknown as ReturnType<typeof request.getUserDb>;
+      request.getUserQdrant = () =>
+        mockUserQdrant as unknown as ReturnType<typeof request.getUserQdrant>;
+    }
+  });
+
   // Register admin routes with prefix
   const { adminRoutes } = await import('../routes.js');
   await app.register(adminRoutes, { prefix: '/api/admin' });
@@ -132,7 +141,7 @@ describe('admin reindex routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsIndexingValue.value = false;
-    mockQdrantDelete.mockResolvedValue(undefined);
+    mockUserQdrantDelete.mockResolvedValue(undefined);
     mockPipelineQueueOnIdle.mockResolvedValue(undefined);
     mockDbSelect.mockReturnValue({
       from: vi.fn().mockReturnValue({

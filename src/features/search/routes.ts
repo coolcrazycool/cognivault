@@ -22,7 +22,7 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
           // query_ms measures total wall time including embedding (deliberate — tracks full agent latency)
           const start = Date.now();
           const { query, limit = 10, filters = {} } = request.body;
-          const searchService = new SearchService(fastify.qdrant, fastify.embedder);
+          const searchService = new SearchService(request.getUserQdrant(), fastify.embedder);
           const endTimer = fastify.metrics.searchDuration.startTimer({ type: 'semantic' });
           const results = await searchService.semantic(query, limit, filters);
           endTimer();
@@ -60,7 +60,7 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
           // query_ms measures total wall time including embedding (semantic path calls embedder)
           const start = Date.now();
           const { query, limit = 10, filters = {} } = request.body;
-          const searchService = new SearchService(fastify.qdrant, fastify.embedder);
+          const searchService = new SearchService(request.getUserQdrant(), fastify.embedder);
           const endTimer = fastify.metrics.searchDuration.startTimer({ type: 'hybrid' });
           const results = await searchService.hybrid(query, limit, filters);
           endTimer();
@@ -98,7 +98,7 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
           // query_ms measures total wall time (embedding not called for lexical — tracks Qdrant latency)
           const start = Date.now();
           const { query, limit = 10, filters = {} } = request.body;
-          const searchService = new SearchService(fastify.qdrant, fastify.embedder);
+          const searchService = new SearchService(request.getUserQdrant(), fastify.embedder);
           const endTimer = fastify.metrics.searchDuration.startTimer({ type: 'lexical' });
           const results = await searchService.lexical(query, limit, filters);
           endTimer();

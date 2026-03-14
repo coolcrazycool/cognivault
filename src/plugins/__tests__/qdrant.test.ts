@@ -98,9 +98,7 @@ describe('qdrantPlugin', () => {
     await app.register(qdrantPlugin);
     await app.ready();
 
-    const indexedFields = mockCreatePayloadIndex.mock.calls.map(
-      (call) => call[1].field_name,
-    );
+    const indexedFields = mockCreatePayloadIndex.mock.calls.map((call) => call[1].field_name);
 
     expect(indexedFields).toContain('path');
     expect(indexedFields).toContain('tags');
@@ -128,9 +126,7 @@ describe('qdrantPlugin', () => {
     await app.register(qdrantPlugin);
     await app.ready();
 
-    const indexedFields = mockCreatePayloadIndex.mock.calls.map(
-      (call) => call[1].field_name,
-    );
+    const indexedFields = mockCreatePayloadIndex.mock.calls.map((call) => call[1].field_name);
     expect(indexedFields).toContain('user_id');
 
     const userIdCall = mockCreatePayloadIndex.mock.calls.find(
@@ -225,9 +221,7 @@ describe('qdrantPlugin', () => {
     // Keyword/integer indexes are NOT created (inside if (!exists) block)
     expect(mockCreateCollection).not.toHaveBeenCalled();
     // Text indexes + user_id index ARE created idempotently (outside if (!exists) block)
-    const indexedFields = mockCreatePayloadIndex.mock.calls.map(
-      (call) => call[1].field_name,
-    );
+    const indexedFields = mockCreatePayloadIndex.mock.calls.map((call) => call[1].field_name);
     expect(indexedFields).toContain('text');
     expect(indexedFields).toContain('title');
     expect(indexedFields).toContain('section_path');
@@ -252,9 +246,7 @@ describe('qdrantPlugin', () => {
     await app.ready();
 
     const textIndexCalls = mockCreatePayloadIndex.mock.calls.filter(
-      (call) =>
-        typeof call[1].field_schema === 'object' &&
-        call[1].field_schema.type === 'text',
+      (call) => typeof call[1].field_schema === 'object' && call[1].field_schema.type === 'text',
     );
     expect(textIndexCalls.length).toBe(3);
     for (const call of textIndexCalls) {

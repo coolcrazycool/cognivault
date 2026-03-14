@@ -102,23 +102,8 @@ describe('vault routes', () => {
   beforeAll(async () => {
     app = await buildApp({ logger: false });
     await app.ready();
-    // Wait for the initial vault scan to complete and all pipeline queue tasks
-    // to drain before running tests. The indexer's initial scan is fire-and-forget
-    // from the onReady hook, so we must wait for scanComplete + queue idle to
-    // prevent ERR_HTTP_HEADERS_SENT unhandled errors during concurrent tests.
-    await new Promise<void>((resolve) => {
-      // If already done scanning, onIdle resolves immediately
-      app.indexer.once('scanComplete', () => {
-        void app.pipelineQueue.onIdle().then(resolve);
-      });
-      // Guard: if scan somehow already finished before we registered the listener,
-      // just wait for the queue to be idle (it will resolve immediately if empty)
-      void app.pipelineQueue.onIdle().then(() => {
-        // Check if indexer is no longer indexing — scan must be done
-        if (!app.indexer.isIndexing) resolve();
-      });
-    });
-    app.indexer.stop();
+    // Indexer and pipeline are disabled in Phase 17 (per-user refactoring).
+    // No need to wait for scan completion.
   });
 
   afterAll(async () => {

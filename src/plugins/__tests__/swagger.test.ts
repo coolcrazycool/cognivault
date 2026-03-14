@@ -1,7 +1,6 @@
 import type { FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-
 import { Registry as PromRegistry } from 'prom-client';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 // Set env vars before any module imports that trigger config parsing
 process.env.VAULT_PATH = '/tmp/test-vault-swagger';

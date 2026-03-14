@@ -1,6 +1,5 @@
-import type { QdrantClient } from '@qdrant/js-client-rest';
 import type { EmbeddingProvider } from '../../lib/embedding.js';
-import { COLLECTION_NAME } from '../../plugins/qdrant.js';
+import type { TenantQdrantClient } from '../../lib/tenant-qdrant-client.js';
 import type { SearchFilters, SearchResult } from './schemas.js';
 
 // Qdrant internal types we need
@@ -38,10 +37,10 @@ interface QdrantFilter {
 }
 
 export class SearchService {
-  private readonly qdrant: QdrantClient;
+  private readonly qdrant: TenantQdrantClient;
   private readonly embedder: EmbeddingProvider;
 
-  constructor(qdrant: QdrantClient, embedder: EmbeddingProvider) {
+  constructor(qdrant: TenantQdrantClient, embedder: EmbeddingProvider) {
     this.qdrant = qdrant;
     this.embedder = embedder;
   }
@@ -50,11 +49,11 @@ export class SearchService {
     const [embedding] = await this.embedder.embed([query]);
     const folderPrefix = filters.folder;
 
-    const result = await this.qdrant.search(COLLECTION_NAME, {
+    const result = await this.qdrant.search({
       vector: embedding as number[],
       limit,
       with_payload: true,
-      filter: this.buildFilter(filters) as Parameters<QdrantClient['search']>[1]['filter'],
+      filter: this.buildFilter(filters) as { must?: unknown[] },
     });
 
     const points = result as unknown as ScoredPoint[];
@@ -84,18 +83,13 @@ export class SearchService {
       filter.must = mustConditions;
     }
 
-    const result = await (
-      this.qdrant.scroll as unknown as (
-        collection: string,
-        opts: { filter: unknown; limit: number; with_payload: boolean },
-      ) => Promise<unknown>
-    )(COLLECTION_NAME, {
-      filter,
+    const result = await this.qdrant.scroll({
+      filter: filter as { must?: unknown[]; should?: unknown[] },
       limit,
       with_payload: true,
     });
 
-    // scroll() returns result.points (not result.result) — see Qdrant JS client docs
+    // scroll() returns result.points (not result.result) -- see Qdrant JS client docs
     const scrollResult = result as unknown as { points: ScrollPoint[] };
     const points = scrollResult.points;
 
@@ -115,7 +109,7 @@ export class SearchService {
       this.lexical(query, limit * 2, filters),
     ]);
 
-    // RRF fusion with hardcoded K=60 (per user decision — no env config)
+    // RRF fusion with hardcoded K=60 (per user decision -- no env config)
     const RRF_K = 60;
     const scoreMap = new Map<string, { result: SearchResult; score: number }>();
 
@@ -171,14 +165,14 @@ export class SearchService {
       conditions.push({ key: 'type', match: { value: filters.type } });
     }
 
-    // folder filter is NOT pushed to Qdrant here — path is keyword-indexed (exact match only).
+    // folder filter is NOT pushed to Qdrant here -- path is keyword-indexed (exact match only).
     // Instead, we post-filter results by path.startsWith() in the caller.
 
     return conditions;
   }
 
   private normalizeScore(raw: number): number {
-    // Clamp to [0, 1] range — no min-max normalization per batch (anti-pattern for consistency)
+    // Clamp to [0, 1] range -- no min-max normalization per batch (anti-pattern for consistency)
     return Math.min(1, Math.max(0, raw));
   }
 

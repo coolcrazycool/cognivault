@@ -95,9 +95,12 @@ const mockQdrantSearch = vi.fn().mockResolvedValue(MOCK_SCORED_POINTS);
 const mockQdrantScroll = vi.fn().mockResolvedValue(MOCK_SCROLL_RESULT);
 const mockEmbed = vi.fn().mockResolvedValue(MOCK_EMBEDDING);
 
-const mockQdrant = {
+const mockTenantQdrant = {
   search: mockQdrantSearch,
   scroll: mockQdrantScroll,
+  upsert: vi.fn(),
+  delete: vi.fn(),
+  setPayload: vi.fn(),
 };
 
 const mockEmbedder = {
@@ -112,10 +115,7 @@ async function buildTestApp(): Promise<FastifyInstance> {
 
   const app = Fastify({ logger: false });
 
-  // Decorate with mocked qdrant and embedder (cast to satisfy Fastify TypeScript type checks)
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial QdrantClient
-  app.decorate('qdrant', mockQdrant as any);
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial EmbeddingProvider
+  // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial EmbeddingProvider
   app.decorate('embedder', mockEmbedder as any);
   const { default: fp } = await import('fastify-plugin');
 
@@ -164,6 +164,14 @@ async function buildTestApp(): Promise<FastifyInstance> {
   // Register auth plugin so auth is enforced
   const { default: authPlugin } = await import('../../../plugins/auth.js');
   await app.register(authPlugin);
+
+  // Add onRequest hook to provide getUserQdrant on authenticated requests
+  app.addHook('onRequest', async (request) => {
+    if (request.user) {
+      request.getUserQdrant = () =>
+        mockTenantQdrant as unknown as ReturnType<typeof request.getUserQdrant>;
+    }
+  });
 
   // Register context routes with prefix
   const { contextRoutes } = await import('../routes.js');
@@ -420,7 +428,6 @@ describe('context routes', () => {
       // Hybrid search calls both qdrant.search (semantic) and qdrant.scroll (lexical)
       // Both should have been called with filter conditions
       expect(mockQdrantSearch).toHaveBeenCalledWith(
-        'cognivault',
         expect.objectContaining({
           filter: expect.objectContaining({
             must: expect.arrayContaining([{ key: 'tags', match: { any: ['architecture'] } }]),
@@ -441,10 +448,7 @@ describe('context routes', () => {
       });
 
       // Semantic side uses qdrant.search with limit=100 (50 * 2x oversampling in hybrid)
-      expect(mockQdrantSearch).toHaveBeenCalledWith(
-        'cognivault',
-        expect.objectContaining({ limit: 100 }),
-      );
+      expect(mockQdrantSearch).toHaveBeenCalledWith(expect.objectContaining({ limit: 100 }));
     });
 
     it('meta.query_ms is a non-negative integer', async () => {

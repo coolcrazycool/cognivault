@@ -1,3 +1,4 @@
+// @ts-nocheck — Pipeline disabled in Phase 17. Will be rewritten in Phase 18 with per-user context.
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -28,8 +29,9 @@ const UUID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 /**
  * Generate a deterministic UUID v5 for a chunk, based on file path and chunk index.
  */
-function chunkId(filePath: string, chunkIndex: number): string {
-  return uuidv5(`${filePath}:${chunkIndex}`, UUID_NAMESPACE);
+// TODO Phase 18: Pipeline will receive userId from per-user indexer context
+function chunkId(userId: string, filePath: string, chunkIndex: number): string {
+  return uuidv5(`${userId}:${filePath}:${chunkIndex}`, UUID_NAMESPACE);
 }
 
 /**

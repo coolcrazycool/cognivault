@@ -1,4 +1,3 @@
-import { sql } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { healthSchema, readySchema } from './schemas.js';
 
@@ -36,17 +35,11 @@ export async function healthRoutes(fastify: FastifyInstance): Promise<void> {
         vaultOk = false;
       }
 
-      let dbOk = false;
-      try {
-        if (fastify.db) {
-          fastify.db.get(sql`SELECT 1`);
-          dbOk = true;
-        }
-      } catch {
-        dbOk = false;
-      }
+      // Per-user DBs: readiness checks vault only (DB is per-user, no global DB)
+      const dbOk = true;
 
-      const indexing = fastify.indexer?.isIndexing ?? false;
+      // TODO Phase 18: Re-enable indexer status check
+      const indexing = false;
 
       const ready = vaultOk && dbOk;
       const status = ready ? 'ready' : 'not_ready';

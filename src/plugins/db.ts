@@ -8,16 +8,19 @@ import { createDatabase } from '../db/client.js';
 import type * as schema from '../db/schema.js';
 import type { TenantQdrantClient } from '../lib/tenant-qdrant-client.js';
 
+type DbInstance = BetterSQLite3Database<typeof schema>;
+type SqliteInstance = ReturnType<typeof import('../db/client.js').createDatabase>['sqlite'];
+
 declare module 'fastify' {
   interface FastifyRequest {
-    getUserDb: () => BetterSQLite3Database<typeof schema>;
+    getUserDb: () => DbInstance;
     getUserQdrant: () => TenantQdrantClient;
   }
 }
 
 interface UserDb {
-  db: BetterSQLite3Database<typeof schema>;
-  sqlite: InstanceType<typeof import('better-sqlite3').default>;
+  db: DbInstance;
+  sqlite: SqliteInstance;
 }
 
 const userDbs = new Map<string, UserDb>();
@@ -85,9 +88,15 @@ async function dbPlugin(fastify: FastifyInstance): Promise<void> {
     fastify.log.info({ userId: user.userId }, 'Removed per-user database and vectors');
   });
 
-  // Decorate request with getUserDb and getUserQdrant
-  fastify.decorateRequest('getUserDb', null);
-  fastify.decorateRequest('getUserQdrant', null);
+  // Decorate request with getUserDb and getUserQdrant (placeholder functions replaced per-request)
+  const noDbError = (): never => {
+    throw new Error('getUserDb called on unauthenticated request');
+  };
+  const noQdrantError = (): never => {
+    throw new Error('getUserQdrant called on unauthenticated request');
+  };
+  fastify.decorateRequest('getUserDb', noDbError);
+  fastify.decorateRequest('getUserQdrant', noQdrantError);
 
   fastify.addHook('onRequest', async (request) => {
     if (!request.user) return; // unauthenticated routes (health, etc.)
