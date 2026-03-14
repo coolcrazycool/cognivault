@@ -166,7 +166,11 @@ Plans:
   1. Phase 19 has a VERIFICATION.md that verifies all 8 CLI/SYNC requirements against the codebase
   2. Phase 20 VERIFICATION.md reflects OBS-03 as resolved
   3. All 19 v2.0 requirements show "satisfied" in a 3-source cross-reference
-**Plans:** 0/? plans (not yet planned)
+**Plans:** 2 plans
+
+Plans:
+- [ ] 22-01-PLAN.md — Commit working tree, write Phase 19 VERIFICATION.md, update Phase 20 VERIFICATION.md
+- [ ] 22-02-PLAN.md — Close milestone audit, update REQUIREMENTS.md, mark milestone complete
 
 ## Progress
 
