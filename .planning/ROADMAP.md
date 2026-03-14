@@ -98,7 +98,7 @@ Plans:
   2. Search, context pack, and admin routes return only data belonging to the authenticated user
   3. Prometheus metrics carry a user_id label on every counter/histogram increment
   4. Adding or removing a user in the registry starts or stops that user's indexer without affecting other users
-**Plans:** 1/3 plans executed
+**Plans:** 2/3 plans executed
 
 Plans:
 - [ ] 18-01-PLAN.md — Metrics user_id labels, per-user embedding Map, qdrant decoupling, DB accessor, config update
@@ -163,6 +163,6 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 15. Registry Foundation | 2/2 | Complete    | 2026-03-14 | - |
 | 16. Multi-Tenant Auth | v2.0 | Complete    | 2026-03-14 | 2026-03-14 |
 | 17. Data Isolation | 2/2 | Complete    | 2026-03-14 | - |
-| 18. Per-User Indexing and Routes | 1/3 | In Progress|  | - |
+| 18. Per-User Indexing and Routes | 2/3 | In Progress|  | - |
 | 19. CLI and Vault Sync | v2.0 | 0/TBD | Not started | - |
 | 20. Docker and Integration Hardening | v2.0 | 0/TBD | Not started | - |

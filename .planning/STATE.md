@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
 status: executing
-stopped_at: Completed 18-01-PLAN.md
-last_updated: "2026-03-14T10:00:55.615Z"
-last_activity: 2026-03-14 — Phase 18 Plan 01 (Plugin Refactoring) complete
+stopped_at: Completed 18-02-PLAN.md
+last_updated: "2026-03-14T10:09:13Z"
+last_activity: 2026-03-14 — Phase 18 Plan 02 (Indexer & Pipeline Rewrite) complete
 progress:
   total_phases: 6
   completed_phases: 3
   total_plans: 8
-  completed_plans: 6
-  percent: 75
+  completed_plans: 7
+  percent: 88
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-14)
 ## Current Position
 
 Phase: 18 of 20 (Per-User Indexing and Routes) — fourth of 6 v2.0 phases
-Plan: 01 of 03 complete (Plugin Refactoring)
+Plan: 02 of 03 complete (Indexer & Pipeline Rewrite)
 Status: Phase 18 in progress
-Last activity: 2026-03-14 — Phase 18 Plan 01 (Plugin Refactoring) complete
+Last activity: 2026-03-14 — Phase 18 Plan 02 (Indexer & Pipeline Rewrite) complete
 
-Progress: [████████░░] 75%
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
@@ -67,6 +67,9 @@ All decisions logged in PROJECT.md Key Decisions table.
 - [Phase 18]: Qdrant uses DIMENSION_MAP[config.EMBEDDING_MODEL] instead of fastify.embedder.dimensions (2026-03-14)
 - [Phase 18]: Per-user EmbeddingProvider Map with registry event lifecycle (2026-03-14)
 - [Phase 18]: No validate() on per-user embedder creation — fail on first use (2026-03-14)
+- [Phase 18]: Pipeline does NOT depend on indexer; reversed dep via processFileChanges (2026-03-14)
+- [Phase 18]: Queue depth gauge update in finally block (PQueue events lack userId) (2026-03-14)
+- [Phase 18]: Admin reindex uses processFileChanges instead of indexer.emit for path/folder (2026-03-14)
 
 ### Roadmap Evolution
 
@@ -84,6 +87,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T10:00:49.977Z
-Stopped at: Completed 18-01-PLAN.md
+Last session: 2026-03-14T10:09:13Z
+Stopped at: Completed 18-02-PLAN.md
 Resume file: None
