@@ -163,6 +163,6 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 15. Registry Foundation | 2/2 | Complete    | 2026-03-14 | - |
 | 16. Multi-Tenant Auth | v2.0 | Complete    | 2026-03-14 | 2026-03-14 |
 | 17. Data Isolation | 2/2 | Complete    | 2026-03-14 | - |
-| 18. Per-User Indexing and Routes | 3/3 | Complete   | 2026-03-14 | - |
+| 18. Per-User Indexing and Routes | 3/3 | Complete    | 2026-03-14 | - |
 | 19. CLI and Vault Sync | v2.0 | 0/TBD | Not started | - |
 | 20. Docker and Integration Hardening | v2.0 | 0/TBD | Not started | - |
