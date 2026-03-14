@@ -39,7 +39,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 
 - [x] **Phase 15: Registry Foundation** - User registry data store with hot-reload and atomic writes (completed 2026-03-14)
 - [x] **Phase 16: Multi-Tenant Auth** - API key resolves to user context on every request (completed 2026-03-14)
-- [ ] **Phase 17: Data Isolation** - Per-user Qdrant filtering and separate SQLite databases
+- [x] **Phase 17: Data Isolation** - Per-user Qdrant filtering and separate SQLite databases (completed 2026-03-14)
 - [ ] **Phase 18: Per-User Indexing and Routes** - Multi-tenant indexing pipeline and API route migration
 - [ ] **Phase 19: CLI and Vault Sync** - Operator CLI for user lifecycle and obsidian-headless sync management
 - [ ] **Phase 20: Docker and Integration Hardening** - Container rewrite with tini, end-to-end isolation tests, multi-tenant observability dashboards
@@ -83,7 +83,7 @@ Plans:
   1. Qdrant queries always include a mandatory user_id filter; a search by User A returns zero results from User B's vectors
   2. Each user has a separate SQLite database file at a user-scoped path (e.g., data/{userId}/index.db)
   3. Adding a new user via registry creates their SQLite database with correct schema on first access
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 - [ ] 17-01-PLAN.md — TenantQdrantClient wrapper (TDD) + qdrant plugin refactoring (user_id index, legacy purge, internalize raw client)
@@ -161,7 +161,7 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 14. Infrastructure Hardening & Cleanup | v1.0 | 3/3 | Complete | 2026-03-12 |
 | 15. Registry Foundation | 2/2 | Complete    | 2026-03-14 | - |
 | 16. Multi-Tenant Auth | v2.0 | Complete    | 2026-03-14 | 2026-03-14 |
-| 17. Data Isolation | 1/2 | In Progress|  | - |
+| 17. Data Isolation | 2/2 | Complete   | 2026-03-14 | - |
 | 18. Per-User Indexing and Routes | v2.0 | 0/TBD | Not started | - |
 | 19. CLI and Vault Sync | v2.0 | 0/TBD | Not started | - |
 | 20. Docker and Integration Hardening | v2.0 | 0/TBD | Not started | - |

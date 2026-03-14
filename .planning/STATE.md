@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
 status: completed
-stopped_at: Completed 17-01-PLAN.md
-last_updated: "2026-03-14T08:01:35.562Z"
-last_activity: 2026-03-14 — Phase 17 Plan 01 (Qdrant Tenant Isolation) complete
+stopped_at: Completed 17-02-PLAN.md
+last_updated: "2026-03-14T08:20:53.325Z"
+last_activity: 2026-03-14 — Phase 17 Plan 02 (Per-User DB Plugin) complete
 progress:
   total_phases: 6
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 5
-  completed_plans: 4
+  completed_plans: 5
   percent: 80
 ---
 
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-03-14)
 ## Current Position
 
 Phase: 17 of 20 (Data Isolation) — third of 6 v2.0 phases
-Plan: 01 of 02 complete (Qdrant Tenant Isolation)
-Status: Plan 17-01 complete
-Last activity: 2026-03-14 — Phase 17 Plan 01 (Qdrant Tenant Isolation) complete
+Plan: 02 of 02 complete (Per-User DB + Search Tenant Isolation)
+Status: Phase 17 complete
+Last activity: 2026-03-14 — Phase 17 Plan 02 (Per-User DB Plugin) complete
 
 Progress: [████████░░] 80%
 
@@ -62,6 +62,8 @@ All decisions logged in PROJECT.md Key Decisions table.
 - Filter merging via unknown[] types with Record cast at Qdrant client boundary (2026-03-14)
 - Raw QdrantClient kept local in plugin closure, exposed only via createTenantQdrant factory (2026-03-14)
 - [Phase 17]: Filter merging via unknown[] types with Record cast at Qdrant client boundary
+- [Phase 17]: Disabled pipeline and indexer entirely for Phase 17 (clean break for Phase 18 multi-tenant refactoring)
+- [Phase 17]: Per-user SQLite via Map<userId, db> with request decorators getUserDb/getUserQdrant
 
 ### Roadmap Evolution
 
@@ -79,6 +81,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T08:01:30.225Z
-Stopped at: Completed 17-01-PLAN.md
+Last session: 2026-03-14T08:20:53.323Z
+Stopped at: Completed 17-02-PLAN.md
 Resume file: None
