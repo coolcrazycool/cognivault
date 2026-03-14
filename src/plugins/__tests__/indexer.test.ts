@@ -29,6 +29,7 @@ vi.mock('../../lib/vault.js', () => {
     constructor(rootPath: string) {
       this.vaultRootPath = rootPath;
     }
+    initialize = vi.fn().mockResolvedValue(undefined);
     listFiles = vi.fn().mockResolvedValue({ entries: [] });
     readContent = vi.fn().mockResolvedValue({ content: '' });
   }

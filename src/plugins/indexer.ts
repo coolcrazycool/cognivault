@@ -40,6 +40,7 @@ async function createUserIndexer(
   }
 
   const vault = new VaultManager(vaultPath);
+  await vault.initialize();
   const db = fastify.getUserDbById(userId);
   const logger = fastify.log.child({ userId });
 
