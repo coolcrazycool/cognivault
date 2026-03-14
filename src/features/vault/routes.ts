@@ -1,4 +1,5 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { VaultManager } from '../../lib/vault.js';
 import { VaultError } from '../../lib/vault.js';
 import type {
   AppendContentBody,
@@ -32,14 +33,31 @@ function handleVaultError(err: unknown, reply: FastifyReply): FastifyReply {
   throw err;
 }
 
+function getUserVault(fastify: FastifyInstance, request: FastifyRequest): VaultManager {
+  // v2.0 multi-tenant: get per-user vault from indexer
+  const userId = request.user?.userId;
+  if (userId) {
+    const entry = fastify.indexers.get(userId);
+    if (entry) {
+      return entry.vault;
+    }
+  }
+  // v1.0 fallback: global vault
+  if (fastify.vault) {
+    return fastify.vault;
+  }
+  throw new VaultError('No vault available for this user', 'VAULT_NOT_FOUND', 404);
+}
+
 export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get<{ Querystring: ListFilesQuery }>(
     '/files',
     { schema: listFilesSchema },
     async (request, reply) => {
       try {
+        const vault = getUserVault(fastify, request);
         const { path, recursive, ext } = request.query;
-        const result = await fastify.vault.listFiles({ path, recursive, ext });
+        const result = await vault.listFiles({ path, recursive, ext });
         return result;
       } catch (err: unknown) {
         return handleVaultError(err, reply);
@@ -52,7 +70,8 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
     { schema: contentSchema },
     async (request, reply) => {
       try {
-        const result = await fastify.vault.readContent(request.query.path);
+        const vault = getUserVault(fastify, request);
+        const result = await vault.readContent(request.query.path);
         return result;
       } catch (err: unknown) {
         return handleVaultError(err, reply);
@@ -65,7 +84,8 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
     { schema: metadataSchema },
     async (request, reply) => {
       try {
-        const result = await fastify.vault.readMetadata(request.query.path);
+        const vault = getUserVault(fastify, request);
+        const result = await vault.readMetadata(request.query.path);
         return result;
       } catch (err: unknown) {
         return handleVaultError(err, reply);
@@ -78,8 +98,9 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
     { schema: createNoteSchema },
     async (request, reply) => {
       try {
+        const vault = getUserVault(fastify, request);
         const { path, content, frontmatter } = request.body;
-        const result = await fastify.vault.createNote(path, content, frontmatter);
+        const result = await vault.createNote(path, content, frontmatter);
         reply.status(201);
         return result;
       } catch (err: unknown) {
@@ -93,8 +114,9 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
     { schema: updateContentSchema },
     async (request, reply) => {
       try {
+        const vault = getUserVault(fastify, request);
         const { path, content } = request.body;
-        const result = await fastify.vault.updateContent(path, content);
+        const result = await vault.updateContent(path, content);
         return result;
       } catch (err: unknown) {
         return handleVaultError(err, reply);
@@ -107,8 +129,9 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
     { schema: appendContentSchema },
     async (request, reply) => {
       try {
+        const vault = getUserVault(fastify, request);
         const { path, content, mode } = request.body;
-        const result = await fastify.vault.appendContent(path, content, mode);
+        const result = await vault.appendContent(path, content, mode);
         return result;
       } catch (err: unknown) {
         return handleVaultError(err, reply);
@@ -121,8 +144,9 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
     { schema: deleteNoteSchema },
     async (request, reply) => {
       try {
+        const vault = getUserVault(fastify, request);
         const { path } = request.body;
-        const result = await fastify.vault.deleteNote(path);
+        const result = await vault.deleteNote(path);
         return result;
       } catch (err: unknown) {
         return handleVaultError(err, reply);
@@ -135,8 +159,9 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
     { schema: moveNoteSchema },
     async (request, reply) => {
       try {
+        const vault = getUserVault(fastify, request);
         const { from, to } = request.body;
-        const result = await fastify.vault.moveNote(from, to);
+        const result = await vault.moveNote(from, to);
         return result;
       } catch (err: unknown) {
         return handleVaultError(err, reply);
@@ -149,8 +174,9 @@ export async function vaultRoutes(fastify: FastifyInstance): Promise<void> {
     { schema: updateMetadataSchema },
     async (request, reply) => {
       try {
+        const vault = getUserVault(fastify, request);
         const { path, metadata } = request.body;
-        const result = await fastify.vault.updateMetadata(path, metadata);
+        const result = await vault.updateMetadata(path, metadata);
         return result;
       } catch (err: unknown) {
         return handleVaultError(err, reply);
