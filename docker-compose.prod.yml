@@ -1,0 +1,42 @@
+# Production docker-compose for CogniVault.
+# Deploys from the pre-built image on GitHub Container Registry (GHCR).
+# No source checkout required — pull and run on any server:
+#   docker-compose -f docker-compose.prod.yml up -d
+
+services:
+  cognivault:
+    image: ghcr.io/coolcrazycool/cognivault:latest
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - COGNIVAULT_DATA_DIR=/data
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - cognivault_data:/data
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', r => process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.17.0
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  cognivault_data:
+  qdrant_data:
