@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
 status: in-progress
-stopped_at: Completed 20-docker-and-integration-hardening-01-PLAN.md
-last_updated: "2026-03-14T13:27:18.769Z"
+stopped_at: Completed 20-docker-and-integration-hardening-03-PLAN.md
+last_updated: "2026-03-14T13:35:09.617Z"
 last_activity: 2026-03-14 — Phase 19 Plan 02 (Sync Plugin) complete
 progress:
   total_phases: 6
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 14
-  completed_plans: 12
+  completed_plans: 13
   percent: 67
 ---
 
@@ -82,6 +82,8 @@ All decisions logged in PROJECT.md Key Decisions table.
 - [Phase 20]: prom-client .remove() on user-removed event to purge stale label combinations instead of .set(0)
 - [Phase 20-docker-and-integration-hardening]: tini installed via apt-get as ENTRYPOINT for PID 1 signal forwarding to ob sync processes
 - [Phase 20-docker-and-integration-hardening]: VAULT_PATH made optional in config.ts; vault.ts guard skips plugin when unset for v2.0 multi-tenant mode
+- [Phase 20-docker-and-integration-hardening]: describe.skipIf guard for isolation test — skips cleanly without QDRANT_URL or OPENAI_API_KEY
+- [Phase 20-docker-and-integration-hardening]: Dockerfile HEALTHCHECK uses Node.js fetch API — avoids adding curl to production image; interval=5s start-period=10s
 
 ### Roadmap Evolution
 
@@ -99,6 +101,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T13:27:18.767Z
-Stopped at: Completed 20-docker-and-integration-hardening-01-PLAN.md
+Last session: 2026-03-14T13:35:09.615Z
+Stopped at: Completed 20-docker-and-integration-hardening-03-PLAN.md
 Resume file: None
