@@ -36,7 +36,7 @@ Requirements for multi-user deployment. Each maps to roadmap phases.
 
 - [x] **OBS-01**: Every metric emitted carries a user_id label matching the request's tenant
 - [x] **OBS-02**: Prometheus scrapes single CogniVault instance; Grafana filters by user_id template variable
-- [ ] **OBS-03**: Per-user sync process health is exposed as a gauge metric
+- [x] **OBS-03**: Per-user sync process health is exposed as a gauge metric
 
 ### Container Infrastructure
 
@@ -102,7 +102,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CLI-04 | Phase 19 → 21, 22 | Pending |
 | OBS-01 | Phase 18 | Complete |
 | OBS-02 | Phase 20 | Complete |
-| OBS-03 | Phase 20 → 21 | Pending |
+| OBS-03 | Phase 20 → 21 | Complete |
 | INFRA-01 | Phase 20 | Complete |
 | INFRA-02 | Phase 20 | Complete |
 | INFRA-03 | Phase 20 | Complete |
@@ -110,8 +110,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 **Coverage:**
 - v2.0 requirements: 19 total
 - Mapped to phases: 19
-- Satisfied: 10
-- Pending (gap closure): 9
+- Satisfied: 11
+- Pending (gap closure): 8
 - Unmapped: 0
 
 ---
