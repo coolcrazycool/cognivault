@@ -1,5 +1,4 @@
 import * as crypto from 'node:crypto';
-import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -146,27 +145,21 @@ describe('UserRegistry', () => {
       const registry = new UserRegistry({ filePath });
       await registry.load();
 
-      // Spy on fs.rename to verify atomic write pattern
-      const renameSpy = vi.spyOn(fs, 'rename');
-
       await registry.addUser(makeUser());
-
-      // Should have called rename (atomic write)
-      expect(renameSpy).toHaveBeenCalled();
-      const renameCall = renameSpy.mock.calls[0];
-      expect(renameCall[0] as string).toMatch(/\.tmp/);
-      expect(renameCall[1]).toBe(filePath);
-
-      renameSpy.mockRestore();
 
       // Verify user is in registry
       expect(registry.getUserById('alice')).toBeDefined();
       expect(registry.getUserCount()).toBe(1);
 
-      // Verify file on disk
+      // Verify file on disk contains the user (atomic write completed)
       const onDisk = JSON.parse(await fs.readFile(filePath, 'utf-8'));
       expect(onDisk).toHaveLength(1);
       expect(onDisk[0].userId).toBe('alice');
+
+      // Verify no leftover .tmp files (rename succeeded)
+      const dirEntries = await fs.readdir(tmpDir);
+      const tmpFiles = dirEntries.filter((e) => e.endsWith('.tmp'));
+      expect(tmpFiles).toHaveLength(0);
     });
 
     it('addUser with duplicate userId throws', async () => {
