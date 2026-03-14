@@ -15,7 +15,7 @@ Requirements for multi-user deployment. Each maps to roadmap phases.
 
 ### Data Isolation
 
-- [ ] **DATA-01**: Each user's Qdrant vectors are filtered by user_id payload; cross-tenant queries are structurally impossible
+- [x] **DATA-01**: Each user's Qdrant vectors are filtered by user_id payload; cross-tenant queries are structurally impossible
 - [ ] **DATA-02**: Each user has a separate SQLite database for index state, stored at a user-scoped path
 
 ### Vault Sync
@@ -90,7 +90,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TENANT-01 | Phase 16 | Complete |
 | TENANT-02 | Phase 15 | Complete |
 | TENANT-03 | Phase 15 | Complete |
-| DATA-01 | Phase 17 | Pending |
+| DATA-01 | Phase 17 | Complete |
 | DATA-02 | Phase 17 | Pending |
 | SYNC-01 | Phase 19 | Pending |
 | SYNC-02 | Phase 19 | Pending |

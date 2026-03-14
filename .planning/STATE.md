@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
 status: completed
-stopped_at: Phase 17 context gathered
-last_updated: "2026-03-14T07:41:49.519Z"
-last_activity: 2026-03-14 — Phase 16 Plan 01 (Registry Auth) complete
+stopped_at: Completed 17-01-PLAN.md
+last_updated: "2026-03-14T08:01:35.562Z"
+last_activity: 2026-03-14 — Phase 17 Plan 01 (Qdrant Tenant Isolation) complete
 progress:
   total_phases: 6
   completed_phases: 2
-  total_plans: 3
-  completed_plans: 3
-  percent: 15
+  total_plans: 5
+  completed_plans: 4
+  percent: 80
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-14)
 
 **Core value:** AI agents can find and retrieve the right knowledge from an Obsidian vault in under one second, with high precision across mixed Russian/English content, exact technical terms, and freeform metadata.
-**Current focus:** v2.0 Multi-User — Phase 16: Per-User Container Stack
+**Current focus:** v2.0 Multi-User — Phase 17: Data Isolation
 
 ## Current Position
 
-Phase: 16 of 20 (Per-User Container Stack) — second of 6 v2.0 phases
-Plan: 01 complete (Registry Auth)
-Status: Plan 16-01 complete
-Last activity: 2026-03-14 — Phase 16 Plan 01 (Registry Auth) complete
+Phase: 17 of 20 (Data Isolation) — third of 6 v2.0 phases
+Plan: 01 of 02 complete (Qdrant Tenant Isolation)
+Status: Plan 17-01 complete
+Last activity: 2026-03-14 — Phase 17 Plan 01 (Qdrant Tenant Isolation) complete
 
-Progress: [█▌░░░░░░░░] 15%
+Progress: [████████░░] 80%
 
 ## Performance Metrics
 
@@ -59,6 +59,9 @@ All decisions logged in PROJECT.md Key Decisions table.
 - Single generic 401 response for all auth failure modes — no information leakage (2026-03-14)
 - Auth failure counter on shared promRegistry for Prometheus scraping (2026-03-14)
 - request.log enriched with userId via child logger after successful auth (2026-03-14)
+- Filter merging via unknown[] types with Record cast at Qdrant client boundary (2026-03-14)
+- Raw QdrantClient kept local in plugin closure, exposed only via createTenantQdrant factory (2026-03-14)
+- [Phase 17]: Filter merging via unknown[] types with Record cast at Qdrant client boundary
 
 ### Roadmap Evolution
 
@@ -76,6 +79,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T07:41:49.516Z
-Stopped at: Phase 17 context gathered
-Resume file: .planning/phases/17-data-isolation/17-CONTEXT.md
+Last session: 2026-03-14T08:01:30.225Z
+Stopped at: Completed 17-01-PLAN.md
+Resume file: None
