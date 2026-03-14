@@ -20,15 +20,19 @@ export async function contextRoutes(fastify: FastifyInstance): Promise<void> {
         }
         try {
           const start = Date.now();
+          const userId = request.user!.userId;
           const { query, token_budget = 32000, min_score = 0.3, filters = {} } = request.body;
 
           // Set span attributes before async work
           span.setAttribute('context.token_budget', token_budget);
 
           // Fetch top 50 hybrid results (per locked decision)
-          const searchService = new SearchService(fastify.qdrant, fastify.embedder);
+          const searchService = new SearchService(
+            request.getUserQdrant(),
+            fastify.getUserEmbedder(userId),
+          );
           const results = await searchService.hybrid(query, 50, filters);
-          fastify.metrics.searchRequests.inc({ type: 'hybrid' });
+          fastify.metrics.searchRequests.inc({ type: 'hybrid', user_id: userId });
 
           // Assemble context pack
           const contextService = new ContextService();
@@ -36,6 +40,8 @@ export async function contextRoutes(fastify: FastifyInstance): Promise<void> {
             tokenBudget: token_budget,
             minScore: min_score,
           });
+
+          fastify.metrics.contextPacks.inc({ user_id: userId });
 
           span.setAttribute('context.chunks_count', pack.meta.chunks_included);
 

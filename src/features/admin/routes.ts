@@ -22,7 +22,13 @@ export async function adminRoutes(fastify: FastifyInstance): Promise<void> {
       }
 
       try {
-        const job = await service.createJob(body.scope, target);
+        const job = await service.createJob(
+          body.scope,
+          target,
+          request.getUserDb(),
+          request.getUserQdrant(),
+          request.user!.userId,
+        );
 
         return reply.status(202).send({
           jobId: job.id,

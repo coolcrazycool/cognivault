@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type { FastifyInstance } from 'fastify';
@@ -6,11 +6,37 @@ import fp from 'fastify-plugin';
 import { config } from '../config.js';
 import { createDatabase } from '../db/client.js';
 import type * as schema from '../db/schema.js';
+import type { TenantQdrantClient } from '../lib/tenant-qdrant-client.js';
+
+type DbInstance = BetterSQLite3Database<typeof schema>;
+type SqliteInstance = ReturnType<typeof import('../db/client.js').createDatabase>['sqlite'];
 
 declare module 'fastify' {
   interface FastifyInstance {
-    db: BetterSQLite3Database<typeof schema>;
+    getUserDbById: (userId: string) => DbInstance;
   }
+  interface FastifyRequest {
+    getUserDb: () => DbInstance;
+    getUserQdrant: () => TenantQdrantClient;
+  }
+}
+
+interface UserDb {
+  db: DbInstance;
+  sqlite: SqliteInstance;
+}
+
+const userDbs = new Map<string, UserDb>();
+
+function createUserDb(dataDir: string, userId: string): UserDb {
+  const userDir = join(dataDir, userId);
+  // mkdir is sync-safe since we call this from async contexts
+  // but we need the dir to exist before creating DB
+  const dbPath = join(userDir, 'index.db');
+  const { db, sqlite } = createDatabase(dbPath);
+  const entry: UserDb = { db, sqlite };
+  userDbs.set(userId, entry);
+  return entry;
 }
 
 async function dbPlugin(fastify: FastifyInstance): Promise<void> {
@@ -19,14 +45,94 @@ async function dbPlugin(fastify: FastifyInstance): Promise<void> {
   // Auto-create data directory if it does not exist
   await mkdir(dataDir, { recursive: true });
 
-  const dbPath = join(dataDir, 'index.db');
-  const { db, sqlite } = createDatabase(dbPath);
+  // Delete legacy root-level index.db on startup
+  for (const legacyFile of ['index.db', 'index.db-wal', 'index.db-shm']) {
+    const legacyPath = join(dataDir, legacyFile);
+    try {
+      await unlink(legacyPath);
+      fastify.log.info(`Deleted legacy ${legacyFile}`);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    }
+  }
 
-  fastify.decorate('db', db);
+  // Create DBs for all existing users from registry
+  for (const user of fastify.registry.getAllUsers()) {
+    const userDir = join(dataDir, user.userId);
+    await mkdir(userDir, { recursive: true });
+    createUserDb(dataDir, user.userId);
+  }
 
+  // Listen for registry events
+  fastify.registry.on('user-added', async (user) => {
+    const userDir = join(dataDir, user.userId);
+    await mkdir(userDir, { recursive: true });
+    createUserDb(dataDir, user.userId);
+    fastify.log.info({ userId: user.userId }, 'Created per-user database');
+  });
+
+  fastify.registry.on('user-removed', async (user) => {
+    const entry = userDbs.get(user.userId);
+    if (entry) {
+      entry.sqlite.close();
+      userDbs.delete(user.userId);
+    }
+
+    // Delete user data directory
+    const userDir = join(dataDir, user.userId);
+    try {
+      await rm(userDir, { recursive: true, force: true });
+    } catch (e) {
+      fastify.log.warn({ userId: user.userId, err: e }, 'Failed to delete user data directory');
+    }
+
+    // Purge user vectors from Qdrant
+    await fastify.purgeUserVectors(user.userId);
+    fastify.log.info({ userId: user.userId }, 'Removed per-user database and vectors');
+  });
+
+  // Fastify-level accessor for pipeline use outside request context
+  fastify.decorate('getUserDbById', (userId: string): DbInstance => {
+    const entry = userDbs.get(userId);
+    if (!entry) throw new Error(`No database for user: ${userId}`);
+    return entry.db;
+  });
+
+  // Decorate request with getUserDb and getUserQdrant (placeholder functions replaced per-request)
+  const noDbError = (): never => {
+    throw new Error('getUserDb called on unauthenticated request');
+  };
+  const noQdrantError = (): never => {
+    throw new Error('getUserQdrant called on unauthenticated request');
+  };
+  fastify.decorateRequest('getUserDb', noDbError);
+  fastify.decorateRequest('getUserQdrant', noQdrantError);
+
+  fastify.addHook('onRequest', async (request) => {
+    if (!request.user) return; // unauthenticated routes (health, etc.)
+    const userId = request.user.userId;
+
+    request.getUserDb = () => {
+      const entry = userDbs.get(userId);
+      if (!entry) throw new Error(`No database for user: ${userId}`);
+      return entry.db;
+    };
+
+    request.getUserQdrant = () => {
+      return fastify.createTenantQdrant(userId);
+    };
+  });
+
+  // Close all user DBs on shutdown
   fastify.addHook('onClose', async () => {
-    sqlite.close();
+    for (const [, entry] of userDbs) {
+      entry.sqlite.close();
+    }
+    userDbs.clear();
   });
 }
 
-export default fp(dbPlugin, { name: 'db', dependencies: ['vault'] });
+export default fp(dbPlugin, { name: 'db', dependencies: ['vault', 'registry', 'qdrant'] });
+
+// Export for testing
+export { userDbs as _userDbs };

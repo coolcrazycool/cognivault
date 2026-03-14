@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
+import { Registry as PromRegistry } from 'prom-client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Set env vars before any module imports that trigger config parsing
-process.env.COGNIVAULT_API_KEY = 'test-admin-key';
 process.env.VAULT_PATH = '/tmp/test-vault';
 process.env.OPENAI_API_KEY = 'test-openai-key';
 
@@ -38,13 +38,17 @@ const mockDbSelect = vi.fn().mockReturnValue({
   }),
 });
 
-const mockDb = {
+const mockUserDb = {
   select: mockDbSelect,
 };
 
-const mockQdrantDelete = vi.fn().mockResolvedValue(undefined);
-const mockQdrant = {
-  delete: mockQdrantDelete,
+const mockUserQdrantDelete = vi.fn().mockResolvedValue(undefined);
+const mockUserQdrant = {
+  search: vi.fn(),
+  scroll: vi.fn(),
+  upsert: vi.fn(),
+  delete: mockUserQdrantDelete,
+  setPayload: vi.fn(),
 };
 
 const mockPipelineQueueOnIdle = vi.fn().mockResolvedValue(undefined);
@@ -59,14 +63,53 @@ async function buildTestApp(): Promise<FastifyInstance> {
 
   const app = Fastify({ logger: false });
 
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial VaultIndexer
-  app.decorate('indexer', mockIndexer as any);
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial DB
-  app.decorate('db', mockDb as any);
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial Qdrant client
-  app.decorate('qdrant', mockQdrant as any);
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial PQueue
-  app.decorate('pipelineQueue', mockPipelineQueue as any);
+  // Mock per-user indexers Map (keyed by userId)
+  const indexersMap = new Map();
+  indexersMap.set('test-admin', {
+    // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial VaultIndexer
+    indexer: mockIndexer as any,
+    // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial PQueue
+    queue: mockPipelineQueue as any,
+    // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally empty VaultManager
+    vault: {} as any,
+  });
+  app.decorate('indexers', indexersMap);
+  // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial processFileChanges
+  app.decorate('processFileChanges', vi.fn() as any);
+
+  const { default: fp } = await import('fastify-plugin');
+
+  // Mock metrics plugin (named, for auth dependency resolution)
+  await app.register(
+    fp(
+      async (f) => {
+        const promRegistry = new PromRegistry();
+        f.decorate('metrics', { promRegistry } as unknown as FastifyInstance['metrics']);
+      },
+      { name: 'metrics' },
+    ),
+  );
+
+  // Mock registry plugin (named, for auth dependency resolution)
+  await app.register(
+    fp(
+      async (f) => {
+        f.decorate('registry', {
+          getUserByApiKey: (key: string) =>
+            key === 'cv-test-admin-key'
+              ? {
+                  userId: 'test-admin',
+                  apiKey: 'cv-test-admin-key',
+                  vaultPath: '/tmp/test-vault',
+                  openaiKey: 'test-openai-key',
+                  obsidian: { email: 'test@test.com', password: 'secret', vault: 'v' },
+                }
+              : undefined,
+        } as unknown as FastifyInstance['registry']);
+      },
+      { name: 'registry' },
+    ),
+  );
 
   // Register error handler first
   const { default: errorHandler } = await import('../../../plugins/error-handler.js');
@@ -75,6 +118,15 @@ async function buildTestApp(): Promise<FastifyInstance> {
   // Register auth plugin
   const { default: authPlugin } = await import('../../../plugins/auth.js');
   await app.register(authPlugin);
+
+  // Add onRequest hook to provide getUserDb and getUserQdrant on authenticated requests
+  app.addHook('onRequest', async (request) => {
+    if (request.user) {
+      request.getUserDb = () => mockUserDb as unknown as ReturnType<typeof request.getUserDb>;
+      request.getUserQdrant = () =>
+        mockUserQdrant as unknown as ReturnType<typeof request.getUserQdrant>;
+    }
+  });
 
   // Register admin routes with prefix
   const { adminRoutes } = await import('../routes.js');
@@ -98,7 +150,7 @@ describe('admin reindex routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsIndexingValue.value = false;
-    mockQdrantDelete.mockResolvedValue(undefined);
+    mockUserQdrantDelete.mockResolvedValue(undefined);
     mockPipelineQueueOnIdle.mockResolvedValue(undefined);
     mockDbSelect.mockReturnValue({
       from: vi.fn().mockReturnValue({
@@ -114,7 +166,7 @@ describe('admin reindex routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/admin/reindex',
-        headers: { authorization: 'Bearer test-admin-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-admin-key', 'content-type': 'application/json' },
         payload: { scope: 'full' },
       });
 
@@ -141,7 +193,7 @@ describe('admin reindex routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/admin/reindex',
-        headers: { authorization: 'Bearer test-admin-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-admin-key', 'content-type': 'application/json' },
         payload: { scope: 'invalid-scope' },
       });
 
@@ -152,7 +204,7 @@ describe('admin reindex routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/admin/reindex',
-        headers: { authorization: 'Bearer test-admin-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-admin-key', 'content-type': 'application/json' },
         payload: { scope: 'path', path: 'notes/test.md' },
       });
 
@@ -165,7 +217,7 @@ describe('admin reindex routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/admin/reindex',
-        headers: { authorization: 'Bearer test-admin-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-admin-key', 'content-type': 'application/json' },
         payload: { scope: 'folder', folder: 'projects/' },
       });
 
@@ -180,7 +232,7 @@ describe('admin reindex routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/admin/reindex',
-        headers: { authorization: 'Bearer test-admin-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-admin-key', 'content-type': 'application/json' },
         payload: { scope: 'full' },
       });
 
@@ -194,7 +246,7 @@ describe('admin reindex routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/admin/reindex',
-        headers: { authorization: 'Bearer test-admin-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-admin-key', 'content-type': 'application/json' },
         payload: { scope: 'path' },
       });
 
@@ -208,7 +260,7 @@ describe('admin reindex routes', () => {
       const createResponse = await app.inject({
         method: 'POST',
         url: '/api/admin/reindex',
-        headers: { authorization: 'Bearer test-admin-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-admin-key', 'content-type': 'application/json' },
         payload: { scope: 'full' },
       });
       const { jobId } = createResponse.json();
@@ -217,7 +269,7 @@ describe('admin reindex routes', () => {
       const statusResponse = await app.inject({
         method: 'GET',
         url: `/api/admin/reindex/status?jobId=${jobId}`,
-        headers: { authorization: 'Bearer test-admin-key' },
+        headers: { authorization: 'Bearer cv-test-admin-key' },
       });
 
       expect(statusResponse.statusCode).toBe(200);
@@ -234,7 +286,7 @@ describe('admin reindex routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/admin/reindex/status?jobId=00000000-0000-0000-0000-000000000000',
-        headers: { authorization: 'Bearer test-admin-key' },
+        headers: { authorization: 'Bearer cv-test-admin-key' },
       });
 
       expect(response.statusCode).toBe(404);

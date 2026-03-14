@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
+import { Registry as PromRegistry } from 'prom-client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Set env vars before any module imports that trigger config parsing
-process.env.COGNIVAULT_API_KEY = 'test-context-key';
 process.env.VAULT_PATH = '/tmp/test-vault';
 process.env.OPENAI_API_KEY = 'test-openai-key';
 
@@ -95,9 +95,12 @@ const mockQdrantSearch = vi.fn().mockResolvedValue(MOCK_SCORED_POINTS);
 const mockQdrantScroll = vi.fn().mockResolvedValue(MOCK_SCROLL_RESULT);
 const mockEmbed = vi.fn().mockResolvedValue(MOCK_EMBEDDING);
 
-const mockQdrant = {
+const mockTenantQdrant = {
   search: mockQdrantSearch,
   scroll: mockQdrantScroll,
+  upsert: vi.fn(),
+  delete: vi.fn(),
+  setPayload: vi.fn(),
 };
 
 const mockEmbedder = {
@@ -112,17 +115,48 @@ async function buildTestApp(): Promise<FastifyInstance> {
 
   const app = Fastify({ logger: false });
 
-  // Decorate with mocked qdrant and embedder (cast to satisfy Fastify TypeScript type checks)
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial QdrantClient
-  app.decorate('qdrant', mockQdrant as any);
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial EmbeddingProvider
-  app.decorate('embedder', mockEmbedder as any);
-  app.decorate('metrics', {
-    searchDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
-    searchRequests: { inc: vi.fn() },
-    indexQueueDepth: { set: vi.fn() },
-    staleVectorCleanups: { inc: vi.fn() },
-  } as unknown as FastifyInstance['metrics']);
+  // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial EmbeddingProvider
+  app.decorate('getUserEmbedder', (_userId: string) => mockEmbedder as any);
+  const { default: fp } = await import('fastify-plugin');
+
+  // Mock metrics plugin (named, for auth dependency resolution)
+  await app.register(
+    fp(
+      async (f) => {
+        const promRegistry = new PromRegistry();
+        f.decorate('metrics', {
+          promRegistry,
+          searchDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
+          searchRequests: { inc: vi.fn() },
+          contextPacks: { inc: vi.fn() },
+          indexQueueDepth: { set: vi.fn() },
+          staleVectorCleanups: { inc: vi.fn() },
+        } as unknown as FastifyInstance['metrics']);
+      },
+      { name: 'metrics' },
+    ),
+  );
+
+  // Mock registry plugin (named, for auth dependency resolution)
+  await app.register(
+    fp(
+      async (f) => {
+        f.decorate('registry', {
+          getUserByApiKey: (key: string) =>
+            key === 'cv-test-context-key'
+              ? {
+                  userId: 'test-user',
+                  apiKey: 'cv-test-context-key',
+                  vaultPath: '/tmp/test-vault',
+                  openaiKey: 'test-openai-key',
+                  obsidian: { email: 'test@test.com', password: 'secret', vault: 'v' },
+                }
+              : undefined,
+        } as unknown as FastifyInstance['registry']);
+      },
+      { name: 'registry' },
+    ),
+  );
 
   // Register error handler (converts validation errors to proper 400 responses)
   const { default: errorHandler } = await import('../../../plugins/error-handler.js');
@@ -131,6 +165,14 @@ async function buildTestApp(): Promise<FastifyInstance> {
   // Register auth plugin so auth is enforced
   const { default: authPlugin } = await import('../../../plugins/auth.js');
   await app.register(authPlugin);
+
+  // Add onRequest hook to provide getUserQdrant on authenticated requests
+  app.addHook('onRequest', async (request) => {
+    if (request.user) {
+      request.getUserQdrant = () =>
+        mockTenantQdrant as unknown as ReturnType<typeof request.getUserQdrant>;
+    }
+  });
 
   // Register context routes with prefix
   const { contextRoutes } = await import('../routes.js');
@@ -167,7 +209,7 @@ describe('context routes', () => {
         method: 'POST',
         url: '/api/vault/context',
         headers: {
-          authorization: 'Bearer test-context-key',
+          authorization: 'Bearer cv-test-context-key',
           'content-type': 'application/json',
         },
         payload: { query: 'system architecture' },
@@ -189,7 +231,7 @@ describe('context routes', () => {
         method: 'POST',
         url: '/api/vault/context',
         headers: {
-          authorization: 'Bearer test-context-key',
+          authorization: 'Bearer cv-test-context-key',
           'content-type': 'application/json',
         },
         payload: { query: 'architecture' },
@@ -238,7 +280,7 @@ describe('context routes', () => {
         method: 'POST',
         url: '/api/vault/context',
         headers: {
-          authorization: 'Bearer test-context-key',
+          authorization: 'Bearer cv-test-context-key',
           'content-type': 'application/json',
         },
         payload: { query: '' },
@@ -252,7 +294,7 @@ describe('context routes', () => {
         method: 'POST',
         url: '/api/vault/context',
         headers: {
-          authorization: 'Bearer test-context-key',
+          authorization: 'Bearer cv-test-context-key',
           'content-type': 'application/json',
         },
         payload: {},
@@ -266,7 +308,7 @@ describe('context routes', () => {
         method: 'POST',
         url: '/api/vault/context',
         headers: {
-          authorization: 'Bearer test-context-key',
+          authorization: 'Bearer cv-test-context-key',
           'content-type': 'application/json',
         },
         payload: { query: 'architecture', token_budget: 1000 },
@@ -283,7 +325,7 @@ describe('context routes', () => {
         method: 'POST',
         url: '/api/vault/context',
         headers: {
-          authorization: 'Bearer test-context-key',
+          authorization: 'Bearer cv-test-context-key',
           'content-type': 'application/json',
         },
         payload: { query: 'architecture', min_score: 1.0 },
@@ -306,7 +348,7 @@ describe('context routes', () => {
         method: 'POST',
         url: '/api/vault/context',
         headers: {
-          authorization: 'Bearer test-context-key',
+          authorization: 'Bearer cv-test-context-key',
           'content-type': 'application/json',
         },
         payload: { query: 'architecture' },
@@ -323,7 +365,7 @@ describe('context routes', () => {
         method: 'POST',
         url: '/api/vault/context',
         headers: {
-          authorization: 'Bearer test-context-key',
+          authorization: 'Bearer cv-test-context-key',
           'content-type': 'application/json',
         },
         payload: { query: 'architecture' },
@@ -343,7 +385,7 @@ describe('context routes', () => {
         method: 'POST',
         url: '/api/vault/context',
         headers: {
-          authorization: 'Bearer test-context-key',
+          authorization: 'Bearer cv-test-context-key',
           'content-type': 'application/json',
         },
         payload: { query: 'system architecture' },
@@ -378,7 +420,7 @@ describe('context routes', () => {
         method: 'POST',
         url: '/api/vault/context',
         headers: {
-          authorization: 'Bearer test-context-key',
+          authorization: 'Bearer cv-test-context-key',
           'content-type': 'application/json',
         },
         payload: { query: 'test', filters: { tags: ['architecture'] } },
@@ -387,7 +429,6 @@ describe('context routes', () => {
       // Hybrid search calls both qdrant.search (semantic) and qdrant.scroll (lexical)
       // Both should have been called with filter conditions
       expect(mockQdrantSearch).toHaveBeenCalledWith(
-        'cognivault',
         expect.objectContaining({
           filter: expect.objectContaining({
             must: expect.arrayContaining([{ key: 'tags', match: { any: ['architecture'] } }]),
@@ -401,17 +442,14 @@ describe('context routes', () => {
         method: 'POST',
         url: '/api/vault/context',
         headers: {
-          authorization: 'Bearer test-context-key',
+          authorization: 'Bearer cv-test-context-key',
           'content-type': 'application/json',
         },
         payload: { query: 'test' },
       });
 
       // Semantic side uses qdrant.search with limit=100 (50 * 2x oversampling in hybrid)
-      expect(mockQdrantSearch).toHaveBeenCalledWith(
-        'cognivault',
-        expect.objectContaining({ limit: 100 }),
-      );
+      expect(mockQdrantSearch).toHaveBeenCalledWith(expect.objectContaining({ limit: 100 }));
     });
 
     it('meta.query_ms is a non-negative integer', async () => {
@@ -419,7 +457,7 @@ describe('context routes', () => {
         method: 'POST',
         url: '/api/vault/context',
         headers: {
-          authorization: 'Bearer test-context-key',
+          authorization: 'Bearer cv-test-context-key',
           'content-type': 'application/json',
         },
         payload: { query: 'test' },

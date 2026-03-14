@@ -15,6 +15,24 @@
   "timezone": "browser",
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
+  "templating": {
+    "list": [
+      {
+        "name": "user_id",
+        "label": "User",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(cognivault_sync_running, user_id)", "refId": "StandardVariableQuery" },
+        "current": { "text": "All", "value": "$__all" },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0
+      }
+    ]
+  },
   "panels": [
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -296,6 +314,49 @@
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "time() - process_start_time_seconds{job=\"cognivault\"}",
           "legendFormat": "Uptime",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "options": { "0": { "color": "red", "text": "Stopped" }, "1": { "color": "green", "text": "Running" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 28 },
+      "id": 8,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "title": "Sync Running (per user)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "cognivault_sync_running{job=\"cognivault\",user_id=~\"$user_id\"}",
+          "legendFormat": "{{user_id}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 28 },
+      "id": 9,
+      "title": "Sync Failures (per user)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "cognivault_sync_failures_total{job=\"cognivault\",user_id=~\"$user_id\"}",
+          "legendFormat": "{{user_id}}",
           "refId": "A"
         }
       ]

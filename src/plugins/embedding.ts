@@ -6,20 +6,57 @@ import { OpenAIEmbeddingProvider } from '../lib/embedding.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
-    embedder: EmbeddingProvider;
+    getUserEmbedder: (userId: string) => EmbeddingProvider;
   }
 }
 
 async function embeddingPlugin(fastify: FastifyInstance): Promise<void> {
-  const provider = new OpenAIEmbeddingProvider({
-    apiKey: config.OPENAI_API_KEY,
-    baseUrl: config.OPENAI_BASE_URL,
-    model: config.EMBEDDING_MODEL,
+  const embedders = new Map<string, EmbeddingProvider>();
+
+  function createEmbedder(apiKey: string): EmbeddingProvider {
+    return new OpenAIEmbeddingProvider({
+      apiKey,
+      baseUrl: config.OPENAI_BASE_URL,
+      model: config.EMBEDDING_MODEL,
+    });
+  }
+
+  // Initialize embedders for all existing users from registry
+  for (const user of fastify.registry.getAllUsers()) {
+    embedders.set(user.userId, createEmbedder(user.openaiKey));
+  }
+
+  // Listen for registry events
+  fastify.registry.on('user-added', (user) => {
+    embedders.set(user.userId, createEmbedder(user.openaiKey));
+    fastify.log.info({ userId: user.userId }, 'Created per-user embedder');
   });
 
-  await provider.validate();
+  fastify.registry.on('user-removed', (user) => {
+    embedders.delete(user.userId);
+    fastify.log.info({ userId: user.userId }, 'Removed per-user embedder');
+  });
 
-  fastify.decorate('embedder', provider);
+  fastify.registry.on('user-updated', (user, previous) => {
+    if (user.openaiKey !== previous.openaiKey) {
+      embedders.set(user.userId, createEmbedder(user.openaiKey));
+      fastify.log.info({ userId: user.userId }, 'Recreated per-user embedder (key changed)');
+    }
+  });
+
+  // Decorate fastify with getUserEmbedder lookup
+  fastify.decorate('getUserEmbedder', (userId: string): EmbeddingProvider => {
+    const provider = embedders.get(userId);
+    if (!provider) {
+      throw new Error(`No embedder for user: ${userId}`);
+    }
+    return provider;
+  });
+
+  // Clean up on close
+  fastify.addHook('onClose', async () => {
+    embedders.clear();
+  });
 }
 
-export default fp(embeddingPlugin, { name: 'embedder', dependencies: ['db'] });
+export default fp(embeddingPlugin, { name: 'embedder', dependencies: ['registry'] });

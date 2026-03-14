@@ -76,9 +76,23 @@ const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 await fs.writeFile(path.join(vaultRoot, 'image.png'), pngHeader);
 
 // Set env vars before importing app
-process.env.COGNIVAULT_API_KEY = 'test-api-key';
+const dataDir = path.join(tmpDir, 'data');
+await fs.mkdir(dataDir, { recursive: true });
+await fs.writeFile(
+  path.join(dataDir, 'users.json'),
+  JSON.stringify([
+    {
+      userId: 'test-user',
+      apiKey: 'cv-test-key-001',
+      vaultPath: vaultRoot,
+      openaiKey: 'test-openai-key',
+      obsidian: { email: 'test@test.com', password: 'secret', vault: 'test-vault' },
+    },
+  ]),
+);
 process.env.VAULT_PATH = vaultRoot;
 process.env.OPENAI_API_KEY = 'test-openai-key';
+process.env.COGNIVAULT_DATA_DIR = dataDir;
 
 const { buildApp } = await import('../../../app.js');
 
@@ -88,23 +102,8 @@ describe('vault routes', () => {
   beforeAll(async () => {
     app = await buildApp({ logger: false });
     await app.ready();
-    // Wait for the initial vault scan to complete and all pipeline queue tasks
-    // to drain before running tests. The indexer's initial scan is fire-and-forget
-    // from the onReady hook, so we must wait for scanComplete + queue idle to
-    // prevent ERR_HTTP_HEADERS_SENT unhandled errors during concurrent tests.
-    await new Promise<void>((resolve) => {
-      // If already done scanning, onIdle resolves immediately
-      app.indexer.once('scanComplete', () => {
-        void app.pipelineQueue.onIdle().then(resolve);
-      });
-      // Guard: if scan somehow already finished before we registered the listener,
-      // just wait for the queue to be idle (it will resolve immediately if empty)
-      void app.pipelineQueue.onIdle().then(() => {
-        // Check if indexer is no longer indexing — scan must be done
-        if (!app.indexer.isIndexing) resolve();
-      });
-    });
-    app.indexer.stop();
+    // Indexer and pipeline are disabled in Phase 17 (per-user refactoring).
+    // No need to wait for scan completion.
   });
 
   afterAll(async () => {
@@ -117,7 +116,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/files',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(200);
       const body = response.json();
@@ -131,7 +130,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/files?path=notes',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(200);
       const body = response.json();
@@ -144,7 +143,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/files?recursive=true',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(200);
       const body = response.json();
@@ -156,7 +155,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/files?ext=md&recursive=true',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(200);
       const body = response.json();
@@ -171,7 +170,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/files?path=../../etc',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(403);
       const body = response.json();
@@ -192,7 +191,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/content?path=notes/hello.md',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(200);
       const body = response.json();
@@ -205,7 +204,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/content?path=nonexistent.md',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(404);
       const body = response.json();
@@ -216,7 +215,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/content?path=image.png',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(415);
       const body = response.json();
@@ -227,7 +226,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/content?path=../../etc/passwd',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(403);
       const body = response.json();
@@ -238,7 +237,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(400);
     });
@@ -257,7 +256,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/metadata?path=note-with-tags-array.md',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(200);
       const body = response.json();
@@ -270,7 +269,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/metadata?path=note-with-tags-string.md',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(200);
       const body = response.json();
@@ -281,7 +280,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/metadata?path=note-with-nested.md',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(200);
       const body = response.json();
@@ -292,7 +291,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/metadata?path=no-frontmatter.md',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(200);
       const body = response.json();
@@ -304,7 +303,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/metadata?path=malformed-yaml.md',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(200);
       const body = response.json();
@@ -317,7 +316,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/metadata?path=nonexistent.md',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(404);
     });
@@ -326,7 +325,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/metadata?path=../../etc/passwd',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(403);
     });
@@ -335,7 +334,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'GET',
         url: '/api/vault/metadata',
-        headers: { authorization: 'Bearer test-api-key' },
+        headers: { authorization: 'Bearer cv-test-key-001' },
       });
       expect(response.statusCode).toBe(400);
     });
@@ -354,7 +353,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'notes/new-post.md', content: 'Created via POST' },
       });
       expect(response.statusCode).toBe(201);
@@ -371,7 +370,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'notes/conflict.md', content: 'new content' },
       });
       expect(response.statusCode).toBe(409);
@@ -383,7 +382,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: {
           path: 'notes/with-frontmatter-post.md',
           content: 'Body text',
@@ -404,7 +403,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'deep/nested/route/note.md', content: 'Deep note content' },
       });
       expect(response.statusCode).toBe(201);
@@ -419,7 +418,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: '../escape.md', content: 'bad content' },
       });
       expect(response.statusCode).toBe(403);
@@ -444,7 +443,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'PUT',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'notes/update-route.md', content: 'New content' },
       });
       expect(response.statusCode).toBe(200);
@@ -462,7 +461,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'PUT',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'notes/nonexistent-put.md', content: 'content' },
       });
       expect(response.statusCode).toBe(404);
@@ -474,7 +473,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'PUT',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: '../escape.md', content: 'bad' },
       });
       expect(response.statusCode).toBe(403);
@@ -497,7 +496,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'PATCH',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'notes/patch-append.md', content: 'Appended', mode: 'append' },
       });
       expect(response.statusCode).toBe(200);
@@ -517,7 +516,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'PATCH',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'notes/patch-prepend.md', content: 'Prepended', mode: 'prepend' },
       });
       expect(response.statusCode).toBe(200);
@@ -538,7 +537,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'PATCH',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'notes/patch-fm-append.md', content: 'Extra text', mode: 'append' },
       });
       expect(response.statusCode).toBe(200);
@@ -556,7 +555,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'PATCH',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'notes/nonexistent-patch.md', content: 'text', mode: 'append' },
       });
       expect(response.statusCode).toBe(404);
@@ -568,7 +567,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'PATCH',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: '../escape.md', content: 'bad', mode: 'append' },
       });
       expect(response.statusCode).toBe(403);
@@ -591,7 +590,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'DELETE',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'notes/delete-route.md' },
       });
       expect(response.statusCode).toBe(200);
@@ -609,7 +608,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'DELETE',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'notes/nonexistent-delete.md' },
       });
       expect(response.statusCode).toBe(404);
@@ -621,7 +620,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'DELETE',
         url: '/api/vault/content',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: '../escape.md' },
       });
       expect(response.statusCode).toBe(403);
@@ -649,7 +648,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'PATCH',
         url: '/api/vault/metadata',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'notes/meta-patch.md', metadata: { status: 'done' } },
       });
       expect(response.statusCode).toBe(200);
@@ -668,7 +667,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'PATCH',
         url: '/api/vault/metadata',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'notes/meta-patch-null.md', metadata: { tags: null } },
       });
       expect(response.statusCode).toBe(200);
@@ -681,7 +680,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'PATCH',
         url: '/api/vault/metadata',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: 'notes/nonexistent-meta-patch.md', metadata: { status: 'done' } },
       });
       expect(response.statusCode).toBe(404);
@@ -693,7 +692,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'PATCH',
         url: '/api/vault/metadata',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { path: '../../etc/passwd', metadata: { status: 'done' } },
       });
       expect(response.statusCode).toBe(403);
@@ -718,7 +717,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/move',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { from: 'notes/move-from-route.md', to: 'notes/move-to-route.md' },
       });
       expect(response.statusCode).toBe(200);
@@ -738,7 +737,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/move',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { from: 'notes/move-conflict-from.md', to: 'notes/move-conflict-to.md' },
       });
       expect(response.statusCode).toBe(409);
@@ -750,7 +749,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/move',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { from: 'notes/nonexistent-move.md', to: 'notes/any-dest.md' },
       });
       expect(response.statusCode).toBe(404);
@@ -763,7 +762,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/move',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { from: 'notes/move-auto-dir-src.md', to: 'deep/move/auto/dest.md' },
       });
       expect(response.statusCode).toBe(200);
@@ -778,7 +777,7 @@ describe('vault routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/move',
-        headers: { authorization: 'Bearer test-api-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-key-001', 'content-type': 'application/json' },
         payload: { from: '../escape.md', to: 'notes/dest.md' },
       });
       expect(response.statusCode).toBe(403);

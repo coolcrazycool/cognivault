@@ -3,12 +3,9 @@
 ## Milestones
 
 - ✅ **v1.0 MVP** — Phases 1-14 (shipped 2026-03-13)
+- ✅ **v2.0 Multi-User** — Phases 15-22 (shipped 2026-03-14)
 
 ## Phases
-
-**Phase Numbering:**
-- Integer phases (1, 2, 3): Planned milestone work
-- Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
 <details>
 <summary>✅ v1.0 MVP (Phases 1-14) — SHIPPED 2026-03-13</summary>
@@ -32,6 +29,22 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 
 </details>
 
+<details>
+<summary>✅ v2.0 Multi-User (Phases 15-22) — SHIPPED 2026-03-14</summary>
+
+- [x] Phase 15: Registry Foundation (2/2 plans) — completed 2026-03-14
+- [x] Phase 16: Multi-Tenant Auth (1/1 plans) — completed 2026-03-14
+- [x] Phase 17: Data Isolation (2/2 plans) — completed 2026-03-14
+- [x] Phase 18: Per-User Indexing and Routes (3/3 plans) — completed 2026-03-14
+- [x] Phase 19: CLI and Vault Sync (3/3 plans) — completed 2026-03-14
+- [x] Phase 20: Docker and Integration Hardening (4/4 plans) — completed 2026-03-14
+- [x] Phase 21: CLI-Server Event Wiring & Metric Fix (2/2 plans) — completed 2026-03-14
+- [x] Phase 22: Milestone Verification Closure (2/2 plans) — completed 2026-03-14
+
+Full details: `.planning/milestones/v2.0-ROADMAP.md`
+
+</details>
+
 ## Progress
 
 | Phase | Milestone | Plans Complete | Status | Completed |
@@ -50,3 +63,11 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 | 12. Prometheus Metrics Dashboard | v1.0 | 3/3 | Complete | 2026-03-12 |
 | 13. Search & Reindex Correctness | v1.0 | 2/2 | Complete | 2026-03-12 |
 | 14. Infrastructure Hardening & Cleanup | v1.0 | 3/3 | Complete | 2026-03-12 |
+| 15. Registry Foundation | v2.0 | 2/2 | Complete | 2026-03-14 |
+| 16. Multi-Tenant Auth | v2.0 | 1/1 | Complete | 2026-03-14 |
+| 17. Data Isolation | v2.0 | 2/2 | Complete | 2026-03-14 |
+| 18. Per-User Indexing and Routes | v2.0 | 3/3 | Complete | 2026-03-14 |
+| 19. CLI and Vault Sync | v2.0 | 3/3 | Complete | 2026-03-14 |
+| 20. Docker and Integration Hardening | v2.0 | 4/4 | Complete | 2026-03-14 |
+| 21. CLI-Server Event Wiring & Metric Fix | v2.0 | 2/2 | Complete | 2026-03-14 |
+| 22. Milestone Verification Closure | v2.0 | 2/2 | Complete | 2026-03-14 |

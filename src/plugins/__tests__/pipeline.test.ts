@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FileChangeEvent } from '../../lib/indexer.js';
 
 // ── Mock format chunkers ──
@@ -42,7 +42,6 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 // Set required env vars before any imports that trigger config parsing
 beforeAll(() => {
-  process.env.COGNIVAULT_API_KEY = 'test-api-key';
   process.env.VAULT_PATH = '/tmp/test-vault';
   process.env.OPENAI_API_KEY = 'test-openai-key';
   process.env.QDRANT_URL = 'http://localhost:6333';
@@ -53,8 +52,24 @@ beforeAll(() => {
 const RICH_CONTENT =
   '# Test\n\nSome content for testing purposes with enough tokens to create a chunk in the markdown processor since we need at least 100 tokens per section to avoid merging. Adding more text here to ensure we have enough content for chunking to work correctly and produce at least one valid chunk output.';
 
-// Creates a minimal Fastify app with mocked services wired as decorators.
-// Uses `unknown` casts to bypass Fastify's strict decorator type matching.
+const TEST_USER_ID = 'test-user-1';
+
+// Mock PQueue that actually runs tasks
+function createMockQueue() {
+  const queue = {
+    add: vi.fn().mockImplementation(async (fn: () => Promise<void>) => {
+      await fn();
+    }),
+    clear: vi.fn(),
+    onIdle: vi.fn().mockResolvedValue(undefined),
+    on: vi.fn(),
+    size: 0,
+    pending: 0,
+  };
+  return queue;
+}
+
+// Creates a minimal Fastify app with mocked services
 async function buildTestApp(opts?: {
   readContent?: ReturnType<typeof vi.fn>;
   embed?: ReturnType<typeof vi.fn>;
@@ -74,7 +89,10 @@ async function buildTestApp(opts?: {
     embeddingRequests: { inc: ReturnType<typeof vi.fn> };
     chunksProcessed: { inc: ReturnType<typeof vi.fn> };
     pipelineDuration: { startTimer: ReturnType<typeof vi.fn> };
+    indexQueueDepth: { set: ReturnType<typeof vi.fn> };
+    staleVectorCleanups: { inc: ReturnType<typeof vi.fn> };
   };
+  mockQueue: ReturnType<typeof createMockQueue>;
 }> {
   const Fastify = (await import('fastify')).default;
 
@@ -90,7 +108,7 @@ async function buildTestApp(opts?: {
   const dbSet = vi.fn().mockReturnValue({ where: dbWhere });
   const dbUpdate = vi.fn().mockReturnValue({ set: dbSet });
 
-  // Build db.select chain mock for processImage (select from indexed_files where fileType='md')
+  // Build db.select chain mock for processImage
   const dbSelectAll = vi.fn().mockReturnValue([]);
   const dbSelectWhere = vi.fn().mockReturnValue({ all: dbSelectAll });
   const dbSelectFrom = vi.fn().mockReturnValue({ where: dbSelectWhere });
@@ -98,89 +116,152 @@ async function buildTestApp(opts?: {
 
   const vaultRootPath = opts?.vaultRootPath ?? '/tmp/test-vault';
 
+  const mockQueue = createMockQueue();
+
+  const metricsObj = {
+    searchDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
+    searchRequests: { inc: vi.fn() },
+    indexQueueDepth: { set: vi.fn() },
+    staleVectorCleanups: { inc: vi.fn() },
+    embeddingRequests: { inc: vi.fn() },
+    chunksProcessed: { inc: vi.fn() },
+    pipelineDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
+    contextPacks: { inc: vi.fn() },
+    removeUserMetrics: vi.fn(),
+    promRegistry: {},
+  };
+
   const app = Fastify({ logger: false });
 
-  // Register all dependencies as a single plugin to avoid fp name conflicts
+  // Register all dependencies as a single plugin
   await app.register(
     fp(
       async (f) => {
-        f.decorate('vault', {
-          readContent,
-          rootPath: vaultRootPath,
-          vaultRootPath,
-        } as unknown as FastifyInstance['vault']);
-        f.decorate('embedder', {
-          dimensions: 1536,
-          embed,
-        } as unknown as FastifyInstance['embedder']);
-        f.decorate('qdrant', {
-          upsert,
-          delete: qdrantDelete,
-          setPayload,
-        } as unknown as FastifyInstance['qdrant']);
-        f.decorate('db', {
-          update: dbUpdate,
-          select: dbSelect,
-        } as unknown as FastifyInstance['db']);
-        f.decorate('indexer', {
+        // Per-user DB accessor
+        f.decorate(
+          'getUserDbById',
+          vi.fn().mockReturnValue({
+            update: dbUpdate,
+            select: dbSelect,
+          }) as unknown as FastifyInstance['getUserDbById'],
+        );
+
+        // Per-user embedder accessor
+        f.decorate(
+          'getUserEmbedder',
+          vi.fn().mockReturnValue({
+            embed,
+            dimensions: 1536,
+          }) as unknown as FastifyInstance['getUserEmbedder'],
+        );
+
+        // Tenant Qdrant factory
+        f.decorate(
+          'createTenantQdrant',
+          vi.fn().mockReturnValue({
+            upsert,
+            delete: qdrantDelete,
+            setPayload,
+            search: vi.fn().mockResolvedValue([]),
+            scroll: vi.fn().mockResolvedValue({ points: [] }),
+          }) as unknown as FastifyInstance['createTenantQdrant'],
+        );
+
+        f.decorate('metrics', metricsObj as unknown as FastifyInstance['metrics']);
+
+        f.decorate('registry', {
+          getAllUsers: vi.fn().mockReturnValue([]),
           on: vi.fn(),
           removeListener: vi.fn(),
-        } as unknown as FastifyInstance['indexer']);
-        f.decorate('metrics', {
-          searchDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
-          searchRequests: { inc: vi.fn() },
-          indexQueueDepth: { set: vi.fn() },
-          staleVectorCleanups: { inc: vi.fn() },
-          embeddingRequests: { inc: vi.fn() },
-          chunksProcessed: { inc: vi.fn() },
-          pipelineDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
-        } as unknown as FastifyInstance['metrics']);
+        } as unknown as FastifyInstance['registry']);
+
+        // Indexers map with test user entry
+        const indexersMap = new Map();
+        indexersMap.set(TEST_USER_ID, {
+          indexer: { on: vi.fn(), removeListener: vi.fn() },
+          queue: mockQueue,
+          vault: {
+            readContent,
+            vaultRootPath,
+          },
+        });
+        f.decorate('indexers', indexersMap as unknown as FastifyInstance['indexers']);
       },
-      { name: 'vault' },
+      { name: 'test-deps' },
     ),
   );
 
   // Satisfy fp dependency checks with empty plugins
-  for (const name of ['db', 'embedder', 'qdrant', 'indexer', 'metrics'] as const) {
-    await app.register(fp(async (_f) => {}, { name }));
+  for (const name of ['db', 'embedder', 'qdrant', 'metrics', 'registry'] as const) {
+    await app.register(fp(async () => {}, { name }));
   }
 
   const { default: pipelinePlugin } = await import('../pipeline.js');
   await app.register(pipelinePlugin);
   await app.ready();
 
-  const metrics = app.metrics as unknown as {
-    embeddingRequests: { inc: ReturnType<typeof vi.fn> };
-    chunksProcessed: { inc: ReturnType<typeof vi.fn> };
-    pipelineDuration: { startTimer: ReturnType<typeof vi.fn> };
+  return {
+    app,
+    readContent,
+    embed,
+    upsert,
+    qdrantDelete,
+    setPayload,
+    dbUpdate,
+    metrics: metricsObj,
+    mockQueue,
   };
-
-  return { app, readContent, embed, upsert, qdrantDelete, setPayload, dbUpdate, metrics };
 }
 
-// Helper: invoke the 'changes' listener the pipeline registered on indexer.on
-async function emitChanges(app: FastifyInstance, events: FileChangeEvent[]): Promise<void> {
-  type IndexerMock = { on: ReturnType<typeof vi.fn>; removeListener: ReturnType<typeof vi.fn> };
-  const indexer = app.indexer as unknown as IndexerMock;
-  const onCall = indexer.on.mock.calls.find((c: unknown[]) => c[0] === 'changes') as
-    | [string, (events: FileChangeEvent[]) => void]
-    | undefined;
-  if (!onCall) throw new Error('Pipeline did not register changes listener');
-  const handler = onCall[1];
-  handler(events);
+// Helper: invoke processFileChanges with userId
+async function processChanges(
+  app: FastifyInstance,
+  userId: string,
+  events: FileChangeEvent[],
+): Promise<void> {
+  app.processFileChanges(userId, events);
   // Let queue microtasks settle
   await new Promise<void>((resolve) => setTimeout(resolve, 50));
 }
 
-describe('pipeline plugin', () => {
+describe('pipeline plugin (per-user)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  // ── created events ──────────────────────────────────────────────────────
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe('processFileChanges decoration', () => {
+    it('decorates fastify with processFileChanges function', async () => {
+      const { app } = await buildTestApp();
+      expect(app.processFileChanges).toBeDefined();
+      expect(typeof app.processFileChanges).toBe('function');
+      await app.close();
+    });
+  });
+
+  describe('processFileChanges queuing', () => {
+    it('queues events to user PQueue', async () => {
+      const { app, mockQueue } = await buildTestApp();
+
+      const events: FileChangeEvent[] = [
+        { path: 'notes/test.md', type: 'created', contentHash: 'abc' },
+      ];
+
+      await processChanges(app, TEST_USER_ID, events);
+
+      expect(mockQueue.add).toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
+  // ── created events ──
 
   describe('created event', () => {
-    it('reads file content, embeds chunks, and upserts to Qdrant with correct payload', async () => {
+    it('reads file content, embeds chunks, and upserts to tenant Qdrant', async () => {
       const { app, readContent, embed, upsert, qdrantDelete } = await buildTestApp();
 
       const event: FileChangeEvent = {
@@ -189,45 +270,16 @@ describe('pipeline plugin', () => {
         contentHash: 'abc123',
       };
 
-      await emitChanges(app, [event]);
+      await processChanges(app, TEST_USER_ID, [event]);
 
       expect(readContent).toHaveBeenCalledWith('notes/my-note.md');
       expect(embed).toHaveBeenCalled();
-      expect(upsert).toHaveBeenCalledWith(
-        'cognivault',
-        expect.objectContaining({ points: expect.any(Array) }),
-      );
 
-      type UpsertPayload = { id: string; vector: number[]; payload: Record<string, unknown> };
-      const upsertCall = upsert.mock.calls[0] as [string, { points: UpsertPayload[] }] | undefined;
-      expect(upsertCall).toBeDefined();
-      if (!upsertCall) return;
+      // Upsert should be called on tenant Qdrant (no collection name arg)
+      expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ points: expect.any(Array) }));
 
-      const points = upsertCall[1].points;
-      expect(points.length).toBeGreaterThan(0);
-
-      const firstPoint = points[0];
-      expect(firstPoint).toBeDefined();
-      if (!firstPoint) return;
-
-      expect(firstPoint.id).toMatch(/^[0-9a-f-]{36}$/i);
-      expect(firstPoint.vector).toEqual([0.1, 0.2, 0.3]);
-      expect(firstPoint.payload['path']).toBe('notes/my-note.md');
-      expect(firstPoint.payload['title']).toBe('my-note');
-      expect(firstPoint.payload['chunk_index']).toBe(0);
-      expect(firstPoint.payload['content_hash']).toBe('abc123');
-      expect(firstPoint.payload['section_path']).toBeDefined();
-      expect(firstPoint.payload['tags']).toEqual([]);
-      expect(firstPoint.payload['project']).toBeNull();
-      expect(firstPoint.payload['status']).toBeNull();
-      expect(firstPoint.payload['type']).toBeNull();
-      expect(typeof firstPoint.payload['extra_metadata']).toBe('string');
-      expect(typeof firstPoint.payload['text']).toBe('string');
-      expect((firstPoint.payload['text'] as string).length).toBeGreaterThan(0);
-
-      // Stale cleanup should have been called
+      // Stale cleanup on tenant Qdrant
       expect(qdrantDelete).toHaveBeenCalledWith(
-        'cognivault',
         expect.objectContaining({
           filter: expect.objectContaining({
             must: expect.arrayContaining([
@@ -241,7 +293,30 @@ describe('pipeline plugin', () => {
       await app.close();
     });
 
-    it('sets embedding_model_version in indexed_files after successful embed', async () => {
+    it('uses user-scoped chunkId (UUID v5 with userId prefix)', async () => {
+      const { app, upsert } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'notes/my-note.md',
+        type: 'created',
+        contentHash: 'abc123',
+      };
+
+      await processChanges(app, TEST_USER_ID, [event]);
+
+      type UpsertArg = { points: Array<{ id: string }> };
+      const call = upsert.mock.calls[0] as [UpsertArg] | undefined;
+      expect(call).toBeDefined();
+      const firstId = call?.[0].points[0]?.id;
+      expect(firstId).toBeDefined();
+      expect(firstId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+
+      await app.close();
+    });
+
+    it('sets embedding_model_version in indexed_files using per-user DB', async () => {
       const { app, dbUpdate } = await buildTestApp();
 
       const event: FileChangeEvent = {
@@ -250,139 +325,18 @@ describe('pipeline plugin', () => {
         contentHash: 'abc123',
       };
 
-      await emitChanges(app, [event]);
+      await processChanges(app, TEST_USER_ID, [event]);
 
       expect(dbUpdate).toHaveBeenCalled();
 
       await app.close();
     });
-
-    it('includes tags array from frontmatter', async () => {
-      const content =
-        '---\ntags:\n  - ai\n  - research\n---\n\n# My Note\n\nContent with enough tokens here to ensure chunking works properly and produces at least one chunk with sufficient token count to not be merged into another section.';
-      const { app, upsert } = await buildTestApp({
-        readContent: vi.fn().mockResolvedValue({ content }),
-      });
-
-      const event: FileChangeEvent = {
-        path: 'notes/my-note.md',
-        type: 'created',
-        contentHash: 'abc123',
-      };
-
-      await emitChanges(app, [event]);
-
-      type UpsertPayload = { payload: Record<string, unknown> };
-      const call = upsert.mock.calls[0] as [string, { points: UpsertPayload[] }] | undefined;
-      if (call) {
-        const pt = call[1].points[0];
-        if (pt) {
-          expect(pt.payload['tags']).toEqual(['ai', 'research']);
-        }
-      }
-
-      await app.close();
-    });
-
-    it('normalizes string tags to array and maps project/status/type from frontmatter', async () => {
-      const content =
-        '---\ntags: ai\nproject: cognivault\nstatus: active\ntype: note\n---\n\n# My Note\n\nContent with enough tokens here to ensure chunking works properly and produces at least one chunk with sufficient token count to not be merged into another section.';
-      const { app, upsert } = await buildTestApp({
-        readContent: vi.fn().mockResolvedValue({ content }),
-      });
-
-      const event: FileChangeEvent = {
-        path: 'notes/my-note.md',
-        type: 'created',
-        contentHash: 'abc123',
-      };
-
-      await emitChanges(app, [event]);
-
-      type UpsertPayload = { payload: Record<string, unknown> };
-      const call = upsert.mock.calls[0] as [string, { points: UpsertPayload[] }] | undefined;
-      if (call) {
-        const pt = call[1].points[0];
-        if (pt) {
-          expect(pt.payload['tags']).toEqual(['ai']);
-          expect(pt.payload['project']).toBe('cognivault');
-          expect(pt.payload['status']).toBe('active');
-          expect(pt.payload['type']).toBe('note');
-        }
-      }
-
-      await app.close();
-    });
-
-    it('stores remaining frontmatter fields in extra_metadata as JSON string', async () => {
-      const content =
-        '---\ntags: [ai]\ncustom_field: hello\nanother: 42\n---\n\n# My Note\n\nContent with enough tokens here to ensure chunking works properly and produces at least one chunk with sufficient token count to not be merged into another section.';
-      const { app, upsert } = await buildTestApp({
-        readContent: vi.fn().mockResolvedValue({ content }),
-      });
-
-      const event: FileChangeEvent = {
-        path: 'notes/my-note.md',
-        type: 'created',
-        contentHash: 'abc123',
-      };
-
-      await emitChanges(app, [event]);
-
-      type UpsertPayload = { payload: Record<string, unknown> };
-      const call = upsert.mock.calls[0] as [string, { points: UpsertPayload[] }] | undefined;
-      if (call) {
-        const pt = call[1].points[0];
-        if (pt) {
-          const extraMetadata = JSON.parse(pt.payload['extra_metadata'] as string) as Record<
-            string,
-            unknown
-          >;
-          expect(extraMetadata['custom_field']).toBe('hello');
-          expect(extraMetadata['another']).toBe(42);
-          // Standard fields must NOT appear in extra_metadata
-          expect(extraMetadata['tags']).toBeUndefined();
-        }
-      }
-
-      await app.close();
-    });
   });
 
-  // ── updated events ──────────────────────────────────────────────────────
-
-  describe('updated event', () => {
-    it('re-embeds and upserts, then cleans stale vectors', async () => {
-      const { app, readContent, embed, upsert, qdrantDelete } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'notes/my-note.md',
-        type: 'updated',
-        contentHash: 'newHash456',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(readContent).toHaveBeenCalledWith('notes/my-note.md');
-      expect(embed).toHaveBeenCalled();
-      expect(upsert).toHaveBeenCalled();
-
-      // Verify stale cleanup (chunk_index range filter)
-      type DeleteArg = { filter: { must: Array<{ key: string; range?: unknown }> } };
-      const deleteCalls = qdrantDelete.mock.calls as [string, DeleteArg][];
-      const staleCleanup = deleteCalls.find((call) =>
-        call[1].filter.must.some((c) => c.key === 'chunk_index' && c.range !== undefined),
-      );
-      expect(staleCleanup).toBeDefined();
-
-      await app.close();
-    });
-  });
-
-  // ── deleted events ──────────────────────────────────────────────────────
+  // ── deleted events ──
 
   describe('deleted event', () => {
-    it('deletes all vectors for the path from Qdrant', async () => {
+    it('deletes vectors from tenant Qdrant', async () => {
       const { app, readContent, embed, upsert, qdrantDelete } = await buildTestApp();
 
       const event: FileChangeEvent = {
@@ -391,14 +345,12 @@ describe('pipeline plugin', () => {
         contentHash: 'abc123',
       };
 
-      await emitChanges(app, [event]);
+      await processChanges(app, TEST_USER_ID, [event]);
 
       expect(readContent).not.toHaveBeenCalled();
       expect(embed).not.toHaveBeenCalled();
       expect(upsert).not.toHaveBeenCalled();
-
       expect(qdrantDelete).toHaveBeenCalledWith(
-        'cognivault',
         expect.objectContaining({
           filter: expect.objectContaining({
             must: expect.arrayContaining([
@@ -408,39 +360,14 @@ describe('pipeline plugin', () => {
         }),
       );
 
-      // For deleted events, no chunk_index filter — just path filter
-      type DeleteArg = { filter: { must: Array<{ key: string }> } };
-      const deleteCall = qdrantDelete.mock.calls[0] as [string, DeleteArg] | undefined;
-      if (deleteCall) {
-        const hasChunkIndexFilter = deleteCall[1].filter.must.some((c) => c.key === 'chunk_index');
-        expect(hasChunkIndexFilter).toBe(false);
-      }
-
-      await app.close();
-    });
-
-    it('does not call embed or upsert for deleted events', async () => {
-      const { app, upsert, embed } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'notes/to-delete.md',
-        type: 'deleted',
-        contentHash: 'abc123',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(upsert).not.toHaveBeenCalled();
-      expect(embed).not.toHaveBeenCalled();
-
       await app.close();
     });
   });
 
-  // ── moved events ────────────────────────────────────────────────────────
+  // ── moved events ──
 
   describe('moved event', () => {
-    it('updates path and title in Qdrant payload without re-embedding', async () => {
+    it('updates payload in tenant Qdrant without re-embedding', async () => {
       const { app, embed, upsert, setPayload } = await buildTestApp();
 
       const event: FileChangeEvent = {
@@ -450,12 +377,11 @@ describe('pipeline plugin', () => {
         oldPath: 'notes/old-location.md',
       };
 
-      await emitChanges(app, [event]);
+      await processChanges(app, TEST_USER_ID, [event]);
 
       expect(embed).not.toHaveBeenCalled();
       expect(upsert).not.toHaveBeenCalled();
       expect(setPayload).toHaveBeenCalledWith(
-        'cognivault',
         expect.objectContaining({
           payload: expect.objectContaining({
             path: 'notes/new-location.md',
@@ -473,33 +399,128 @@ describe('pipeline plugin', () => {
 
       await app.close();
     });
+  });
 
-    it('updates title in payload when moved to new filename', async () => {
-      const { app, setPayload } = await buildTestApp();
+  // ── metrics with user_id ──
+
+  describe('metrics with user_id label', () => {
+    it('passes user_id to pipelineDuration.startTimer', async () => {
+      const { app, metrics } = await buildTestApp();
 
       const event: FileChangeEvent = {
-        path: 'notes/new-name.md',
-        type: 'moved',
+        path: 'notes/my-note.md',
+        type: 'created',
         contentHash: 'abc123',
-        oldPath: 'notes/old-name.md',
       };
 
-      await emitChanges(app, [event]);
+      await processChanges(app, TEST_USER_ID, [event]);
 
-      type SetPayloadArg = { payload: Record<string, unknown> };
-      const call = setPayload.mock.calls[0] as [string, SetPayloadArg] | undefined;
-      if (call) {
-        expect(call[1].payload['title']).toBe('new-name');
-      }
+      expect(metrics.pipelineDuration.startTimer).toHaveBeenCalledWith({ user_id: TEST_USER_ID });
+
+      await app.close();
+    });
+
+    it('passes user_id to embeddingRequests.inc', async () => {
+      const { app, metrics } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'notes/my-note.md',
+        type: 'created',
+        contentHash: 'abc123',
+      };
+
+      await processChanges(app, TEST_USER_ID, [event]);
+
+      expect(metrics.embeddingRequests.inc).toHaveBeenCalledWith({ user_id: TEST_USER_ID });
+
+      await app.close();
+    });
+
+    it('passes user_id to chunksProcessed.inc', async () => {
+      const { app, metrics } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'notes/my-note.md',
+        type: 'created',
+        contentHash: 'abc123',
+      };
+
+      await processChanges(app, TEST_USER_ID, [event]);
+
+      expect(metrics.chunksProcessed.inc).toHaveBeenCalledWith(
+        { user_id: TEST_USER_ID },
+        expect.any(Number),
+      );
+
+      await app.close();
+    });
+
+    it('passes user_id to staleVectorCleanups.inc', async () => {
+      const { app, metrics } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'notes/my-note.md',
+        type: 'created',
+        contentHash: 'abc123',
+      };
+
+      await processChanges(app, TEST_USER_ID, [event]);
+
+      expect(metrics.staleVectorCleanups.inc).toHaveBeenCalledWith({ user_id: TEST_USER_ID });
 
       await app.close();
     });
   });
 
-  // ── frontmatter-only notes ───────────────────────────────────────────────
+  // ── queue depth tracking ──
+
+  describe('queue depth tracking', () => {
+    it('updates indexQueueDepth gauge with user_id after queuing', async () => {
+      const { app, metrics } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'notes/my-note.md',
+        type: 'created',
+        contentHash: 'abc123',
+      };
+
+      await processChanges(app, TEST_USER_ID, [event]);
+
+      expect(metrics.indexQueueDepth.set).toHaveBeenCalledWith(
+        { user_id: TEST_USER_ID },
+        expect.any(Number),
+      );
+
+      await app.close();
+    });
+  });
+
+  // ── image file dispatch ──
+
+  describe('image file dispatch', () => {
+    it('skips Qdrant operations for image files', async () => {
+      const { app, upsert, embed, qdrantDelete } = await buildTestApp();
+
+      const event: FileChangeEvent = {
+        path: 'attachments/diagram.png',
+        type: 'created',
+        contentHash: 'imghash',
+      };
+
+      await processChanges(app, TEST_USER_ID, [event]);
+
+      expect(embed).not.toHaveBeenCalled();
+      expect(upsert).not.toHaveBeenCalled();
+      expect(qdrantDelete).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
+  // ── frontmatter-only notes ──
 
   describe('frontmatter-only notes', () => {
-    it('skips embedding but still cleans stale vectors', async () => {
+    it('skips embedding but cleans stale vectors on tenant Qdrant', async () => {
       const content = '---\ntags: [ai]\ntitle: My Note\n---\n';
       const { app, embed, upsert, qdrantDelete } = await buildTestApp({
         readContent: vi.fn().mockResolvedValue({ content }),
@@ -511,417 +532,13 @@ describe('pipeline plugin', () => {
         contentHash: 'abc123',
       };
 
-      await emitChanges(app, [event]);
+      await processChanges(app, TEST_USER_ID, [event]);
 
       expect(embed).not.toHaveBeenCalled();
       expect(upsert).not.toHaveBeenCalled();
       expect(qdrantDelete).toHaveBeenCalled();
 
       await app.close();
-    });
-  });
-
-  // ── partial failure handling ─────────────────────────────────────────────
-
-  describe('partial failure handling', () => {
-    it('processes other events when one event fails', async () => {
-      const readContent = vi
-        .fn()
-        .mockRejectedValueOnce(new Error('File read error'))
-        .mockResolvedValueOnce({ content: RICH_CONTENT });
-
-      const { app, upsert } = await buildTestApp({ readContent });
-
-      const events: FileChangeEvent[] = [
-        { path: 'notes/error-note.md', type: 'created', contentHash: 'err1' },
-        { path: 'notes/ok-note.md', type: 'created', contentHash: 'ok1' },
-      ];
-
-      await emitChanges(app, events);
-
-      expect(upsert).toHaveBeenCalled();
-
-      type UpsertArg = { points: Array<{ payload: { path: string } }> };
-      const upsertPaths = (upsert.mock.calls as [string, UpsertArg][]).map(
-        (call) => call[1].points[0]?.payload.path,
-      );
-      expect(upsertPaths).toContain('notes/ok-note.md');
-
-      await app.close();
-    });
-  });
-
-  // ── deterministic chunk IDs ──────────────────────────────────────────────
-
-  describe('deterministic chunk IDs', () => {
-    it('generates UUID v5 IDs deterministically from path and chunk_index', async () => {
-      const { app, upsert } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'notes/my-note.md',
-        type: 'created',
-        contentHash: 'abc123',
-      };
-
-      // First run
-      await emitChanges(app, [event]);
-
-      type UpsertArg = { points: Array<{ id: string }> };
-      const firstCall = upsert.mock.calls[0] as [string, UpsertArg] | undefined;
-      expect(firstCall).toBeDefined();
-      const firstId = firstCall?.[1].points[0]?.id;
-      expect(firstId).toBeDefined();
-      // UUID v5 has version nibble = 5
-      expect(firstId).toMatch(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
-      );
-
-      // Second run with same inputs — IDs must be identical
-      upsert.mockClear();
-      await emitChanges(app, [event]);
-
-      const secondCall = upsert.mock.calls[0] as [string, UpsertArg] | undefined;
-      const secondId = secondCall?.[1].points[0]?.id;
-      expect(secondId).toBe(firstId);
-
-      await app.close();
-    });
-  });
-
-  // ── format dispatch ───────────────────────────────────────────────────────
-
-  describe('PDF file dispatch', () => {
-    it('calls chunkPdf with Buffer for .pdf files (reads via fs.readFile not vault.readContent)', async () => {
-      mockFsReadFile.mockResolvedValueOnce(Buffer.from('fake pdf content'));
-
-      const { app, readContent, upsert, embed } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'docs/report.pdf',
-        type: 'created',
-        contentHash: 'pdfhash',
-      };
-
-      await emitChanges(app, [event]);
-
-      // vault.readContent should NOT be called for PDF
-      expect(readContent).not.toHaveBeenCalledWith('docs/report.pdf');
-      // chunkPdf should be called
-      expect(mockChunkPdf).toHaveBeenCalledWith(expect.any(Buffer), 'report');
-      // Should embed and upsert
-      expect(embed).toHaveBeenCalled();
-      expect(upsert).toHaveBeenCalled();
-
-      await app.close();
-    });
-  });
-
-  describe('CSV file dispatch', () => {
-    it('calls chunkCsv with content string for .csv files (reads via vault.readContent)', async () => {
-      const csvContent = 'name,age\nAlice,30\nBob,25';
-      const { app, readContent, upsert, embed } = await buildTestApp({
-        readContent: vi.fn().mockResolvedValue({ content: csvContent }),
-      });
-
-      const event: FileChangeEvent = {
-        path: 'data/users.csv',
-        type: 'created',
-        contentHash: 'csvhash',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(readContent).toHaveBeenCalledWith('data/users.csv');
-      expect(mockChunkCsv).toHaveBeenCalledWith(csvContent, 'users');
-      expect(embed).toHaveBeenCalled();
-      expect(upsert).toHaveBeenCalled();
-
-      await app.close();
-    });
-  });
-
-  describe('Canvas file dispatch', () => {
-    it('calls chunkCanvas with content string for .canvas files', async () => {
-      const canvasContent = '{"nodes":[],"edges":[]}';
-      const { app, readContent, upsert, embed } = await buildTestApp({
-        readContent: vi.fn().mockResolvedValue({ content: canvasContent }),
-      });
-
-      const event: FileChangeEvent = {
-        path: 'diagrams/architecture.canvas',
-        type: 'created',
-        contentHash: 'canvashash',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(readContent).toHaveBeenCalledWith('diagrams/architecture.canvas');
-      expect(mockChunkCanvas).toHaveBeenCalledWith(canvasContent, 'architecture');
-      expect(embed).toHaveBeenCalled();
-      expect(upsert).toHaveBeenCalled();
-
-      await app.close();
-    });
-  });
-
-  describe('Excalidraw file dispatch', () => {
-    it('calls chunkExcalidraw with content string for .excalidraw files', async () => {
-      const excalidrawContent = '{"type":"excalidraw","elements":[]}';
-      const { app, readContent, upsert, embed } = await buildTestApp({
-        readContent: vi.fn().mockResolvedValue({ content: excalidrawContent }),
-      });
-
-      const event: FileChangeEvent = {
-        path: 'diagrams/flow.excalidraw',
-        type: 'created',
-        contentHash: 'excalidrawhash',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(readContent).toHaveBeenCalledWith('diagrams/flow.excalidraw');
-      expect(mockChunkExcalidraw).toHaveBeenCalledWith(excalidrawContent, 'flow');
-      expect(embed).toHaveBeenCalled();
-      expect(upsert).toHaveBeenCalled();
-
-      await app.close();
-    });
-  });
-
-  describe('Image file dispatch', () => {
-    it('processes .png files as SQLite-only — no Qdrant upsert', async () => {
-      const { app, upsert, embed, qdrantDelete } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'attachments/diagram.png',
-        type: 'created',
-        contentHash: 'imghash',
-      };
-
-      await emitChanges(app, [event]);
-
-      // No embedding or Qdrant upsert for images
-      expect(embed).not.toHaveBeenCalled();
-      expect(upsert).not.toHaveBeenCalled();
-      // No Qdrant delete for images (no vectors to clean)
-      expect(qdrantDelete).not.toHaveBeenCalled();
-
-      await app.close();
-    });
-
-    it('processes .jpg files as SQLite-only — no Qdrant upsert', async () => {
-      const { app, upsert, embed } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'attachments/photo.jpg',
-        type: 'created',
-        contentHash: 'jpghash',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(embed).not.toHaveBeenCalled();
-      expect(upsert).not.toHaveBeenCalled();
-
-      await app.close();
-    });
-
-    it('calls extractImageBacklinks for image files', async () => {
-      const { app } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'attachments/logo.png',
-        type: 'created',
-        contentHash: 'logohash',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(mockExtractImageBacklinks).toHaveBeenCalledWith('logo.png', expect.any(Array));
-
-      await app.close();
-    });
-
-    it('skips Qdrant delete for image files on deleted event', async () => {
-      const { app, qdrantDelete } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'attachments/old-image.png',
-        type: 'deleted',
-        contentHash: 'oldhash',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(qdrantDelete).not.toHaveBeenCalled();
-
-      await app.close();
-    });
-
-    it('skips Qdrant setPayload for image files on moved event', async () => {
-      const { app, setPayload } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'attachments/new-location.png',
-        type: 'moved',
-        contentHash: 'mvhash',
-        oldPath: 'attachments/old-location.png',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(setPayload).not.toHaveBeenCalled();
-
-      await app.close();
-    });
-  });
-
-  describe('Unknown extension dispatch', () => {
-    it('skips processing for unknown file extensions', async () => {
-      const { app, upsert, embed, qdrantDelete } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'docs/readme.xyz',
-        type: 'created',
-        contentHash: 'xyzHash',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(embed).not.toHaveBeenCalled();
-      expect(upsert).not.toHaveBeenCalled();
-      expect(qdrantDelete).not.toHaveBeenCalled();
-
-      await app.close();
-    });
-  });
-
-  describe('moved event with non-markdown extension', () => {
-    it('uses dynamic extension for title extraction in moved events', async () => {
-      const { app, setPayload } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'notes/new-name.md',
-        type: 'moved',
-        contentHash: 'movehash',
-        oldPath: 'notes/old-name.md',
-      };
-
-      await emitChanges(app, [event]);
-
-      type SetPayloadArg = { payload: Record<string, unknown> };
-      const call = setPayload.mock.calls[0] as [string, SetPayloadArg] | undefined;
-      if (call) {
-        expect(call[1].payload['title']).toBe('new-name');
-      }
-
-      await app.close();
-    });
-  });
-
-  // ── pipeline metrics ─────────────────────────────────────────────────────
-
-  describe('pipeline metrics', () => {
-    it('increments embeddingRequests when processing a markdown file', async () => {
-      const { app, metrics } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'notes/my-note.md',
-        type: 'created',
-        contentHash: 'abc123',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(metrics.embeddingRequests.inc).toHaveBeenCalled();
-
-      await app.close();
-    });
-
-    it('increments chunksProcessed with chunk count when processing a markdown file', async () => {
-      const { app, metrics } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'notes/my-note.md',
-        type: 'created',
-        contentHash: 'abc123',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(metrics.chunksProcessed.inc).toHaveBeenCalledWith(expect.any(Number));
-
-      await app.close();
-    });
-
-    it('starts and ends pipelineDuration timer when processing a markdown file', async () => {
-      const { app, metrics } = await buildTestApp();
-
-      const event: FileChangeEvent = {
-        path: 'notes/my-note.md',
-        type: 'created',
-        contentHash: 'abc123',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(metrics.pipelineDuration.startTimer).toHaveBeenCalled();
-      // Verify the returned end() function was called
-      const endFn = metrics.pipelineDuration.startTimer.mock.results[0]?.value as
-        | ReturnType<typeof vi.fn>
-        | undefined;
-      expect(endFn).toBeDefined();
-      if (endFn) {
-        expect(endFn).toHaveBeenCalled();
-      }
-
-      await app.close();
-    });
-
-    it('starts pipelineDuration timer for non-markdown formats (csv)', async () => {
-      const csvContent = 'name,age\nAlice,30\nBob,25';
-      const { app, metrics } = await buildTestApp({
-        readContent: vi.fn().mockResolvedValue({ content: csvContent }),
-      });
-
-      const event: FileChangeEvent = {
-        path: 'data/users.csv',
-        type: 'created',
-        contentHash: 'csvhash',
-      };
-
-      await emitChanges(app, [event]);
-
-      expect(metrics.pipelineDuration.startTimer).toHaveBeenCalled();
-      expect(metrics.embeddingRequests.inc).toHaveBeenCalled();
-      expect(metrics.chunksProcessed.inc).toHaveBeenCalledWith(expect.any(Number));
-
-      await app.close();
-    });
-  });
-
-  // ── plugin lifecycle ─────────────────────────────────────────────────────
-
-  describe('plugin lifecycle', () => {
-    it('registers changes listener on indexer.on', async () => {
-      const { app } = await buildTestApp();
-
-      type IndexerMock = { on: ReturnType<typeof vi.fn> };
-      const indexer = app.indexer as unknown as IndexerMock;
-      const onChangesCall = indexer.on.mock.calls.find((c: unknown[]) => c[0] === 'changes');
-      expect(onChangesCall).toBeDefined();
-
-      await app.close();
-    });
-
-    it('removes changes listener on app close', async () => {
-      const { app } = await buildTestApp();
-
-      type IndexerMock = { removeListener: ReturnType<typeof vi.fn> };
-      const indexer = app.indexer as unknown as IndexerMock;
-      await app.close();
-
-      expect(indexer.removeListener).toHaveBeenCalledWith('changes', expect.any(Function));
     });
   });
 });

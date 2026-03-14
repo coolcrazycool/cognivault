@@ -11,15 +11,15 @@ const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'toon-test-'));
 const vaultRoot = path.join(tmpDir, 'vault');
 await fs.mkdir(vaultRoot, { recursive: true });
 
-process.env.COGNIVAULT_API_KEY = 'test-api-key';
 process.env.VAULT_PATH = vaultRoot;
 process.env.OPENAI_API_KEY = 'test-openai-key';
 
 // Import plugins after env vars are set
 const { default: errorHandler } = await import('../error-handler.js');
 const { default: authPlugin } = await import('../auth.js');
+const { Registry: PromRegistry } = await import('prom-client');
 
-const API_KEY = 'test-api-key';
+const API_KEY = 'cv-test-toon-key';
 
 /**
  * Build a minimal Fastify app with only error-handler, auth, and toon plugins.
@@ -27,6 +27,40 @@ const API_KEY = 'test-api-key';
  */
 async function buildMinimalApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+
+  const fp = (await import('fastify-plugin')).default;
+
+  // Mock metrics plugin (named, for auth dependency resolution)
+  await app.register(
+    fp(
+      async (f) => {
+        const promReg = new PromRegistry();
+        f.decorate('metrics', { promRegistry: promReg } as unknown as FastifyInstance['metrics']);
+      },
+      { name: 'metrics' },
+    ),
+  );
+
+  // Mock registry plugin (named, for auth dependency resolution)
+  await app.register(
+    fp(
+      async (f) => {
+        f.decorate('registry', {
+          getUserByApiKey: (key: string) =>
+            key === 'cv-test-toon-key'
+              ? {
+                  userId: 'test-user',
+                  apiKey: 'cv-test-toon-key',
+                  vaultPath: vaultRoot,
+                  openaiKey: 'test-openai-key',
+                  obsidian: { email: 'test@test.com', password: 'secret', vault: 'v' },
+                }
+              : undefined,
+        } as unknown as FastifyInstance['registry']);
+      },
+      { name: 'registry' },
+    ),
+  );
 
   await app.register(errorHandler);
   await app.register(authPlugin);

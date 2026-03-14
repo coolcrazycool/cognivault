@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
+import { Registry as PromRegistry } from 'prom-client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Set env vars before any module imports that trigger config parsing
-process.env.COGNIVAULT_API_KEY = 'test-search-key';
 process.env.VAULT_PATH = '/tmp/test-vault';
 process.env.OPENAI_API_KEY = 'test-openai-key';
 
@@ -59,15 +59,18 @@ const MOCK_SCROLL_RESULT = {
 
 const MOCK_EMBEDDING = [Array.from({ length: 10 }, (_, i) => (i + 1) * 0.1)];
 
-// ── Mock Qdrant and embedder ──
+// ── Mock Qdrant (TenantQdrantClient interface) and embedder ──
 
 const mockQdrantSearch = vi.fn().mockResolvedValue(MOCK_SCORED_POINTS);
 const mockQdrantScroll = vi.fn().mockResolvedValue(MOCK_SCROLL_RESULT);
 const mockEmbed = vi.fn().mockResolvedValue(MOCK_EMBEDDING);
 
-const mockQdrant = {
+const mockTenantQdrant = {
   search: mockQdrantSearch,
   scroll: mockQdrantScroll,
+  upsert: vi.fn(),
+  delete: vi.fn(),
+  setPayload: vi.fn(),
 };
 
 const mockEmbedder = {
@@ -82,17 +85,49 @@ async function buildTestApp(): Promise<FastifyInstance> {
 
   const app = Fastify({ logger: false });
 
-  // Decorate with mocked qdrant and embedder (cast to satisfy Fastify TypeScript type checks)
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial QdrantClient
-  app.decorate('qdrant', mockQdrant as any);
-  // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial EmbeddingProvider
-  app.decorate('embedder', mockEmbedder as any);
-  app.decorate('metrics', {
-    searchDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
-    searchRequests: { inc: vi.fn() },
-    indexQueueDepth: { set: vi.fn() },
-    staleVectorCleanups: { inc: vi.fn() },
-  } as unknown as FastifyInstance['metrics']);
+  // Decorate with mocked per-user embedder lookup
+  // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial EmbeddingProvider
+  app.decorate('getUserEmbedder', (_userId: string) => mockEmbedder as any);
+
+  const { default: fp } = await import('fastify-plugin');
+
+  // Mock metrics plugin (named, for auth dependency resolution)
+  await app.register(
+    fp(
+      async (f) => {
+        const promRegistry = new PromRegistry();
+        f.decorate('metrics', {
+          promRegistry,
+          searchDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
+          searchRequests: { inc: vi.fn() },
+          indexQueueDepth: { set: vi.fn() },
+          staleVectorCleanups: { inc: vi.fn() },
+        } as unknown as FastifyInstance['metrics']);
+      },
+      { name: 'metrics' },
+    ),
+  );
+
+  // Mock registry plugin (named, for auth dependency resolution)
+  await app.register(
+    fp(
+      async (f) => {
+        f.decorate('registry', {
+          getUserByApiKey: (key: string) =>
+            key === 'cv-test-search-key'
+              ? {
+                  userId: 'test-user',
+                  apiKey: 'cv-test-search-key',
+                  vaultPath: '/tmp/test-vault',
+                  openaiKey: 'test-openai-key',
+                  obsidian: { email: 'test@test.com', password: 'secret', vault: 'v' },
+                }
+              : undefined,
+        } as unknown as FastifyInstance['registry']);
+      },
+      { name: 'registry' },
+    ),
+  );
 
   // Register error handler (converts validation errors to proper 400 responses)
   const { default: errorHandler } = await import('../../../plugins/error-handler.js');
@@ -101,6 +136,14 @@ async function buildTestApp(): Promise<FastifyInstance> {
   // Register auth plugin so auth is enforced
   const { default: authPlugin } = await import('../../../plugins/auth.js');
   await app.register(authPlugin);
+
+  // Add onRequest hook to provide getUserQdrant on authenticated requests
+  app.addHook('onRequest', async (request) => {
+    if (request.user) {
+      request.getUserQdrant = () =>
+        mockTenantQdrant as unknown as ReturnType<typeof request.getUserQdrant>;
+    }
+  });
 
   // Register search routes with prefix
   const { searchRoutes } = await import('../routes.js');
@@ -136,7 +179,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test query' },
       });
 
@@ -161,17 +204,16 @@ describe('search routes', () => {
       expect('status' in first).toBe(true);
     });
 
-    it('calls embedder.embed with query and qdrant.search with the embedding vector', async () => {
+    it('calls embedder.embed with query and tenant qdrant.search with the embedding vector', async () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'embedding test' },
       });
 
       expect(mockEmbed).toHaveBeenCalledWith(['embedding test']);
       expect(mockQdrantSearch).toHaveBeenCalledWith(
-        'cognivault',
         expect.objectContaining({
           vector: MOCK_EMBEDDING[0],
           with_payload: true,
@@ -183,22 +225,19 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', limit: 5 },
       });
 
       expect(response.statusCode).toBe(200);
-      expect(mockQdrantSearch).toHaveBeenCalledWith(
-        'cognivault',
-        expect.objectContaining({ limit: 5 }),
-      );
+      expect(mockQdrantSearch).toHaveBeenCalledWith(expect.objectContaining({ limit: 5 }));
     });
 
     it('returns 400 with empty query', async () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: '' },
       });
 
@@ -220,7 +259,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test' },
       });
 
@@ -236,7 +275,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', limit: 7 },
       });
 
@@ -249,7 +288,7 @@ describe('search routes', () => {
     });
 
     it('folder filter in semantic search returns only matching paths', async () => {
-      // Qdrant returns mixed paths — folder filter should post-filter them
+      // Qdrant returns mixed paths -- folder filter should post-filter them
       mockQdrantSearch.mockResolvedValueOnce([
         {
           id: 'uuid-p1',
@@ -284,7 +323,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', filters: { folder: 'Projects/' } },
       });
 
@@ -300,7 +339,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test query' },
       });
 
@@ -317,7 +356,7 @@ describe('search routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'hybrid test' },
       });
 
@@ -329,22 +368,19 @@ describe('search routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'hybrid test', limit: 5 },
       });
 
-      // semantic uses qdrant.search — it should receive limit=10 (2x)
-      expect(mockQdrantSearch).toHaveBeenCalledWith(
-        'cognivault',
-        expect.objectContaining({ limit: 10 }),
-      );
+      // semantic uses qdrant.search -- it should receive limit=10 (2x)
+      expect(mockQdrantSearch).toHaveBeenCalledWith(expect.objectContaining({ limit: 10 }));
     });
 
     it('calls lexical with 2x the requested limit', async () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'hybrid test', limit: 5 },
       });
 
@@ -392,7 +428,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'shared', limit: 10 },
       });
 
@@ -406,13 +442,13 @@ describe('search routes', () => {
       expect(sharedResults[0].score).toBeGreaterThan(singleRrfScore);
     });
 
-    it('degrades gracefully when semantic returns empty — returns lexical results', async () => {
+    it('degrades gracefully when semantic returns empty -- returns lexical results', async () => {
       mockQdrantSearch.mockResolvedValueOnce([]);
 
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test' },
       });
 
@@ -421,13 +457,13 @@ describe('search routes', () => {
       expect(body.results.length).toBeGreaterThan(0);
     });
 
-    it('degrades gracefully when lexical returns empty — returns semantic results', async () => {
+    it('degrades gracefully when lexical returns empty -- returns semantic results', async () => {
       mockQdrantScroll.mockResolvedValueOnce({ points: [] });
 
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test' },
       });
 
@@ -440,7 +476,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test' },
       });
 
@@ -456,7 +492,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: '' },
       });
 
@@ -478,7 +514,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', limit: 6 },
       });
 
@@ -491,7 +527,7 @@ describe('search routes', () => {
     });
 
     it('hybrid search with folder filter excludes results outside folder', async () => {
-      // Both semantic and lexical return mixed paths — only Projects/ should survive
+      // Both semantic and lexical return mixed paths -- only Projects/ should survive
       mockQdrantSearch.mockResolvedValueOnce([
         {
           id: 'uuid-s1',
@@ -556,7 +592,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', filters: { folder: 'Projects/' } },
       });
 
@@ -575,7 +611,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/lexical',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'ingestion' },
       });
 
@@ -589,16 +625,15 @@ describe('search routes', () => {
       }
     });
 
-    it('calls qdrant.scroll (not search) with should conditions for text/title/section_path', async () => {
+    it('calls tenant qdrant.scroll (not search) with should conditions for text/title/section_path', async () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/lexical',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'ingestion' },
       });
 
       expect(mockQdrantScroll).toHaveBeenCalledWith(
-        'cognivault',
         expect.objectContaining({
           filter: expect.objectContaining({
             should: expect.arrayContaining([
@@ -613,16 +648,15 @@ describe('search routes', () => {
       expect(mockQdrantSearch).not.toHaveBeenCalled();
     });
 
-    it('filter by tags passes MatchAny to Qdrant must conditions', async () => {
+    it('filter by tags passes MatchAny to must conditions', async () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/lexical',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', filters: { tags: ['project-a'] } },
       });
 
       expect(mockQdrantScroll).toHaveBeenCalledWith(
-        'cognivault',
         expect.objectContaining({
           filter: expect.objectContaining({
             must: expect.arrayContaining([{ key: 'tags', match: { any: ['project-a'] } }]),
@@ -632,7 +666,7 @@ describe('search routes', () => {
     });
 
     it('filter by folder prefix post-filters results by path.startsWith', async () => {
-      // Scroll returns points with paths — some in Projects/ some not
+      // Scroll returns points with paths -- some in Projects/ some not
       const mixedScrollResult = {
         points: [
           {
@@ -668,7 +702,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/lexical',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', filters: { folder: 'Projects/' } },
       });
 
@@ -678,16 +712,15 @@ describe('search routes', () => {
       expect(body.results[0].path).toBe('Projects/alpha.md');
     });
 
-    it('filter by type passes MatchValue to Qdrant must conditions', async () => {
+    it('filter by type passes MatchValue to must conditions', async () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/lexical',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', filters: { type: 'meeting-note' } },
       });
 
       expect(mockQdrantScroll).toHaveBeenCalledWith(
-        'cognivault',
         expect.objectContaining({
           filter: expect.objectContaining({
             must: expect.arrayContaining([{ key: 'type', match: { value: 'meeting-note' } }]),
@@ -711,7 +744,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/lexical',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', limit: 3 },
       });
 

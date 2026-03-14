@@ -1,161 +1,161 @@
 # Feature Research
 
-**Domain:** Multi-user containerized deployment — per-user CogniVault+Obsidian+VNC with shared infrastructure (v2.0 milestone)
-**Researched:** 2026-03-13
-**Confidence:** MEDIUM-HIGH (key facts verified via official sources; operational patterns from community sources)
+**Domain:** Multi-tenant vault sync + user lifecycle management (v2.0 milestone)
+**Researched:** 2026-03-14
+**Confidence:** HIGH for multi-tenant routing patterns, MEDIUM for obsidian-headless auth flow (beta tool, limited documentation), HIGH for CLI management patterns
+
+> **Scope:** This file covers ONLY the new features being added in v2.0. It does not re-document the v1.0 features (vault CRUD, hybrid search, context packs, etc.) which are fully shipped and stable. All v2.0 features build on top of the existing codebase.
 
 ---
 
-## Context: Scope Boundary
+## Existing Foundation (v1.0 — Do Not Rebuild)
 
-This research is scoped exclusively to **what is NEW in v2.0**. The following already exist in v1.0 and must not be re-implemented:
+The following are already production-complete and must be preserved intact:
 
-- REST API CRUD, hybrid search, context assembly, multi-format indexing
-- Single API key authentication
-- Docker Compose deployment (CogniVault + Qdrant + Prometheus + Grafana)
-- Prometheus metrics, OpenTelemetry tracing, structured logging
-- Health/readiness endpoints
-
----
-
-## Critical Discovery: Obsidian Headless Client (February 2026)
-
-Obsidian released an official headless sync client (`obsidianmd/obsidian-headless`) in February 2026. This **eliminates the need for a full GUI+VNC container purely for sync purposes**.
-
-Key facts (HIGH confidence — verified via official GitHub):
-- NPM package: `ob login`, `ob sync`, `ob sync --continuous`
-- Requires Node.js 22+ (matches existing project runtime)
-- Non-interactive auth via `OBSIDIAN_AUTH_TOKEN` environment variable
-- Supports continuous sync mode, bidirectional/pull-only/mirror-remote modes
-- E2EE support, conflict resolution, selective file type sync
-- Requires an active **Obsidian Sync subscription** per user (~$8/month per user)
-
-**Architectural implication:** VNC is now decoupled from sync. VNC is needed only for users who want to visually edit their vault via a browser. Sync via `obsidian-headless` runs as a sidecar process in each user's container stack — no display server, no X11, no VNC required for it.
+- Single-user REST API with API key auth
+- Hybrid search (semantic + lexical + RRF fusion)
+- Context pack assembly
+- Multi-format indexing (MD, PDF, Canvas, Excalidraw, CSV, images)
+- Docker deployment with Qdrant sidecar
+- Prometheus + Grafana dashboards
+- SQLite index state, Qdrant vector store
 
 ---
 
-## Feature Landscape
+## Feature Landscape (v2.0 — New Features Only)
 
-### Table Stakes (Users Expect These)
+### Table Stakes (Required for Multi-Tenant to Work)
 
-Features that must exist for the multi-user platform to be operational. Missing any of these means the platform cannot serve multiple users safely.
+Features that must exist for v2.0 to be viable. Without these, multi-tenancy breaks.
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| Per-user container provisioning | Each user needs isolated CogniVault + vault storage | MEDIUM | Docker Compose per-user service stack; generated `compose.user.yml` + `.env` per user; CLI wraps docker operations |
-| Per-user API key authentication | Tenants must not access each other's data via API | LOW | Extend existing single-key auth; map API key → `user_id` in management registry; minimal code change to auth plugin |
-| Qdrant tenant isolation via payload filtering | Shared Qdrant must not leak vectors across users | MEDIUM | Add `user_id` payload field to all vectors; filter on every upsert and query; requires keyword payload index on `user_id`; change to search service + indexing subsystem |
-| Vault data persistence across restarts | User data must survive container restarts | LOW | Named Docker volumes per user (e.g., `cognivault-vault-alice`); standard Docker practice |
-| Obsidian headless sync sidecar | Each user's vault syncs from Obsidian Sync | MEDIUM | `obsidian-headless` sidecar service in user's Compose stack; `OBSIDIAN_AUTH_TOKEN` env var; `ob sync --continuous` as main process; Node.js 22 base image |
-| Container resource limits | Prevent one user starving others (noisy neighbor) | LOW | `deploy.resources.limits` in Compose — `cpus` + `memory` per service; recommended defaults: CogniVault 0.5 CPU/512M, headless sidecar 0.25 CPU/256M |
-| cognivault-ctl CLI (add/remove/list) | Operators need lifecycle management for user containers | MEDIUM | Node.js or shell CLI; generates per-user configs, calls Docker SDK (Dockerode) or shell exec; maintains user registry (JSON or SQLite) |
-| Health check per user container | Orchestration needs liveness signals | LOW | Reuse existing `/health` and `/readiness` endpoints; add `healthcheck` stanza to each Compose service |
+| **API key → user_id registry lookup** | Every multi-tenant system maps credentials to tenants. Without this, there's no routing. | LOW | In-memory map loaded from users.json. O(1) lookup per request. Auth plugin reads map; no DB hit on hot path. |
+| **Per-request tenant routing (vault path + Qdrant namespace)** | Each request must land in the correct user's data. Without namespace isolation, users see each other's data. | MEDIUM | Qdrant uses payload filter `user_id` field (is_tenant=true for perf). Vault path derived from registry. Fastify request decorator carries `tenantCtx`. |
+| **users.json registry file** | Operator-editable user config is the simplest registry that avoids a new DB dependency. | LOW | JSON file: `{ users: [{ user_id, api_key, vault_name, openai_key, obs_email, obs_password }] }`. Loaded at startup, hot-reloaded on fs.watch change. |
+| **Registry hot-reload via fs.watch** | Operators must be able to add/remove users without restarting the server. Restart causes downtime; downtime is unacceptable in production. | LOW | fs.watch (or chokidar) on users.json path. On change event: re-read, validate, swap in-memory map atomically. Log diff (added/removed users). |
+| **Per-user OpenAI API key for embeddings** | Embedding costs must be attributed to the user whose vault is being indexed. Shared key conflates costs and exhausts a single quota. | LOW | OpenAI client instantiated per-user at index time using the user's `openai_key` from registry. Not hard — it's constructor injection on the embedding call. |
+| **Qdrant per-user namespace via payload field** | Vector isolation prevents cross-tenant data leakage in search results. | MEDIUM | All Qdrant upserts include `user_id` in payload. All queries include `must: [{ key: 'user_id', match: { value } }]`. Collection stays shared (single `cognivault` collection). Create payload index on `user_id` with `is_tenant: true` for Qdrant v1.11+ optimization. |
+| **SQLite per-user index state partitioning** | Index state (hash tracking, change detection) must be scoped to each user or they overwrite each other's tracking. | LOW | Add `user_id` column to existing `index_state` table. All queries filter by user_id. No schema redesign — additive migration. |
 
-### Differentiators (Competitive Advantage)
+### Differentiators (Competitive Advantage in Multi-Tenant Context)
 
-Features that add real value beyond baseline isolation. Not required for v2.0 launch, but differentiate the platform.
+Features that go beyond functional correctness and make v2.0 operationally excellent.
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| VNC/browser access to Obsidian GUI | Users can visually manage their vault from a browser — no local Obsidian install needed | MEDIUM | `linuxserver/obsidian` image (noVNC on ports 3000/3001); per-container `PASSWORD` env var; port range allocated by CLI (e.g., user 1: 3000/3001, user 2: 3002/3003); optional service in user stack |
-| Per-user metrics labels in shared Prometheus | Operators can debug per-user performance in Grafana without separate Prometheus instances | MEDIUM | Add `user_id` default label to `prom-client` Registry at CogniVault startup; inject via env var; touches existing metrics registration code |
-| Shared Grafana with per-user dashboard variables | Single monitoring interface for all users via `$user_id` template variable | LOW | Grafana variable filters existing dashboards; no new dashboards needed; depends on per-user metrics labels |
-| Graceful user removal with volume backup | Safe offboarding — user data not silently deleted | MEDIUM | `cognivault-ctl remove --backup <user>` exports vault volume as tar via Alpine container before `docker volume rm` |
-| cognivault-ctl status output | Operators see all users, container state, and resource usage at a glance | LOW | Wraps `docker ps` + `docker stats` + container inspect; formats as table with user, status, CPU%, memory |
-| Per-user API key rotation | Security hygiene for long-running deployments | LOW | `cognivault-ctl rotate-key <user>` regenerates key in user's `.env`, restarts CogniVault container for that user |
+| **obsidian-headless sync process per user** | Each user gets a continuously-running `ob sync --continuous` process that keeps their vault up-to-date from Obsidian Sync cloud. Operators do not manage sync manually. | HIGH | Most complex new feature. Requires spawn, monitor, restart-on-crash, and auth setup per user. See Process Management section below. |
+| **`add-user` CLI command** | Single command provisions a complete user: writes registry entry, runs `ob login`, runs `ob sync-setup`, starts sync process. Operator doesn't need to know internals. | HIGH | Interactive: prompts for Obsidian creds if not provided as flags. Sequence: validate inputs → append to users.json → run `ob login --email --password` → run `ob sync-setup --vault <name> --path <vault_path>` → hot-reload triggers sync process start. |
+| **`remove-user` CLI command** | Single command tears down a user: stops sync process, removes registry entry, optionally purges vault data. Clean removal matters for billing and security. | MEDIUM | Sequence: send SIGTERM to sync process → wait for clean exit → remove from users.json → hot-reload triggers deregistration. Optionally: delete Qdrant vectors for user_id, delete SQLite rows, delete vault directory. |
+| **`list-users` CLI command** | Operator visibility into who is active, which vaults are syncing, and process health at a glance. | LOW | Output: table of user_id, vault_name, sync process PID, last sync timestamp, process uptime. JSON flag for machine-readable output. |
+| **Process health monitoring with auto-restart** | `ob sync --continuous` is a beta tool. It will crash. When it does, data goes stale. Auto-restart keeps sync running without operator intervention. | MEDIUM | Exponential backoff restart (not tight loop). Track consecutive crashes; alert (log ERROR) if crash rate exceeds threshold. Expose process status via `/admin/sync-status` endpoint. |
+| **Multi-tenant Prometheus metrics (user_id label)** | Operators need per-user observability. Which user is hammering search? Which vault is slow to index? Per-user labels enable Grafana filtering. | MEDIUM | Add `user_id` label to existing prom-client metrics: request duration, search latency, index events, embedding calls. Grafana dashboard gains user dropdown filter variable. |
+| **`/admin/sync-status` endpoint** | Operator-facing REST endpoint showing all sync process states. Complements CLI for programmatic monitoring (alerting, dashboards). | LOW | Returns: `[{ user_id, vault_name, pid, status: running|crashed|starting, uptime_s, restart_count, last_sync_at }]`. Admin-only (API key with admin scope or separate admin token). |
 
-### Anti-Features (Commonly Requested, Often Problematic)
+### Anti-Features (Commonly Requested, Explicitly Rejected)
 
 | Feature | Why Requested | Why Problematic | Alternative |
 |---------|---------------|-----------------|-------------|
-| Separate Qdrant instance per user | "True" isolation feels safer | Qdrant is memory-intensive; 10 users = 10 Qdrant instances; operational overhead is unjustified; Qdrant's own docs recommend payload-based filtering for multi-tenancy | Single shared Qdrant with `user_id` payload field + keyword filter index — Qdrant-recommended approach |
-| Separate Prometheus per user | Per-user metrics without label management | Prometheus is not lightweight; instance multiplication not justified at this scale (5-10 users) | Add `user_id` default label to prom-client; use Grafana template variables to filter by user |
-| Web UI for user management | Nicer UX for operators | Scope explosion; operators at this scale are technical; not worth the build cost | CLI (`cognivault-ctl`) is sufficient; Grafana covers observability; zero UI needed |
-| SSO / OAuth / per-user login for agents | "Real" auth for the REST API | Obsidian Sync already handles user identity; OAuth adds auth stack complexity with no benefit for the agent use case; agents do not use browser auth | API keys per user are sufficient; agents are not humans logging in via browser |
-| Kubernetes / Helm deployment | Enterprise-grade orchestration | Not justified for a self-hosted single-server deployment; massive operational surface area; no current need | Docker Compose with Dockerode-based CLI is the right tool at this scale |
-| Shared vault across users | Collaborative editing | Conflicts with Obsidian Sync's per-user vault model; requires CRDT-level merge logic; fundamentally different architecture | Per-user vault; cross-user search is a future feature if genuinely needed |
-| Real-time user session monitoring | See who is active in Obsidian VNC | Requires WebSocket / event stream infrastructure not in project scope | Prometheus connection count metrics are sufficient; container CPU activity is a proxy signal |
+| **Per-user Docker containers** | Seems like natural isolation unit | Resource explosion: each container needs 2G RAM, 1 CPU. N=10 users = 20G RAM, 10 CPUs. Also rejected in PROJECT.md architectural pivot. Single-container multi-tenant is the explicit decision. | Single Fastify process, per-request tenant routing, Qdrant payload isolation |
+| **Separate Qdrant collection per user** | Feels like the most isolated option | Qdrant Cloud limits 1,000 collections per cluster. Creates schema drift risk. Management overhead scales with user count. Official Qdrant docs say "Don't do this at scale." | Single shared collection with `user_id` payload index + `is_tenant: true` optimization |
+| **Caddy reverse proxy for multi-tenant routing** | Common in multi-tenant web apps | Overkill for single-host operator deployment. Adds Caddy config maintenance. Single-container multi-tenant doesn't need external routing — tenant is determined by API key, not subdomain. OUT OF SCOPE per PROJECT.md. | API key → user_id in-process routing |
+| **Per-user separate databases (SQLite files)** | Each user gets their own SQLite | File proliferation, no atomic cross-user queries, migration coordination nightmare. | Single SQLite with `user_id` column and indexed queries |
+| **Obsidian GUI / VNC access** | Per-user container stack (Phase 16, now abandoned) required VNC. | Out of scope after architectural pivot. VNC+GUI was the old approach. obsidian-headless replaces it cleanly. | obsidian-headless `ob sync --continuous` |
+| **OAuth / SSO user authentication** | "Real" multi-tenant systems use OAuth | Massive complexity for an operator-managed self-hosted tool. The operator IS the admin. API keys are sufficient. | API key per user, generated by `add-user` CLI, stored in users.json |
+| **Automatic user discovery from Obsidian** | "Can't you just read vault list from Obsidian API?" | Obsidian Sync API is not a public API. `ob sync-list-remote` lists vaults but requires interactive auth. Operator must explicitly configure each user. | `add-user` CLI with explicit vault name |
+| **Cross-user vault search** | "Can user A search user B's vault?" | Security violation. Multi-tenancy means strict isolation. Never expose cross-tenant data, even to admin users. | Admin can query any single user's vault by authenticating as that user |
 
 ---
 
-## Feature Dependencies
+## Feature Dependencies (v2.0 Specific)
 
 ```
-Per-user container provisioning
-    └──requires──> Per-user API key authentication (key gen + mapping)
-    └──requires──> Qdrant tenant isolation (user_id on all vectors)
-    └──requires──> Vault data persistence (named volumes)
-    └──requires──> Container resource limits (deploy.resources)
+[Multi-tenant Routing]
+    |--requires--> [users.json Registry]
+    |                   |--requires--> [Registry Hot-reload]
+    |--requires--> [API key → user_id Lookup]
+    |--requires--> [Qdrant user_id Payload Index]
+    |--requires--> [SQLite user_id Column Migration]
 
-cognivault-ctl CLI
-    └──requires──> Per-user container provisioning (CLI wraps it)
-    └──enhances──> Graceful user removal with volume backup
-    └──enhances──> cognivault-ctl status output
-    └──enhances──> Per-user API key rotation
+[obsidian-headless Sync Process]
+    |--requires--> [users.json Registry] (reads obs_email, obs_password, vault_name)
+    |--requires--> [ob login --email --password] (non-interactive auth)
+    |--requires--> [ob sync-setup --vault --path] (one-time per user)
+    |--requires--> [Process Manager] (spawn, monitor, restart)
+    |--enhances--> [Incremental Indexing] (vault on disk updated by sync, filesystem poller picks up changes)
 
-Obsidian headless sync sidecar
-    └──requires──> Per-user container provisioning (runs in user's stack)
-    └──requires──> OBSIDIAN_AUTH_TOKEN per user (external: Obsidian Sync subscription)
-    └──independent of──> VNC/browser access (sync works without GUI)
+[CLI: add-user]
+    |--requires--> [users.json Registry] (writes to it)
+    |--requires--> [obsidian-headless CLI] (runs ob login + ob sync-setup)
+    |--triggers--> [Registry Hot-reload] (server picks up new user automatically)
+    |--triggers--> [obsidian-headless Sync Process] (new user starts syncing)
 
-VNC/browser Obsidian GUI
-    └──requires──> Per-user container provisioning (optional service in stack)
-    └──requires──> Port range allocation per user (managed by CLI registry)
-    └──independent of──> Obsidian headless sync (GUI access != sync)
+[CLI: remove-user]
+    |--requires--> [users.json Registry] (removes entry)
+    |--requires--> [Process Manager] (stops sync process)
+    |--triggers--> [Registry Hot-reload] (server stops routing to removed user)
 
-Per-user metrics labels
-    └──requires──> Per-user container provisioning (user_id known at startup)
-    └──depends on──> Existing Prometheus + Grafana (already in v1.0)
-    └──enhances──> Shared Grafana per-user dashboard views
+[CLI: list-users]
+    |--requires--> [users.json Registry] (reads entries)
+    |--requires--> [Process Manager] (reads process status)
+    |--independent-- (read-only, no side effects)
 
-Shared Grafana per-user dashboard views
-    └──requires──> Per-user metrics labels
-    └──depends on──> Existing Grafana (already in v1.0)
+[Process Health Monitoring]
+    |--requires--> [Process Manager]
+    |--enhances--> [/admin/sync-status endpoint]
+    |--enhances--> [Multi-tenant Prometheus Metrics]
 
-Qdrant tenant isolation
-    └──modifies──> Existing CogniVault search service (add user_id filter to every query)
-    └──modifies──> Existing CogniVault indexing subsystem (add user_id to every upsert)
-    └──requires──> user_id keyword payload index in Qdrant (one-time setup per collection)
+[Per-user Prometheus Metrics]
+    |--requires--> [Multi-tenant Routing] (user_id available per request)
+    |--enhances--> [Grafana Dashboards] (existing dashboards gain user_id filter)
+
+[Per-user OpenAI Keys]
+    |--requires--> [users.json Registry] (reads openai_key per user)
+    |--requires--> [Multi-tenant Routing] (user context available at embedding time)
 ```
 
 ### Dependency Notes
 
-- **Qdrant isolation is a cross-cutting code change:** Every Qdrant upsert and every search query in CogniVault must be modified to include `user_id`. This touches `src/features/search/service.ts` and the indexing subsystem. It must be the first code change made — everything else builds on top of it.
-- **VNC is independent of sync:** Thanks to `obsidian-headless`, VNC is purely a UI convenience feature. Sync works without VNC. These can be developed and shipped in separate phases.
-- **Per-user metrics labels require startup-time injection:** `user_id` is available as an env var when the container starts. The `prom-client` Registry default labels must be set at app initialization, not per-request. This is a small but early change.
-- **CLI depends on container provisioning design being settled first:** The CLI is a wrapper; the per-user Compose template must be defined before the CLI can generate instances of it.
-- **VNC port allocation must be managed by CLI registry:** Without coordinated port assignment, two users can be allocated overlapping ports. The CLI user registry must track port assignments.
+- **Registry is the keystone dependency:** Every other v2.0 feature reads from users.json. It must be implemented first.
+- **ob sync-setup is a one-time operation:** Must run exactly once per user (when `add-user` is called). Running it again for an already-configured vault may fail or create duplicate configs. The process manager just runs `ob sync --continuous`; setup is CLI-only.
+- **Hot-reload must be atomic:** If hot-reload fails mid-read (malformed JSON during write), the server must keep the last-good registry, not crash. Read-validate-swap pattern.
+- **Qdrant payload index must exist before first user is added:** Creating the index on a populated collection works, but creating it before any data is cheaper. Migration phase must create the `user_id` payload index with `is_tenant: true` before first user is provisioned.
+- **SQLite migration is additive:** Adding `user_id` column with NOT NULL DEFAULT '' to existing tables, then backfilling with a known user_id for any legacy data from v1.0 single-user operation.
+- **Per-user OpenAI keys do not affect routing:** They only affect which client is used during embedding calls. The routing (API key → user_id) uses CogniVault API keys, not OpenAI keys.
 
 ---
 
-## MVP Definition
+## MVP Definition (v2.0 Milestone)
 
 ### Launch With (v2.0)
 
-Minimum viable multi-user platform — what is needed to run multiple users safely and operationally.
+Minimum viable multi-tenant system. Every item is load-bearing.
 
-- [ ] Qdrant tenant isolation (`user_id` payload field + keyword index + filter on all queries) — data boundary; must be first
-- [ ] Per-user container provisioning (CogniVault + obsidian-headless sidecar) — isolation unit
-- [ ] Per-user API key (generated at provisioning time, mapped to `user_id`) — auth boundary
-- [ ] Container resource limits in Compose config — noisy neighbor prevention
-- [ ] Vault data persistence via named Docker volumes — data durability
-- [ ] `cognivault-ctl add/remove/list` CLI — operational lifecycle management
+- [ ] **users.json registry with hot-reload** — fundamental tenant configuration store
+- [ ] **API key → user_id lookup with per-request tenant context** — core routing mechanism
+- [ ] **Qdrant user_id payload index + query filter** — data isolation in vector store
+- [ ] **SQLite user_id column migration** — data isolation in index state
+- [ ] **Per-user OpenAI API key injection at embedding time** — cost attribution
+- [ ] **`ob login` + `ob sync-setup` integration in `add-user` CLI** — user provisioning
+- [ ] **`ob sync --continuous` process spawn + health monitoring + restart** — continuous vault sync
+- [ ] **`add-user` CLI command** — operator-facing user provisioning
+- [ ] **`remove-user` CLI command** — operator-facing user deprovisioning
+- [ ] **`list-users` CLI command** — operator visibility
 
-### Add After Validation (v2.x)
+### Add After Core Works (v2.x)
 
-Features to add once core multi-user operation is confirmed stable.
+Features to add once multi-tenant routing and sync are verified working.
 
-- [ ] VNC/browser Obsidian GUI per user — add when users request visual vault access; not needed for agent-only workflows
-- [ ] Per-user metrics labels + Grafana `$user_id` template variable — add when debugging per-user performance becomes necessary
-- [ ] Graceful user removal with volume backup (`--backup` flag) — add before first user offboarding event
-- [ ] Per-user API key rotation (`cognivault-ctl rotate-key`) — add as part of ops hardening pass
-- [ ] `cognivault-ctl status` with resource usage — add when managing more than 3 users
+- [ ] **Multi-tenant Prometheus metrics (user_id labels)** — trigger: when operator needs per-user performance visibility
+- [ ] **`/admin/sync-status` REST endpoint** — trigger: when programmatic monitoring needed
+- [ ] **Per-user Grafana dashboard filter** — trigger: when per-user observability is needed
+- [ ] **Sync process crash alerting** — trigger: when production stability becomes priority
 
 ### Future Consideration (v3+)
 
-- [ ] Cross-user search with explicit permission grants — defer; requires access control model
-- [ ] Tiered Qdrant multitenancy (dedicated shards for heavy users) — defer; only relevant at 50+ users with uneven load
-- [ ] Kubernetes / Helm deployment — defer until scale justifies orchestration overhead
+- [ ] **User-level rate limiting** — per-user request quotas; defer: not needed at 1-5 users
+- [ ] **Vault encryption key management** — `ob sync-setup --password`; defer: only when encrypted vaults are in use
+- [ ] **Cross-encoder reranking (RET-04)** — deferred from v1.0; add to shared retrieval pipeline when per-user precision metrics expose gaps
 
 ---
 
@@ -163,96 +163,108 @@ Features to add once core multi-user operation is confirmed stable.
 
 | Feature | User Value | Implementation Cost | Priority |
 |---------|------------|---------------------|----------|
-| Qdrant tenant isolation | HIGH | MEDIUM | P1 |
-| Per-user container provisioning | HIGH | MEDIUM | P1 |
-| Per-user API key auth | HIGH | LOW | P1 |
-| Container resource limits | HIGH | LOW | P1 |
-| Vault data persistence | HIGH | LOW | P1 |
-| cognivault-ctl add/remove/list | HIGH | MEDIUM | P1 |
-| Obsidian headless sync sidecar | HIGH | MEDIUM | P1 |
-| VNC/browser Obsidian GUI | MEDIUM | MEDIUM | P2 |
-| Per-user metrics labels + Grafana | MEDIUM | LOW | P2 |
-| Graceful removal with volume backup | MEDIUM | MEDIUM | P2 |
-| cognivault-ctl status output | LOW | LOW | P2 |
-| Per-user API key rotation | LOW | LOW | P2 |
-| Shared Grafana per-user dashboard views | LOW | LOW | P3 |
+| users.json registry + hot-reload | HIGH | LOW | P1 |
+| API key → user_id routing | HIGH | LOW | P1 |
+| Qdrant user_id isolation | HIGH | MEDIUM | P1 |
+| SQLite user_id migration | HIGH | LOW | P1 |
+| Per-user OpenAI key injection | HIGH | LOW | P1 |
+| `add-user` CLI + ob auth flow | HIGH | HIGH | P1 |
+| `ob sync --continuous` process mgmt | HIGH | HIGH | P1 |
+| `remove-user` CLI | HIGH | MEDIUM | P1 |
+| `list-users` CLI | MEDIUM | LOW | P1 |
+| Multi-tenant Prometheus metrics | MEDIUM | MEDIUM | P2 |
+| `/admin/sync-status` endpoint | MEDIUM | LOW | P2 |
+| Per-user Grafana filter | MEDIUM | LOW | P2 |
+| Sync crash alerting | LOW | LOW | P2 |
 
 **Priority key:**
-- P1: Must have for v2.0 launch
-- P2: Should have, add when possible in v2.x
-- P3: Nice to have, future consideration
+- P1: Must have for v2.0 launch — multi-tenancy doesn't work without these
+- P2: Should have, add post-validation — improves operations, not correctness
+- P3: Deferred — future milestone material
 
 ---
 
-## Implementation Notes by Feature Area
+## Implementation Notes by Feature
 
-### Qdrant Tenant Isolation
+### obsidian-headless Auth Flow (MEDIUM confidence — beta tool)
 
-Qdrant's official recommendation for multi-tenancy is a **single collection with payload-based filtering** (not separate collections per user). This approach:
-- Is resource-efficient (one collection, shared HNSW index structure)
-- Supported natively: `filter: { must: [{ key: "user_id", match: { value: "alice" } }] }`
-- Requires creating a **keyword payload index** on `user_id` for efficient filtering (one API call at collection setup)
-- Tiered multitenancy (v1.16+) adds dedicated shards for heavy tenants if load becomes uneven — defer this
+The auth flow for non-interactive server use is the most uncertain part of v2.0. Current state as of 2026-03-14 (obsidian-headless v0.0.3+):
 
-All existing CogniVault vector upserts must add `user_id` to the Qdrant payload. All queries must add a `user_id` filter. This is surgical but mandatory change to `src/features/search/service.ts` and the indexing subsystem.
+1. **`ob login --email <email> --password <password>`** — flags exist for non-interactive auth. MFA flag `--mfa` available if user has 2FA enabled. This produces an auth token stored in `~/.config/obsidian-headless/auth_token` (or `OBSIDIAN_AUTH_TOKEN` env var equivalent).
 
-**Confidence:** HIGH — documented at qdrant.tech/documentation/guides/multitenancy/
+2. **`ob sync-setup --vault <name> --path <path>`** — links a local directory to a named remote vault. Historically failed on headless Linux due to missing keychain (gnome-keyring D-Bus). Version 0.0.3+ resolved this for non-encrypted vaults. The `--password` flag handles encrypted vaults.
 
-### Obsidian Headless Sync
+3. **`ob sync --continuous`** — long-running WebSocket process that watches for Obsidian Sync cloud changes and applies them to the local vault directory.
 
-`obsidian-headless` runs as `ob sync --continuous` as the main process in a sidecar service within each user's Compose stack. Auth token is `OBSIDIAN_AUTH_TOKEN` env var — fully non-interactive, suitable for containers. Node.js 22 base image required, which matches the project's existing runtime. No display server, VNC, or X11 needed for sync.
+**Critical unknown:** Whether `ob login` with `--email`/`--password` flags works fully non-interactively (no TTY prompt at all) is not confirmed by official docs. The flags exist but the forum notes suggest interactive was the original design. Must verify by running `ob login --email test@test.com --password secret < /dev/null` during phase research. If interactive TTY is required, workaround is to pre-generate auth tokens during `add-user` (which IS interactive) and store them for process restart use.
 
-The headless client requires an active **Obsidian Sync subscription** per user. This is a per-user external recurring cost (~$8/month) that operators must be aware of when provisioning users.
+**Keychain workaround:** v0.0.3 resolved headless keychain issues for non-encrypted vaults. If vault encryption is used (`--password` flag on sync-setup), the keychain dependency may resurface. For v2.0: assume no vault encryption (simplest case) and document as known constraint.
 
-**Confidence:** HIGH — official repository `obsidianmd/obsidian-headless` confirmed.
+### Process Manager Pattern
 
-### VNC Access via linuxserver/obsidian
+The sync process manager lives inside the CogniVault Fastify process (not a separate daemon). Standard Node.js `child_process.spawn()` is sufficient — no external process manager needed.
 
-The `linuxserver/obsidian` image (based on Docker Baseimage Selkies) exposes Obsidian via noVNC on ports 3000 (HTTP) and 3001 (HTTPS). Per-container VNC passwords are set via the `PASSWORD` environment variable. Per-user isolation requires unique port allocation — the management CLI must track and assign port ranges (e.g., user 1: 3000/3001, user 2: 3002/3003). Users access their Obsidian GUI at `http://host:PORT`.
+Pattern:
+```
+SyncProcessManager class:
+  - Map<user_id, SyncProcess> (PID, status, restart_count, last_crash_at)
+  - start(user): spawn("ob", ["sync", "--continuous"], { cwd: vaultPath, env: { HOME: userConfigDir } })
+  - stop(user): process.kill(pid, 'SIGTERM') → wait for exit
+  - onExit(user, code): if code !== 0, schedule restart with exponential backoff
+  - maxRestarts: 10, backoff: [1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s, 512s] (cap at 512s)
+  - status(): returns array of { user_id, pid, status, restart_count, uptime_s }
+```
 
-**Confidence:** MEDIUM — confirmed from linuxserver.io docs; per-user port range allocation pattern is community convention.
+Per-user HOME directory isolation is critical: each user's `ob` config (auth token, vault linkage) must live in a separate directory. Use `userConfigDir = /data/users/<user_id>/.config` and set `HOME` env var when spawning.
 
-### cognivault-ctl CLI Architecture
+### users.json Registry Schema
 
-A Node.js CLI (compatible with the existing TypeScript stack) that:
-1. Maintains a user registry (JSON file or SQLite) mapping: username → API key, port assignments, volume names, container names
-2. Generates per-user Docker Compose override files (`compose.user-alice.yml`) and `.env` files from templates
-3. Calls `docker compose -f compose.base.yml -f compose.user-alice.yml up -d` via Dockerode or shell exec
-4. Handles removal: `docker compose down`, optional volume export to tar via Alpine container, `docker volume rm`
-5. `list` command wraps `docker ps --filter name=cognivault-` and formats as table
+```json
+{
+  "users": [
+    {
+      "user_id": "alice",
+      "api_key": "cv-abc123...",
+      "vault_name": "My Vault",
+      "vault_path": "/data/vaults/alice",
+      "openai_key": "sk-...",
+      "obs_email": "alice@example.com",
+      "obs_password": "..."
+    }
+  ]
+}
+```
 
-Dockerode (Node.js Docker SDK) is the appropriate library — active, well-maintained, supports promise-based API.
+**Security note:** `obs_password` and `openai_key` are secrets stored in plaintext. In v2.0 this is acceptable for a self-hosted operator-controlled deployment. Document clearly. Future: reference to env vars instead of inline values.
 
-**Confidence:** MEDIUM — standard operational pattern; no framework-specific gotchas identified.
+### Qdrant Isolation Strategy
 
-### Container Resource Limits
+Use single shared `cognivault` collection (already exists). Add `user_id` to all point payloads on upsert. Create payload index:
 
-Docker Compose `deploy.resources.limits` supports `cpus` (fractional core count) and `memory` (with M/G suffix). Recommended starting defaults for a host running 5-10 users:
+```
+PUT /collections/cognivault/index
+{ "field_name": "user_id", "field_schema": { "type": "keyword", "is_tenant": true } }
+```
 
-- CogniVault API service: `cpus: '0.5'`, `memory: '512M'`
-- Obsidian headless sidecar: `cpus: '0.25'`, `memory: '256M'`
-- VNC/Obsidian GUI (if enabled): `cpus: '0.5'`, `memory: '512M'`
+All search queries get an implicit must-filter:
+```json
+{ "must": [{ "key": "user_id", "match": { "value": "<user_id>" } }] }
+```
 
-These are tunable via env vars in each user's `.env` file. Operators adjust based on actual host capacity.
-
-**Confidence:** HIGH — from Docker official docs.
+This is Qdrant's recommended pattern for multi-tenancy. `is_tenant: true` co-locates vectors by tenant, making per-user queries significantly faster via sequential reads.
 
 ---
 
 ## Sources
 
-- [obsidianmd/obsidian-headless — GitHub](https://github.com/obsidianmd/obsidian-headless)
-- [Obsidian Sync Headless Client announcement — devops-geek.net](https://devops-geek.net/devops-lab/obsidian-sync-gets-a-headless-client-a-game-changer-for-linux-automation-and-devops-workflows/)
-- [Obsidian Headless Sync docs — help.obsidian.md](https://help.obsidian.md/sync/headless)
-- [Qdrant Multitenancy Guide — qdrant.tech](https://qdrant.tech/documentation/guides/multitenancy/)
-- [Qdrant Tiered Multitenancy v1.16 — qdrant.tech](https://qdrant.tech/blog/qdrant-1.16.x/)
-- [linuxserver/obsidian Docker image — docs.linuxserver.io](https://docs.linuxserver.io/images/docker-obsidian/)
-- [obsidian-remote (sytone) — GitHub](https://github.com/sytone/obsidian-remote)
-- [Docker Compose Deploy Resources — docs.docker.com](https://docs.docker.com/reference/compose-file/deploy/)
-- [Dockerode (Node.js Docker SDK) — GitHub](https://github.com/apocas/dockerode)
-- [docker-volume-backup (offen) — GitHub](https://github.com/offen/docker-volume-backup)
-- [Multi-tenant observability with Grafana — Medium](https://sollybombe.medium.com/creating-multi-tenant-observability-dashboards-with-grafana-loki-2025-edition-85a673eff596)
+- [obsidian-headless GitHub (obsidianmd)](https://github.com/obsidianmd/obsidian-headless) — command reference, auth flags
+- [Obsidian Forum: OBSIDIAN_AUTH_TOKEN retrieval](https://forum.obsidian.md/t/headless-sync-how-to-get-obsidian-auth-token-variable/111740) — non-interactive auth workarounds
+- [Obsidian Forum: ob sync-setup keychain issue](https://forum.obsidian.md/t/ob-sync-setup-fails-on-headless-linux-keychain-unavailable/111679) — v0.0.3 fix confirmed
+- [Qdrant Multitenancy Documentation](https://qdrant.tech/documentation/guides/multitenancy/) — is_tenant, payload filter, single-collection recommendation
+- [Qdrant Multitenancy Article](https://qdrant.tech/articles/multitenancy/) — payload_m=16 optimization for per-tenant HNSW indices
+- [Node.js child_process documentation](https://nodejs.org/api/child_process.html) — spawn, SIGTERM, exit event
+- [Commander.js GitHub](https://github.com/tj/commander.js) — CLI framework for add-user/remove-user/list-users
 
 ---
-*Feature research for: CogniVault v2.0 multi-user deployment*
-*Researched: 2026-03-13*
+*Feature research for: CogniVault v2.0 — Multi-tenant vault sync + user lifecycle*
+*Researched: 2026-03-14*

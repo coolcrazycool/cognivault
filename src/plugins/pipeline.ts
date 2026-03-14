@@ -4,7 +4,6 @@ import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import matter from 'gray-matter';
-import PQueue from 'p-queue';
 import { v5 as uuidv5 } from 'uuid';
 import { config } from '../config.js';
 import { indexedFiles } from '../db/schema.js';
@@ -18,7 +17,7 @@ import { chunkPdf } from '../lib/pdf-chunker.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
-    pipelineQueue: PQueue;
+    processFileChanges: (userId: string, events: FileChangeEvent[]) => void;
   }
 }
 
@@ -26,10 +25,10 @@ declare module 'fastify' {
 const UUID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
 /**
- * Generate a deterministic UUID v5 for a chunk, based on file path and chunk index.
+ * Generate a deterministic UUID v5 for a chunk, scoped by userId.
  */
-function chunkId(filePath: string, chunkIndex: number): string {
-  return uuidv5(`${filePath}:${chunkIndex}`, UUID_NAMESPACE);
+function chunkId(userId: string, filePath: string, chunkIndex: number): string {
+  return uuidv5(`${userId}:${filePath}:${chunkIndex}`, UUID_NAMESPACE);
 }
 
 /**
@@ -46,18 +45,19 @@ function omit(obj: Record<string, unknown>, keys: string[]): Record<string, unkn
 }
 
 /**
- * Embed chunks and upsert to Qdrant, then clean up stale vectors.
- * Used by all text-format handlers (markdown, PDF, CSV, canvas, excalidraw).
+ * Embed chunks and upsert to tenant Qdrant, then clean up stale vectors.
  */
 async function embedAndUpsert(
   fastify: FastifyInstance,
+  userId: string,
   event: FileChangeEvent,
   chunks: Array<{ text: string; sectionPath: string; chunkIndex: number }>,
   extraPayload: Record<string, unknown>,
 ): Promise<void> {
+  const tenantQdrant = fastify.createTenantQdrant(userId);
+
   if (chunks.length === 0) {
-    // No chunks: clean stale vectors
-    await fastify.qdrant.delete('cognivault', {
+    await tenantQdrant.delete({
       filter: {
         must: [
           { key: 'path', match: { value: event.path } },
@@ -65,18 +65,20 @@ async function embedAndUpsert(
         ],
       },
     });
-    fastify.metrics.staleVectorCleanups.inc();
+    fastify.metrics.staleVectorCleanups.inc({ user_id: userId });
     return;
   }
 
-  const embeddings = await fastify.embedder.embed(chunks.map((c) => c.text));
-  fastify.metrics.embeddingRequests.inc();
-  fastify.metrics.chunksProcessed.inc(chunks.length);
+  const embedder = fastify.getUserEmbedder(userId);
+  const embeddings = await embedder.embed(chunks.map((c) => c.text));
+  fastify.metrics.embeddingRequests.inc({ user_id: userId });
+  fastify.metrics.chunksProcessed.inc({ user_id: userId }, chunks.length);
+
   const ext = path.extname(event.path);
   const title = path.basename(event.path, ext);
 
   const points = chunks.map((chunk, i) => ({
-    id: chunkId(event.path, i),
+    id: chunkId(userId, event.path, i),
     vector: embeddings[i] as number[],
     payload: {
       path: event.path,
@@ -89,10 +91,10 @@ async function embedAndUpsert(
     },
   }));
 
-  await fastify.qdrant.upsert('cognivault', { points });
+  await tenantQdrant.upsert({ points });
 
   // Delete stale vectors where chunk_index >= new chunk count
-  await fastify.qdrant.delete('cognivault', {
+  await tenantQdrant.delete({
     filter: {
       must: [
         { key: 'path', match: { value: event.path } },
@@ -100,11 +102,11 @@ async function embedAndUpsert(
       ],
     },
   });
-  fastify.metrics.staleVectorCleanups.inc();
+  fastify.metrics.staleVectorCleanups.inc({ user_id: userId });
 
   // Update embedding_model_version in indexed_files
-  fastify.db
-    .update(indexedFiles)
+  const db = fastify.getUserDbById(userId);
+  db.update(indexedFiles)
     .set({ embeddingModelVersion: config.EMBEDDING_MODEL })
     .where(eq(indexedFiles.path, event.path))
     .run();
@@ -113,23 +115,40 @@ async function embedAndUpsert(
 /**
  * Process a markdown file: parse frontmatter, chunk, embed, upsert.
  */
-async function processMarkdown(fastify: FastifyInstance, event: FileChangeEvent): Promise<void> {
+async function processMarkdown(
+  fastify: FastifyInstance,
+  userId: string,
+  event: FileChangeEvent,
+): Promise<void> {
+  const indexerEntry = fastify.indexers.get(userId);
+  if (!indexerEntry) return;
+
   let rawContent: string;
   try {
-    const result = await fastify.vault.readContent(event.path);
+    const result = await indexerEntry.vault.readContent(event.path);
     rawContent = result.content;
   } catch (err: unknown) {
-    fastify.log.error({ event, err }, 'Pipeline: failed to read file content — skipping');
+    fastify.log.error({ event, err, userId }, 'Pipeline: failed to read file content — skipping');
     return;
   }
 
-  const parsed = matter(rawContent);
+  let parsed: matter.GrayMatterFile<string>;
+  try {
+    parsed = matter(rawContent);
+  } catch {
+    fastify.log.warn(
+      { path: event.path, userId },
+      'Invalid frontmatter — indexing without metadata',
+    );
+    parsed = { content: rawContent, data: {} } as matter.GrayMatterFile<string>;
+  }
   const title = path.basename(event.path, '.md');
   const chunks = chunkMarkdown(parsed.content, { title });
 
+  const tenantQdrant = fastify.createTenantQdrant(userId);
+
   if (chunks.length === 0) {
-    // Frontmatter-only note: skip embedding but clean stale vectors
-    await fastify.qdrant.delete('cognivault', {
+    await tenantQdrant.delete({
       filter: {
         must: [
           { key: 'path', match: { value: event.path } },
@@ -137,18 +156,19 @@ async function processMarkdown(fastify: FastifyInstance, event: FileChangeEvent)
         ],
       },
     });
-    fastify.metrics.staleVectorCleanups.inc();
+    fastify.metrics.staleVectorCleanups.inc({ user_id: userId });
     return;
   }
 
-  const embeddings = await fastify.embedder.embed(chunks.map((c) => c.text));
-  fastify.metrics.embeddingRequests.inc();
-  fastify.metrics.chunksProcessed.inc(chunks.length);
+  const embedder = fastify.getUserEmbedder(userId);
+  const embeddings = await embedder.embed(chunks.map((c) => c.text));
+  fastify.metrics.embeddingRequests.inc({ user_id: userId });
+  fastify.metrics.chunksProcessed.inc({ user_id: userId }, chunks.length);
 
   const frontmatterData = parsed.data as Record<string, unknown>;
 
   const points = chunks.map((chunk, i) => ({
-    id: chunkId(event.path, i),
+    id: chunkId(userId, event.path, i),
     vector: embeddings[i] as number[],
     payload: {
       path: event.path,
@@ -169,10 +189,10 @@ async function processMarkdown(fastify: FastifyInstance, event: FileChangeEvent)
     },
   }));
 
-  await fastify.qdrant.upsert('cognivault', { points });
+  await tenantQdrant.upsert({ points });
 
-  // Delete stale vectors where chunk_index >= new chunk count (handles shrinking notes)
-  await fastify.qdrant.delete('cognivault', {
+  // Delete stale vectors
+  await tenantQdrant.delete({
     filter: {
       must: [
         { key: 'path', match: { value: event.path } },
@@ -180,11 +200,11 @@ async function processMarkdown(fastify: FastifyInstance, event: FileChangeEvent)
       ],
     },
   });
-  fastify.metrics.staleVectorCleanups.inc();
+  fastify.metrics.staleVectorCleanups.inc({ user_id: userId });
 
   // Update embedding_model_version in indexed_files
-  fastify.db
-    .update(indexedFiles)
+  const db = fastify.getUserDbById(userId);
+  db.update(indexedFiles)
     .set({ embeddingModelVersion: config.EMBEDDING_MODEL })
     .where(eq(indexedFiles.path, event.path))
     .run();
@@ -192,22 +212,24 @@ async function processMarkdown(fastify: FastifyInstance, event: FileChangeEvent)
 
 /**
  * Process an image file: scan markdown files for backlinks and store in SQLite.
- * Images are NOT embedded into Qdrant.
  */
-async function processImage(fastify: FastifyInstance, event: FileChangeEvent): Promise<void> {
-  // Read all markdown file rows from DB
-  const mdFiles = fastify.db
-    .select()
-    .from(indexedFiles)
-    .where(eq(indexedFiles.fileType, 'md'))
-    .all();
+async function processImage(
+  fastify: FastifyInstance,
+  userId: string,
+  event: FileChangeEvent,
+): Promise<void> {
+  const db = fastify.getUserDbById(userId);
+  const indexerEntry = fastify.indexers.get(userId);
+  if (!indexerEntry) return;
+
+  const mdFiles = db.select().from(indexedFiles).where(eq(indexedFiles.fileType, 'md')).all();
 
   const imageName = path.basename(event.path);
   const markdownContents: Array<{ path: string; content: string }> = [];
 
   for (const mdFile of mdFiles) {
     try {
-      const result = await fastify.vault.readContent(mdFile.path);
+      const result = await indexerEntry.vault.readContent(mdFile.path);
       markdownContents.push({ path: mdFile.path, content: result.content });
     } catch {
       // File may have been deleted since DB query — skip
@@ -216,8 +238,7 @@ async function processImage(fastify: FastifyInstance, event: FileChangeEvent): P
 
   const linkedNotes = extractImageBacklinks(imageName, markdownContents);
 
-  fastify.db
-    .update(indexedFiles)
+  db.update(indexedFiles)
     .set({ linkedNotes: JSON.stringify(linkedNotes) })
     .where(eq(indexedFiles.path, event.path))
     .run();
@@ -225,19 +246,20 @@ async function processImage(fastify: FastifyInstance, event: FileChangeEvent): P
 
 async function processCreatedOrUpdated(
   fastify: FastifyInstance,
+  userId: string,
   event: FileChangeEvent,
 ): Promise<void> {
-  const end = fastify.metrics.pipelineDuration.startTimer();
+  const end = fastify.metrics.pipelineDuration.startTimer({ user_id: userId });
   try {
     const ext = path.extname(event.path).toLowerCase();
 
     // Image files: SQLite tracking only, no Qdrant vectors
     if (IMAGE_EXTENSIONS.has(ext)) {
-      await processImage(fastify, event);
+      await processImage(fastify, userId, event);
       return;
     }
 
-    // Text formats: extract chunks -> embed -> upsert to Qdrant
+    // Text formats: extract chunks -> embed -> upsert
     let chunks: Array<{ text: string; sectionPath: string; chunkIndex: number }>;
     const extraPayload: Record<string, unknown> = {
       tags: [],
@@ -249,12 +271,13 @@ async function processCreatedOrUpdated(
 
     switch (ext) {
       case '.md':
-        // Delegate to full markdown handler (preserves frontmatter logic)
-        await processMarkdown(fastify, event);
+        await processMarkdown(fastify, userId, event);
         return;
 
       case '.pdf': {
-        const vaultRoot = fastify.vault.vaultRootPath;
+        const indexerEntry = fastify.indexers.get(userId);
+        if (!indexerEntry) return;
+        const vaultRoot = indexerEntry.vault.vaultRootPath;
         const absPath = path.join(vaultRoot, event.path);
         const buffer = await fs.readFile(absPath);
         const filename = path.basename(event.path, ext);
@@ -263,62 +286,75 @@ async function processCreatedOrUpdated(
       }
 
       case '.csv': {
-        const result = await fastify.vault.readContent(event.path);
+        const indexerEntry = fastify.indexers.get(userId);
+        if (!indexerEntry) return;
+        const result = await indexerEntry.vault.readContent(event.path);
         const filename = path.basename(event.path, ext);
         chunks = chunkCsv(result.content, filename);
         break;
       }
 
       case '.canvas': {
-        const result = await fastify.vault.readContent(event.path);
+        const indexerEntry = fastify.indexers.get(userId);
+        if (!indexerEntry) return;
+        const result = await indexerEntry.vault.readContent(event.path);
         const canvasName = path.basename(event.path, ext);
         chunks = chunkCanvas(result.content, canvasName);
         break;
       }
 
       case '.excalidraw': {
-        const result = await fastify.vault.readContent(event.path);
+        const indexerEntry = fastify.indexers.get(userId);
+        if (!indexerEntry) return;
+        const result = await indexerEntry.vault.readContent(event.path);
         const drawingName = path.basename(event.path, ext);
         chunks = chunkExcalidraw(result.content, drawingName);
         break;
       }
 
       default:
-        // Unknown extension — skip
         return;
     }
 
-    await embedAndUpsert(fastify, event, chunks, extraPayload);
+    await embedAndUpsert(fastify, userId, event, chunks, extraPayload);
   } finally {
     end();
   }
 }
 
-async function processDeleted(fastify: FastifyInstance, event: FileChangeEvent): Promise<void> {
+async function processDeleted(
+  fastify: FastifyInstance,
+  userId: string,
+  event: FileChangeEvent,
+): Promise<void> {
   const ext = path.extname(event.path).toLowerCase();
 
-  // Image files have no Qdrant vectors — nothing to delete from Qdrant
   if (IMAGE_EXTENSIONS.has(ext)) {
     return;
   }
 
-  await fastify.qdrant.delete('cognivault', {
+  const tenantQdrant = fastify.createTenantQdrant(userId);
+  await tenantQdrant.delete({
     filter: {
       must: [{ key: 'path', match: { value: event.path } }],
     },
   });
 }
 
-async function processMoved(fastify: FastifyInstance, event: FileChangeEvent): Promise<void> {
+async function processMoved(
+  fastify: FastifyInstance,
+  userId: string,
+  event: FileChangeEvent,
+): Promise<void> {
   const ext = path.extname(event.path).toLowerCase();
   const newTitle = path.basename(event.path, ext);
 
-  // Image files have no Qdrant vectors — skip setPayload
   if (IMAGE_EXTENSIONS.has(ext)) {
     return;
   }
 
-  await fastify.qdrant.setPayload('cognivault', {
+  const tenantQdrant = fastify.createTenantQdrant(userId);
+  await tenantQdrant.setPayload({
     payload: {
       path: event.path,
       title: newTitle,
@@ -330,54 +366,57 @@ async function processMoved(fastify: FastifyInstance, event: FileChangeEvent): P
 }
 
 async function pipelinePlugin(fastify: FastifyInstance): Promise<void> {
-  const queue = new PQueue({ concurrency: 3, timeout: 120_000 });
-  fastify.decorate('pipelineQueue', queue);
+  function processFileChanges(userId: string, events: FileChangeEvent[]): void {
+    const indexerEntry = fastify.indexers.get(userId);
+    if (!indexerEntry) {
+      fastify.log.warn({ userId }, 'processFileChanges called for unknown user — ignoring');
+      return;
+    }
 
-  const onChanges = (events: FileChangeEvent[]): void => {
+    const { queue } = indexerEntry;
+
+    // Ensure gauge resets to 0 when queue drains
+    void queue.onIdle().then(() => {
+      fastify.metrics.indexQueueDepth.set({ user_id: userId }, 0);
+    });
+
     for (const event of events) {
       void queue.add(async () => {
         try {
           switch (event.type) {
             case 'created':
             case 'updated':
-              await processCreatedOrUpdated(fastify, event);
+              await processCreatedOrUpdated(fastify, userId, event);
               break;
             case 'deleted':
-              await processDeleted(fastify, event);
+              await processDeleted(fastify, userId, event);
               break;
             case 'moved':
-              await processMoved(fastify, event);
+              await processMoved(fastify, userId, event);
               break;
           }
         } catch (err: unknown) {
-          fastify.log.error({ event, err }, 'Pipeline processing failed — will retry on next poll');
+          fastify.log.error(
+            { event, err, userId },
+            'Pipeline processing failed — will retry on next poll',
+          );
         } finally {
-          // no-op: gauge updated via queue events below
+          // Update queue depth gauge per user (use setImmediate so pending count is accurate)
+          setImmediate(() => {
+            fastify.metrics.indexQueueDepth.set({ user_id: userId }, queue.size + queue.pending);
+          });
         }
       });
+
       // Update queue depth gauge after adding to queue
-      fastify.metrics.indexQueueDepth.set(queue.size + queue.pending);
+      fastify.metrics.indexQueueDepth.set({ user_id: userId }, queue.size + queue.pending);
     }
-  };
+  }
 
-  // Update gauge when PQueue completes a task (pending is already decremented)
-  queue.on('next', () => {
-    fastify.metrics.indexQueueDepth.set(queue.size + queue.pending);
-  });
-  queue.on('idle', () => {
-    fastify.metrics.indexQueueDepth.set(0);
-  });
-
-  fastify.indexer.on('changes', onChanges);
-
-  fastify.addHook('onClose', async () => {
-    fastify.indexer.removeListener('changes', onChanges);
-    queue.clear();
-    await queue.onIdle();
-  });
+  fastify.decorate('processFileChanges', processFileChanges);
 }
 
 export default fp(pipelinePlugin, {
   name: 'pipeline',
-  dependencies: ['indexer', 'qdrant', 'embedder', 'vault', 'db', 'metrics'],
+  dependencies: ['qdrant', 'embedder', 'db', 'metrics', 'registry'],
 });

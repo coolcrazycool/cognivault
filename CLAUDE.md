@@ -78,7 +78,6 @@ src/
 
 ```
 # Required
-COGNIVAULT_API_KEY=        # API key for authenticating requests
 VAULT_PATH=                # Absolute path to Obsidian vault directory
 
 # Optional

@@ -1,323 +1,187 @@
-# Technology Stack
+# Stack Research
 
-**Project:** CogniVault v2.0 — Multi-User Deployment
-**Researched:** 2026-03-13
-**Confidence:** HIGH (core recommendations verified against official docs and active sources)
-
----
-
-> This file covers **new stack additions only** for v2.0 multi-user deployment.
-> The v1.0 stack (Fastify 5, TypeBox, Drizzle ORM + SQLite, Qdrant, OpenAI embeddings,
-> prom-client, @opentelemetry/sdk, Docker Compose) is validated and unchanged.
+**Domain:** Multi-tenant vault sync service — adding obsidian-headless sync and multi-tenant routing to existing CogniVault
+**Researched:** 2026-03-14
+**Confidence:** MEDIUM (obsidian-headless is beta v0.0.6; auth flow details partially inferred from forum posts)
 
 ---
 
-## New Stack: What Gets Added
+## Existing Stack (Do Not Re-research)
 
-### Containerized Obsidian with Browser-Based Access
+The following are validated and in production. This document covers additions only.
+
+Fastify 5, TypeBox, Zod, Drizzle + SQLite, Qdrant, OpenAI SDK, prom-client, OpenTelemetry, pino, Docker Compose.
+
+---
+
+## New Stack Additions
+
+### Core Technologies
 
 | Technology | Version | Purpose | Why Recommended | Confidence |
 |------------|---------|---------|-----------------|------------|
-| `lscr.io/linuxserver/obsidian` | `:latest` | Obsidian desktop in Docker | KasmVNC-based, actively maintained by LinuxServer.io, auto-updated with Obsidian releases, ARM64 + x86-64 support, browser-accessible on ports 3000/3001, per-container credential isolation via `CUSTOM_USER`/`PASSWORD` env vars | HIGH |
+| obsidian-headless | 0.0.6 (beta) | Run `ob sync --continuous` per user to keep vaults synced from Obsidian Sync | Only official headless client for Obsidian Sync; Node.js 22 native match; required by Obsidian credential model — no alternative exists | MEDIUM |
+| commander | 14.0.x | Parse CLI subcommands (`add-user`, `remove-user`, `list-users`) | De facto Node.js CLI parsing standard; 14.x is current stable, TypeScript-native, subcommand model matches the user lifecycle operations | HIGH |
+| child_process (built-in) | Node.js 22 built-in | Spawn/manage one `ob sync --continuous` process per registered user | No library needed — Node.js `spawn()` with `env` option handles per-process env isolation cleanly; use `SpawnedProcess` map keyed by user_id | HIGH |
 
-**Chosen over `sytone/obsidian-remote`:** obsidian-remote uses KasmVNC too, but last release was October 2022 with limited recent activity. linuxserver/obsidian is actively maintained, updated continuously with new Obsidian versions, and has mature multi-architecture support.
+### Supporting Libraries
 
-**Chosen over `kasmweb/obsidian`:** Kasm Workspaces image is part of the commercial Kasm platform — heavy dependencies, session management overhead. linuxserver is a standalone container ideal for per-user deployment.
+| Library | Version | Purpose | When to Use | Confidence |
+|---------|---------|---------|-------------|------------|
+| execa | 9.6.x | Higher-level `child_process.spawn` wrapper | Use for the process manager that supervises `ob sync --continuous` processes — better TypeScript types, cleaner stdout/stderr piping, automatic cleanup on process exit | HIGH |
+| @fastify/bearer-auth | current | Already in stack — extend for per-user API key → user_id lookup | Extend existing auth plugin to carry `user_id` on request context after key lookup; no new library needed | HIGH |
 
-**How browser access works:** KasmVNC streams the Obsidian Electron desktop as video to a browser. Users connect to `https://<host>:3001/` (HTTPS required for WebCodecs). Each container is one user session. Per-user isolation is natural: each user = one container with their own `/config` volume mount and unique `CUSTOM_USER`/`PASSWORD`.
+### Development Tools
 
-**Critical requirement:** `shm_size: "1gb"` is required — Electron apps (Obsidian) crash without shared memory. This must be set on every Obsidian container.
-
-**Obsidian Sync compatibility:** Obsidian Sync uses the Obsidian client running inside the container to sync. The vault lives at `/config/data/` inside the container (the path Obsidian opens by default). CogniVault mounts the same host path as a read-write bind mount. Sync happens via the running Obsidian instance inside the container — no separate sync daemon needed.
-
-```yaml
-# Per-user Obsidian container example
-obsidian-user1:
-  image: lscr.io/linuxserver/obsidian:latest
-  environment:
-    - PUID=1000
-    - PGID=1000
-    - TZ=UTC
-    - CUSTOM_USER=user1
-    - PASSWORD=<generated>
-  volumes:
-    - /data/vaults/user1:/config
-  ports:
-    - "3101:3001"   # HTTPS browser access, per-user port offset
-  shm_size: "1gb"
-  restart: unless-stopped
-```
+No new dev tooling required. Existing Vitest, Biome, tsx, drizzle-kit cover the new features.
 
 ---
 
-### Qdrant Multi-Tenancy: Payload Filtering (Single Collection)
+## Installation
 
-**Decision: payload-based partitioning with `is_tenant=true` index — NOT collection-per-tenant.**
+```bash
+# New production dependencies only
+pnpm add commander execa
 
-| Technology | Purpose | Notes | Confidence |
-|------------|---------|-------|------------|
-| Qdrant 1.17.0 | Shared vector store, per-user data isolation | Same instance already deployed in v1.0 | HIGH |
-| `tenant_id` keyword payload field | Isolates user vectors | Add `is_tenant=true` flag on index creation | HIGH |
-
-**Why NOT collection-per-tenant:**
-Qdrant explicitly warns against this: "creating a separate collection for each user leads to high costs, performance degradation and cluster instability." Each collection has its own HNSW index overhead. At 10-50 users, this creates 10-50x the index memory footprint for the same total data.
-
-**Why payload filtering:**
-- A query with a `tenant_id` payload filter is faster than a full collection scan
-- `is_tenant=true` tells Qdrant to build per-tenant sub-indexes, making filtered search faster than global search
-- Supports unlimited tenants in a single collection
-- Simpler operations: one collection to back up, monitor, and maintain
-
-**Implementation:**
-```typescript
-// On collection creation, add tenant payload index
-await qdrantClient.createPayloadIndex(COLLECTION_NAME, {
-  field_name: "tenant_id",
-  field_schema: {
-    type: "keyword",
-    is_tenant: true,   // Critical: enables per-tenant HNSW sub-index
-  },
-});
-
-// All inserts include tenant_id in payload
-await qdrantClient.upsert(COLLECTION_NAME, {
-  points: chunks.map(chunk => ({
-    id: chunk.id,
-    vector: { dense: chunk.embedding, sparse: chunk.sparseVector },
-    payload: {
-      tenant_id: userId,   // e.g. "user_abc123"
-      ...chunk.metadata,
-    },
-  })),
-});
-
-// All queries filter by tenant_id
-await qdrantClient.query(COLLECTION_NAME, {
-  prefetch: [
-    { query: denseVector, using: "dense", filter: { must: [{ key: "tenant_id", match: { value: userId } }] } },
-    { query: sparseVector, using: "sparse", filter: { must: [{ key: "tenant_id", match: { value: userId } }] } },
-  ],
-  query: { fusion: "rrf" },
-  filter: { must: [{ key: "tenant_id", match: { value: userId } }] },
-});
+# obsidian-headless is a CLI tool — install globally in Docker image, not as project dep
+# In Dockerfile: RUN npm install -g obsidian-headless@0.0.6
 ```
 
-**Migration from v1.0:** The existing collection uses per-vault collection names (one collection per vault). For v2.0, migrate to a single shared collection with `tenant_id` payload. This is a one-time reindex. Existing single-user deployment maps `tenant_id` to the sole user's ID.
-
-**Global HNSW note:** The multitenancy article recommends setting `m: 0` in the collection's HNSW config to disable the global index when using tenant-only queries. This is only beneficial when you never do cross-tenant search (which CogniVault never does). Apply at collection creation time.
-
----
-
-### Per-User API Key Management
-
-**Decision: Extend existing `@fastify/bearer-auth` pattern with SQLite-backed key-to-user lookup.**
-
-The v1.0 stack uses `@fastify/bearer-auth` with keys from config. For v2.0, keys must map to users (and thus to `tenant_id` for Qdrant filtering).
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| Drizzle ORM + better-sqlite3 | Already in stack | API key store | Extend existing SQLite DB with `api_keys` table: `(key_hash, user_id, created_at, label)` | HIGH |
-| `node:crypto` built-in | - | Key generation + hashing | `crypto.randomBytes(32).toString('hex')` for key generation; `crypto.createHash('sha256')` for storage — no new dependency | HIGH |
-| `@fastify/bearer-auth` | Already in stack | Auth hook | Switch from static config to dynamic lookup via `allowedKeys` function | HIGH |
-
-**`@fastify/bearer-auth` supports dynamic lookup:** Pass an async function instead of a Set. The function receives the key, queries SQLite, and returns true/false. Attach the resolved `userId` to the request via `fastify.decorateRequest('userId', '')`.
-
-```typescript
-// api_keys table schema (Drizzle)
-export const apiKeys = sqliteTable('api_keys', {
-  keyHash: text('key_hash').primaryKey(),   // SHA-256 of the raw key
-  userId:  text('user_id').notNull(),
-  label:   text('label'),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-});
-
-// Fastify auth hook
-fastify.register(bearerAuthPlugin, {
-  keys: new Set(),  // not used when addHook is set
-  auth: async (key, request) => {
-    const keyHash = crypto.createHash('sha256').update(key).digest('hex');
-    const row = db.select().from(apiKeys).where(eq(apiKeys.keyHash, keyHash)).get();
-    if (!row) return false;
-    request.userId = row.userId;   // attach for downstream use
-    return true;
-  },
-});
-```
-
-**Why NOT `fastify-api-key` npm package:** The `arkerone/fastify-api-key` plugin uses HMAC signatures (HTTP Signature draft spec) — overkill for this use case and requires clients to sign requests. CogniVault agents use simple Bearer tokens. Implementing directly on `@fastify/bearer-auth` with a custom `auth` function is 20 lines and uses the already-present dependency.
-
----
-
-### Management CLI (cognivault-ctl)
-
-**Decision: Commander.js 14 with `yaml` package for Docker Compose generation.**
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| `commander` | 14.0.x | CLI argument parsing and subcommands | 213M weekly downloads, 0 dependencies, ~180KB install size, full TypeScript + ESM support, v14 is current stable (v15 moves to ESM-only May 2026), git-style subcommands, zero startup overhead | HIGH |
-| `yaml` | 2.x | YAML read/write for docker-compose files | Pure TypeScript, actively maintained, `YAML.parse()` + `YAML.stringify()` API, supports comments preservation, minimum TypeScript 5.9 — ideal for generating and updating docker-compose.yml files | HIGH |
-
-**Why Commander over alternatives:**
-
-- **vs Yargs:** Commander has 0 deps vs Yargs' 7 deps + 850KB. For a sysadmin CLI, startup time matters.
-- **vs Oclif:** Oclif adds 12MB and 30+ deps. It's designed for Salesforce-scale plugin ecosystems. cognivault-ctl has 5 commands.
-- **vs Clipanion (Yarn):** Good but less ecosystem familiarity, better suited for plugin-based CLIs.
-
-**Why `yaml` over `js-yaml`:**
-`js-yaml` v4 types (`@types/js-yaml`) were last updated 2+ years ago. The `yaml` package has built-in TypeScript types, active maintenance, comment preservation (important for human-readable compose files), and native `stringify` support.
-
-**CLI command structure:**
-
-```
-cognivault-ctl user add <username> [--port-offset <n>]
-cognivault-ctl user remove <username>
-cognivault-ctl user list
-cognivault-ctl compose generate          # writes docker-compose.yml from SQLite user registry
-cognivault-ctl compose apply             # runs docker compose up -d
-```
-
-**Compose generation approach:** Store user registry in the existing SQLite DB (new `users` table: `user_id`, `username`, `port_offset`, `created_at`). `compose generate` reads all users and builds the docker-compose YAML programmatically using `yaml` package. This avoids maintaining fragile template files.
-
-```typescript
-// packages/cognivault-ctl/src/compose.ts
-import YAML from 'yaml';
-
-export function generateComposeYaml(users: User[]): string {
-  const services: Record<string, unknown> = {
-    qdrant: { image: 'qdrant/qdrant:latest', ... },
-    prometheus: { ... },
-    grafana: { ... },
-  };
-
-  for (const user of users) {
-    services[`cognivault-${user.username}`] = buildCogniVaultService(user);
-    services[`obsidian-${user.username}`] = buildObsidianService(user);
-  }
-
-  return YAML.stringify({ services });
-}
-```
-
-**CLI packaging:** Standalone Node.js script with a `bin` entry in `package.json`. Does NOT need to be a compiled binary — `node cognivault-ctl` or `pnpm exec cognivault-ctl` is sufficient for a sysadmin tool. Add to project's `packages/` directory (pnpm workspace).
-
----
-
-## Supporting Infrastructure Changes
-
-### Docker Compose Architecture (v2.0)
-
-The v1.0 single-file `docker-compose.yml` becomes a generated file. The architecture expands to:
-
-```
-docker-compose.yml (generated by cognivault-ctl compose generate)
-├── qdrant           (shared, existing)
-├── prometheus       (shared, existing)
-├── grafana          (shared, existing)
-├── cognivault-user1 (per-user CogniVault instance)
-├── obsidian-user1   (per-user Obsidian+KasmVNC)
-├── cognivault-user2
-├── obsidian-user2
-└── ...
-```
-
-**Port allocation strategy:** Each user gets a port offset. Base ports:
-- CogniVault API: 3000 + offset
-- Obsidian HTTPS (KasmVNC): 3001 + (offset * 100)
-
-With 50 users and offset=0 through 49, CogniVault ports 3000-3049, Obsidian ports 3001, 3101, 3201, ... 5901.
-
-**Prometheus per-user metrics:** Each CogniVault instance exposes `/metrics`. Prometheus scrapes all of them. Each CogniVault instance labels its metrics with `user_id="user1"` (via prom-client `defaultLabels`). No stack change needed — just configuration.
-
-### SQLite Schema Additions (v2.0)
-
-```typescript
-// users table
-export const users = sqliteTable('users', {
-  userId:      text('user_id').primaryKey(),       // UUID, used as Qdrant tenant_id
-  username:    text('username').notNull().unique(),
-  portOffset:  integer('port_offset').notNull().unique(),
-  createdAt:   integer('created_at', { mode: 'timestamp' }).notNull(),
-});
-
-// api_keys table (replaces single-key config)
-export const apiKeys = sqliteTable('api_keys', {
-  keyHash:   text('key_hash').primaryKey(),
-  userId:    text('user_id').notNull().references(() => users.userId),
-  label:     text('label'),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
-});
-```
-
----
-
-## What NOT to Add
-
-| Avoid | Why | Use Instead |
-|-------|-----|-------------|
-| Collection-per-user in Qdrant | Official Qdrant docs: causes instability and performance degradation at scale, each collection has HNSW index overhead | Single collection with `tenant_id` payload field + `is_tenant=true` index |
-| `sytone/obsidian-remote` Docker image | Last release October 2022, limited recent activity, maintenance unclear | `lscr.io/linuxserver/obsidian` — actively maintained, auto-updated |
-| `kasmweb/obsidian` | Commercial Kasm platform image, heavy platform dependencies | `lscr.io/linuxserver/obsidian` — same KasmVNC technology, standalone |
-| Oclif CLI framework | 12MB, 30+ dependencies for 5 commands — startup overhead in a sysadmin tool | Commander.js 14 — 0 deps, 180KB, full TypeScript + ESM |
-| `fastify-api-key` npm package | HMAC signature scheme (HTTP Signature spec), requires clients to sign requests — incompatible with simple Bearer token pattern agents use | Extend `@fastify/bearer-auth` with custom `auth` function (already in stack) |
-| JWT/OAuth for user auth | Overkill — agents authenticate, not humans; no SSO needed | API keys with SQLite lookup |
-| `js-yaml` for compose generation | Types stale (2+ years), less active maintenance | `yaml` package — built-in TypeScript types, active, comment preservation |
-| Separate VNC sidecar container | Extra container per user for no benefit | KasmVNC is built into `lscr.io/linuxserver/obsidian` |
-| Kubernetes / Helm | Deployment target is a single host with Docker Compose | Docker Compose with generated per-user services |
+obsidian-headless must be installed globally (`npm install -g obsidian-headless`) because it is invoked as the `ob` CLI binary, not imported as a module. It has no programmatic Node.js API — it is CLI-only.
 
 ---
 
 ## Alternatives Considered
 
-| Category | Recommended | Alternative | When Alternative Makes Sense |
-|----------|-------------|-------------|-------------------------------|
-| Obsidian Docker image | `lscr.io/linuxserver/obsidian` | `sytone/obsidian-remote` | If you need an older Obsidian version pinned; obsidian-remote uses the same KasmVNC but with less frequent updates |
-| Qdrant tenancy | Payload filtering with `is_tenant=true` | Collection per user | Only if you need strict data isolation guarantees for compliance/security reasons AND have a small fixed number of users (<10) |
-| Qdrant tenancy | Payload filtering | Tiered multitenancy (Qdrant 1.16+) | If user base grows large (100+) with some power users generating 100x more data than others — promotes large tenants to dedicated shards |
-| CLI framework | Commander.js 14 | Yargs | If you need built-in type coercion, typo suggestions, and don't mind 850KB; Yargs is solid for complex argument schemas |
-| Compose generation | `yaml` package + programmatic | Handlebars/EJS templates | If compose file needs heavy human customization between uses — templates are more readable for partial edits |
+| Recommended | Alternative | When to Use Alternative |
+|-------------|-------------|-------------------------|
+| execa | Native child_process.spawn | For trivial one-shot commands; execa's TypeScript types and stdout stream handling justify the dependency for long-running supervised processes |
+| commander | yargs | yargs when you need complex argument coercion or `.completion()` shell scripts; commander is simpler for 3 subcommands |
+| commander | oclif | oclif when building a plugin-based CLI with many commands; overkill for a 3-command admin tool |
+| Single SQLite DB (per-user rows) | Per-user SQLite file | Per-user files make cross-user queries harder; a single DB with `user_id` FK on all tables is simpler for an admin CLI that lists all users |
+| Qdrant payload-based multitenancy | One Qdrant collection per user | Multiple collections are fine for small user counts (< 50) but payload-based with `user_id` filter is more efficient and matches Qdrant's official recommendation for shared infrastructure |
+
+---
+
+## What NOT to Use
+
+| Avoid | Why | Use Instead |
+|-------|-----|-------------|
+| PM2 | Process supervisor that duplicates what a simple Map + execa already handles; adds config file, daemonization complexity, and a non-trivial dependency for what is just N supervised child processes | Node.js built-in child_process via execa with restart logic in the process manager service |
+| Docker-in-Docker / per-user containers | v1.0 approach (Phase 16) — discarded because it requires VNC/Selkies GUI, per-user Docker networking, and Caddy routing complexity. Architectural pivot to single-container multi-tenant is the active direction per PROJECT.md | Single CogniVault process with per-user child process supervision |
+| keytar / gnome-keyring in Docker | obsidian-headless 0.0.3+ fixed keychain dependency for `ob sync-setup` on headless Linux, but do not introduce keytar as a project dependency — rely on `OBSIDIAN_AUTH_TOKEN` env var pattern instead | Store auth token as encrypted value in SQLite at user registration time; inject via child process `env` option |
+| Cross-tenant Qdrant queries | Querying without `must: [{ key: "user_id", match: { value: userId } }]` filter will bleed across tenants | Always inject `user_id` filter at the service layer; enforce at the middleware/decorator level, not call-site |
+| LangChain / LlamaIndex | Unchanged from v1.0 decision — massive dependency for no new capability | Already using custom chunker |
+
+---
+
+## Stack Patterns by Variant
+
+**If obsidian-headless beta breaks between patch versions:**
+- Pin to exact version in Dockerfile (`npm install -g obsidian-headless@0.0.6`)
+- Add a smoke test in the Docker build: `RUN ob --version`
+- Treat the `ob sync --continuous` process as a black box — watch stdout/stderr for error patterns and restart on non-zero exit
+
+**If OBSIDIAN_AUTH_TOKEN env var approach is insufficient (token expiry, interactive MFA):**
+- Surface a "vault sync broken" status per user in the `/admin/users` endpoint
+- The CLI `add-user` command must run `ob login` interactively at user registration time, capture the resulting token from `~/.config/obsidian-headless/auth_token` or `$HOME/.obsidian-headless/auth_token`, and store it encrypted in SQLite
+- Token path is not officially documented — verify against `obsidian-headless@0.0.6` source or `ob login --help`
+
+**If Qdrant tiered multitenancy is needed (large per-user collections):**
+- Qdrant 1.16+ supports tiered multitenancy: small users share a fallback shard, large users get promoted to dedicated shards via a single API call
+- For the current scale (500-5K notes per user, 1-10 users), single collection with `user_id` payload filter is sufficient
 
 ---
 
 ## Version Compatibility
 
-| Package | Version | Compatible With | Notes |
-|---------|---------|-----------------|-------|
-| `lscr.io/linuxserver/obsidian` | `:latest` | Docker Compose v2 | Requires `shm_size: "1gb"` — do not omit |
-| `qdrant/qdrant` | `1.17.0` | `@qdrant/js-client-rest` latest | `is_tenant` field on payload index available since 1.12+; `1.17.0` is current stable as of Feb 2026 |
-| `commander` | `14.0.x` | Node.js 22, ESM, TypeScript 5.x | v14 is current stable; v15 (ESM-only) expected May 2026 — v14 in maintenance through May 2027 |
-| `yaml` | `2.x` | TypeScript 5.9+, ESM and CJS | Built-in types, no `@types/yaml` needed |
+| Package | Compatible With | Notes |
+|---------|-----------------|-------|
+| obsidian-headless@0.0.6 | Node.js 22+ | Requires Node.js 22 explicitly per official docs; matches our runtime |
+| commander@14.x | Node.js 18+ / ESM | Full ESM support; import `{ Command } from 'commander'` |
+| execa@9.x | Node.js 18+ / ESM-only | ESM-only package; `import { execa } from 'execa'` — no CJS compat |
+| execa@9.x | TypeScript 5.x | Full type definitions included |
 
 ---
 
-## Installation (New Dependencies Only)
+## Architecture Integration Notes
 
-```bash
-# Production — cognivault service
-pnpm add yaml  # if not already present for config reading
+### Multi-tenant Qdrant Pattern
 
-# CLI package (packages/cognivault-ctl)
-pnpm add commander yaml
-pnpm add -D @types/node tsx
+Existing: one Qdrant collection per vault (single-user). New: one Qdrant collection per embedding model, shared across all users, with `user_id` payload field on every point. All search queries must include `filter: { must: [{ key: "user_id", match: { value: req.userId } }] }`.
 
-# No new prod deps for Obsidian containers or Qdrant tenancy
-# (Qdrant client already in stack; tenancy is a configuration change)
+This matches Qdrant's official multitenancy recommendation (single collection + payload partitioning) and avoids the 1,000-collection Cloud limit.
+
+### API Key → User Registry Pattern
+
+Existing auth: `@fastify/bearer-auth` validates a static key. New pattern: bearer-auth plugin extended to look up the API key in SQLite `users` table, resolve `user_id`, and decorate `request.userId`. All downstream service calls receive `userId` parameter.
+
+New SQLite tables needed:
+- `users` — `user_id`, `api_key_hash`, `obsidian_email`, `obsidian_auth_token` (encrypted), `openai_api_key` (encrypted), `vault_path`, `created_at`, `status`
+- Existing `indexed_files` — add `user_id` FK column for per-user index state
+
+### Process Supervision Pattern
+
+```typescript
+// ProcessManager service (conceptual)
+interface SyncProcess {
+  userId: string;
+  process: ChildProcess;
+  restarts: number;
+  lastStarted: Date;
+}
+
+// Map<userId, SyncProcess> — one entry per active user
+// On CogniVault startup: spawn ob sync --continuous for all active users
+// On add-user: spawn and register
+// On remove-user: SIGTERM + remove from map
+// On crash (exit code !== 0): exponential backoff restart, max 5 attempts/hour
 ```
+
+Each child process gets isolated env: `{ OBSIDIAN_AUTH_TOKEN: user.authToken, HOME: user.vaultPath, ... }`. Parent process env is NOT inherited to prevent cross-tenant credential leakage.
+
+### CLI Tool Pattern
+
+```typescript
+// src/cli/index.ts — separate entry point from src/server.ts
+import { Command } from 'commander';
+const program = new Command();
+program.name('cognivault-admin').version('2.0.0');
+program.addCommand(addUserCommand);
+program.addCommand(removeUserCommand);
+program.addCommand(listUsersCommand);
+program.parse();
+```
+
+Add `"bin": { "cognivault-admin": "./dist/cli/index.js" }` to package.json.
+
+---
+
+## Known Risks
+
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| obsidian-headless is beta (v0.0.6) — breaking changes expected | HIGH | Pin exact version, test `ob sync --continuous` process lifecycle in integration test, wrap in restart-on-crash supervisor |
+| OBSIDIAN_AUTH_TOKEN path not officially documented | MEDIUM | Verify against `obsidian-headless@0.0.6` installed package; add a smoke test to CLI `add-user` that confirms token can be read after `ob login` |
+| keychain unavailability on headless Linux (fixed in 0.0.3+) | LOW | Verified fixed; still add Docker build smoke test |
+| Qdrant filter omission causes cross-tenant data bleed | HIGH | Enforce `user_id` filter injection at Fastify plugin level (decorator), not per-route; add integration test that verifies user B cannot see user A's vectors |
 
 ---
 
 ## Sources
 
-- [linuxserver/docker-obsidian GitHub](https://github.com/linuxserver/docker-obsidian) — active maintenance, KasmVNC architecture confirmed
-- [LinuxServer.io Obsidian docs](https://docs.linuxserver.io/images/docker-obsidian/) — port 3000/3001, `CUSTOM_USER`/`PASSWORD`, `shm_size` requirement, KasmVNC access
-- [corelab.tech Obsidian Docker Compose guide (2026)](https://corelab.tech/obsidian/) — `lscr.io/linuxserver/obsidian:latest` recommended in 2026 guide, MEDIUM confidence
-- [Qdrant Multitenancy docs](https://qdrant.tech/documentation/guides/multitenancy/) — payload filtering recommendation, `is_tenant=true` flag, collection-per-tenant warning
-- [Qdrant multitenancy article](https://qdrant.tech/articles/multitenancy/) — `group_id` field name, HNSW `m=0` recommendation for tenant-only queries
-- [Qdrant 1.16 tiered multitenancy](https://qdrant.tech/blog/qdrant-1.16.x/) — tiered multitenancy, tenant promotion mechanism
-- [Qdrant releases](https://github.com/qdrant/qdrant/releases) — v1.17.0 is current stable (Feb 2026)
-- [commander npm](https://www.npmjs.com/package/commander) — v14.0.x current, 213M weekly downloads, v15 ESM-only May 2026
-- [yaml npm](https://www.npmjs.com/package/yaml) — actively maintained, TypeScript 5.9+, `YAML.stringify()` API
-- [fastify-api-key GitHub](https://github.com/arkerone/fastify-api-key) — HMAC signature scheme confirmed, not suitable for simple Bearer auth
+- [obsidian-headless GitHub](https://github.com/obsidianmd/obsidian-headless) — CLI commands, auth flow, Node.js 22 requirement
+- [Obsidian changelog 2026-02-27](https://obsidian.md/changelog/2026-02-27-sync/) — official release announcement
+- [Obsidian Forum: OBSIDIAN_AUTH_TOKEN](https://forum.obsidian.md/t/headless-sync-how-to-get-obsidian-auth-token-variable/111740) — token file location, keychain behavior (MEDIUM confidence — community forum)
+- [Obsidian Forum: headless Linux keychain bug](https://forum.obsidian.md/t/ob-sync-setup-fails-on-headless-linux-keychain-unavailable/111679) — fixed in v0.0.3 (MEDIUM confidence)
+- [npm: obsidian-headless](https://www.npmjs.com/package/obsidian-headless) — version 0.0.6, published March 2026
+- [npm: commander](https://www.npmjs.com/package/commander) — version 14.0.3 current stable
+- [npm: execa](https://www.npmjs.com/package/execa) — version 9.6.1, ESM-only
+- [Qdrant multitenancy docs](https://qdrant.tech/documentation/guides/multitenancy/) — single collection + payload partitioning recommendation
+- [Qdrant 1.16 tiered multitenancy](https://qdrant.tech/blog/qdrant-1.16.x/) — tiered approach for unequal tenant sizes
+- [Node.js child_process docs](https://nodejs.org/api/child_process.html) — spawn env isolation
 
 ---
-*Stack research for: CogniVault v2.0 multi-user deployment additions*
-*Researched: 2026-03-13*
+
+*Stack research for: CogniVault v2.0 Multi-User — obsidian-headless sync + multi-tenant routing*
+*Researched: 2026-03-14*

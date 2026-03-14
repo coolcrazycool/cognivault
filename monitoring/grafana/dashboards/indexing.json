@@ -15,6 +15,24 @@
   "timezone": "browser",
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
+  "templating": {
+    "list": [
+      {
+        "name": "user_id",
+        "label": "User",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(cognivault_index_queue_depth, user_id)", "refId": "StandardVariableQuery" },
+        "current": { "text": "All", "value": "$__all" },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0
+      }
+    ]
+  },
   "panels": [
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
@@ -46,7 +64,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "cognivault_index_queue_depth{job=\"cognivault\"}",
+          "expr": "cognivault_index_queue_depth{job=\"cognivault\",user_id=~\"$user_id\"}",
           "legendFormat": "Queue Depth",
           "refId": "A"
         }
@@ -82,7 +100,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "rate(cognivault_stale_vector_cleanups_total{job=\"cognivault\"}[5m])",
+          "expr": "rate(cognivault_stale_vector_cleanups_total{job=\"cognivault\",user_id=~\"$user_id\"}[5m])",
           "legendFormat": "Cleanup Rate",
           "refId": "A"
         }
@@ -118,7 +136,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "rate(cognivault_embedding_requests_total{job=\"cognivault\"}[5m])",
+          "expr": "rate(cognivault_embedding_requests_total{job=\"cognivault\",user_id=~\"$user_id\"}[5m])",
           "legendFormat": "Embedding Calls/s",
           "refId": "A"
         }
@@ -154,7 +172,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "rate(cognivault_chunks_processed_total{job=\"cognivault\"}[5m])",
+          "expr": "rate(cognivault_chunks_processed_total{job=\"cognivault\",user_id=~\"$user_id\"}[5m])",
           "legendFormat": "Chunks/s",
           "refId": "A"
         }
@@ -190,13 +208,13 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.5, sum(rate(cognivault_pipeline_duration_seconds_bucket{job=\"cognivault\"}[5m])) by (le))",
+          "expr": "histogram_quantile(0.5, sum(rate(cognivault_pipeline_duration_seconds_bucket{job=\"cognivault\",user_id=~\"$user_id\"}[5m])) by (le))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum(rate(cognivault_pipeline_duration_seconds_bucket{job=\"cognivault\"}[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(cognivault_pipeline_duration_seconds_bucket{job=\"cognivault\",user_id=~\"$user_id\"}[5m])) by (le))",
           "legendFormat": "p95",
           "refId": "B"
         }
@@ -239,7 +257,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "cognivault_embedding_requests_total{job=\"cognivault\"}",
+          "expr": "cognivault_embedding_requests_total{job=\"cognivault\",user_id=~\"$user_id\"}",
           "legendFormat": "Total",
           "refId": "A"
         }
@@ -282,7 +300,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "cognivault_chunks_processed_total{job=\"cognivault\"}",
+          "expr": "cognivault_chunks_processed_total{job=\"cognivault\",user_id=~\"$user_id\"}",
           "legendFormat": "Total",
           "refId": "A"
         }
@@ -327,7 +345,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "clamp_max(cognivault_index_queue_depth{job=\"cognivault\"}, 1)",
+          "expr": "clamp_max(cognivault_index_queue_depth{job=\"cognivault\",user_id=~\"$user_id\"}, 1)",
           "legendFormat": "Active",
           "refId": "A"
         }

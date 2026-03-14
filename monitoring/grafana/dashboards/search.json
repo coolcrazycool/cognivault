@@ -17,6 +17,24 @@
   "timezone": "browser",
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
+  "templating": {
+    "list": [
+      {
+        "name": "user_id",
+        "label": "User",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(cognivault_search_requests_total, user_id)", "refId": "StandardVariableQuery" },
+        "current": { "text": "All", "value": "$__all" },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0
+      }
+    ]
+  },
   "panels": [
     {
       "collapsed": false,
@@ -87,7 +105,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(cognivault_search_requests_total[1h]))",
+          "expr": "sum(increase(cognivault_search_requests_total{user_id=~\"$user_id\"}[1h]))",
           "legendFormat": "Total",
           "refId": "A"
         }
@@ -143,7 +161,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(cognivault_search_requests_total) by (type)",
+          "expr": "sum(cognivault_search_requests_total{user_id=~\"$user_id\"}) by (type)",
           "legendFormat": "{{type}}",
           "refId": "A",
           "instant": true
@@ -211,7 +229,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(cognivault_search_duration_seconds_sum[5m]) / rate(cognivault_search_duration_seconds_count[5m])",
+          "expr": "rate(cognivault_search_duration_seconds_sum{user_id=~\"$user_id\"}[5m]) / rate(cognivault_search_duration_seconds_count{user_id=~\"$user_id\"}[5m])",
           "legendFormat": "Avg",
           "refId": "A"
         }
@@ -278,7 +296,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, sum(rate(cognivault_search_duration_seconds_bucket[5m])) by (le, type))",
+          "expr": "histogram_quantile(0.5, sum(rate(cognivault_search_duration_seconds_bucket{user_id=~\"$user_id\"}[5m])) by (le, type))",
           "legendFormat": "{{type}} p50",
           "refId": "A"
         },
@@ -287,7 +305,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum(rate(cognivault_search_duration_seconds_bucket[5m])) by (le, type))",
+          "expr": "histogram_quantile(0.95, sum(rate(cognivault_search_duration_seconds_bucket{user_id=~\"$user_id\"}[5m])) by (le, type))",
           "legendFormat": "{{type}} p95",
           "refId": "B"
         },
@@ -296,7 +314,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum(rate(cognivault_search_duration_seconds_bucket[5m])) by (le, type))",
+          "expr": "histogram_quantile(0.99, sum(rate(cognivault_search_duration_seconds_bucket{user_id=~\"$user_id\"}[5m])) by (le, type))",
           "legendFormat": "{{type}} p99",
           "refId": "C"
         }
@@ -375,7 +393,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(cognivault_search_duration_seconds_bucket[$__interval])) by (le)",
+          "expr": "sum(increase(cognivault_search_duration_seconds_bucket{user_id=~\"$user_id\"}[$__interval])) by (le)",
           "format": "heatmap",
           "legendFormat": "{{le}}",
           "refId": "A"
@@ -443,7 +461,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(cognivault_search_requests_total[5m])) by (type)",
+          "expr": "sum(rate(cognivault_search_requests_total{user_id=~\"$user_id\"}[5m])) by (type)",
           "legendFormat": "{{type}}",
           "refId": "A"
         }
@@ -522,7 +540,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(cognivault_search_requests_total[$__interval])) by (type)",
+          "expr": "sum(increase(cognivault_search_requests_total{user_id=~\"$user_id\"}[$__interval])) by (type)",
           "format": "heatmap",
           "legendFormat": "{{type}}",
           "refId": "A"

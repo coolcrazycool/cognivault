@@ -3,10 +3,11 @@ import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Set env vars before any module imports that trigger config parsing
-process.env.COGNIVAULT_API_KEY = 'test-admin-key';
 process.env.VAULT_PATH = '/tmp/test-vault';
 
 // ── Mocks ──
+
+const TEST_USER_ID = 'test-user-1';
 
 const mockIsIndexing = vi.fn().mockReturnValue(false);
 const mockStop = vi.fn();
@@ -33,7 +34,7 @@ const mockIndexer = {
 const mockDbAll = vi.fn().mockReturnValue([]);
 const mockDbGet = vi.fn().mockReturnValue(undefined);
 
-const mockDb = {
+const mockUserDb = {
   select: vi.fn().mockReturnValue({
     from: vi.fn().mockReturnValue({
       where: vi.fn().mockReturnValue({
@@ -45,12 +46,30 @@ const mockDb = {
 };
 
 const mockOnIdle = vi.fn().mockResolvedValue(undefined);
+const mockQueueClear = vi.fn();
+
+const mockUserQdrantDelete = vi.fn().mockResolvedValue(undefined);
+const mockUserQdrant = {
+  search: vi.fn(),
+  scroll: vi.fn(),
+  upsert: vi.fn(),
+  delete: mockUserQdrantDelete,
+  setPayload: vi.fn(),
+};
+
+const mockProcessFileChanges = vi.fn();
+
+// Build indexers Map with test user entry
+const indexersMap = new Map();
+indexersMap.set(TEST_USER_ID, {
+  indexer: mockIndexer,
+  queue: { onIdle: mockOnIdle, clear: mockQueueClear, size: 0, pending: 0 },
+  vault: { vaultRootPath: '/tmp/test-vault', readContent: vi.fn() },
+});
 
 const mockFastify = {
-  indexer: mockIndexer,
-  db: mockDb,
-  pipelineQueue: { onIdle: mockOnIdle },
-  qdrant: { delete: vi.fn().mockResolvedValue(undefined) },
+  indexers: indexersMap,
+  processFileChanges: mockProcessFileChanges,
 } as unknown as FastifyInstance;
 
 describe('ReindexService', () => {
@@ -73,7 +92,13 @@ describe('ReindexService', () => {
   describe('createJob', () => {
     it('creates a full reindex job with status running and a UUID jobId', async () => {
       const service = new ReindexService(mockFastify);
-      const job = await service.createJob('full');
+      const job = await service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
 
       expect(job.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
       expect(job.scope).toBe('full');
@@ -88,19 +113,39 @@ describe('ReindexService', () => {
       mockIsIndexing.mockReturnValue(true);
       const service = new ReindexService(mockFastify);
 
-      await expect(service.createJob('full')).rejects.toThrow();
+      await expect(
+        service.createJob(
+          'full',
+          undefined,
+          mockUserDb as never,
+          mockUserQdrant as never,
+          TEST_USER_ID,
+        ),
+      ).rejects.toThrow();
     });
 
     it('calls indexer.restart() for full reindex', async () => {
       const service = new ReindexService(mockFastify);
-      await service.createJob('full');
+      await service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
 
       expect(mockRestart).toHaveBeenCalledOnce();
     });
 
     it('creates a path scope job with target path', async () => {
       const service = new ReindexService(mockFastify);
-      const job = await service.createJob('path', 'notes/foo.md');
+      const job = await service.createJob(
+        'path',
+        'notes/foo.md',
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
 
       expect(job.scope).toBe('path');
       expect(job.status).toBe('completed');
@@ -108,15 +153,27 @@ describe('ReindexService', () => {
 
     it('creates a folder scope job', async () => {
       const service = new ReindexService(mockFastify);
-      const job = await service.createJob('folder', 'projects/');
+      const job = await service.createJob(
+        'folder',
+        'projects/',
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
 
       expect(job.scope).toBe('folder');
       expect(job.status).toBe('completed');
     });
 
-    it('full reindex calls pipelineQueue.onIdle() before marking completed', async () => {
+    it('full reindex calls queue.onIdle() before marking completed', async () => {
       const service = new ReindexService(mockFastify);
-      await service.createJob('full');
+      await service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
 
       // Find the scanComplete handler registered via mockOn
       const scanCompleteCall = mockOn.mock.calls.find((call) => call[0] === 'scanComplete');
@@ -135,7 +192,13 @@ describe('ReindexService', () => {
 
     it('full reindex uses .on() (not .once()) for scanComplete listener', async () => {
       const service = new ReindexService(mockFastify);
-      await service.createJob('full');
+      await service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
 
       // .on() should have been called for scanComplete
       const onCalls = mockOn.mock.calls.filter((call) => call[0] === 'scanComplete');
@@ -154,7 +217,13 @@ describe('ReindexService', () => {
       mockOnIdle.mockReturnValue(onIdlePromise);
 
       const service = new ReindexService(mockFastify);
-      const job = await service.createJob('full');
+      const job = await service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
 
       // Find and invoke the scanComplete handler
       const scanCompleteCall = mockOn.mock.calls.find((call) => call[0] === 'scanComplete');
@@ -179,29 +248,41 @@ describe('ReindexService', () => {
   });
 
   describe('createPathJob', () => {
-    it('path reindex emits real contentHash from DB when file exists', async () => {
+    it('path reindex uses processFileChanges with real contentHash from DB', async () => {
       mockDbGet.mockReturnValue({ contentHash: 'abc123', path: 'notes/foo.md' });
 
       const service = new ReindexService(mockFastify);
-      await service.createJob('path', 'notes/foo.md');
+      await service.createJob(
+        'path',
+        'notes/foo.md',
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
 
-      // The emit should have been called with the real contentHash
-      expect(mockEmit).toHaveBeenCalledOnce();
-      const emitArgs = mockEmit.mock.calls[0]!;
-      const events = emitArgs[1] as Array<{ path: string; type: string; contentHash: string }>;
+      expect(mockProcessFileChanges).toHaveBeenCalledOnce();
+      const callArgs = mockProcessFileChanges.mock.calls[0]!;
+      expect(callArgs[0]).toBe(TEST_USER_ID);
+      const events = callArgs[1] as Array<{ path: string; type: string; contentHash: string }>;
       expect(events).toHaveLength(1);
       expect(events[0]!.contentHash).toBe('abc123');
     });
 
-    it('path reindex emits empty contentHash when file not found in DB', async () => {
+    it('path reindex uses empty contentHash when file not found in DB', async () => {
       mockDbGet.mockReturnValue(undefined);
 
       const service = new ReindexService(mockFastify);
-      await service.createJob('path', 'notes/missing.md');
+      await service.createJob(
+        'path',
+        'notes/missing.md',
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
 
-      expect(mockEmit).toHaveBeenCalledOnce();
-      const emitArgs = mockEmit.mock.calls[0]!;
-      const events = emitArgs[1] as Array<{ path: string; type: string; contentHash: string }>;
+      expect(mockProcessFileChanges).toHaveBeenCalledOnce();
+      const callArgs = mockProcessFileChanges.mock.calls[0]!;
+      const events = callArgs[1] as Array<{ path: string; type: string; contentHash: string }>;
       expect(events).toHaveLength(1);
       expect(events[0]!.contentHash).toBe('');
     });
@@ -210,7 +291,13 @@ describe('ReindexService', () => {
   describe('getJob', () => {
     it('returns job state with filesProcessed, totalFiles, errors', async () => {
       const service = new ReindexService(mockFastify);
-      const created = await service.createJob('full');
+      const created = await service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
       const found = service.getJob(created.id);
 
       expect(found).toBeDefined();

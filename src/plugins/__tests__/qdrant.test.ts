@@ -1,46 +1,31 @@
-import fp from 'fastify-plugin';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EmbeddingProvider } from '../../lib/embedding.js';
+import { TenantQdrantClient } from '../../lib/tenant-qdrant-client.js';
 
 // Set required env vars before any imports that trigger config parsing
 beforeAll(() => {
-  process.env.COGNIVAULT_API_KEY = 'test-api-key';
   process.env.VAULT_PATH = '/tmp/test-vault';
-  process.env.OPENAI_API_KEY = 'test-openai-key';
   process.env.QDRANT_URL = 'http://localhost:6333';
 });
 
 const mockGetCollections = vi.fn();
 const mockCreateCollection = vi.fn();
 const mockCreatePayloadIndex = vi.fn();
+const mockDelete = vi.fn();
 
 vi.mock('@qdrant/js-client-rest', () => {
   class MockQdrantClient {
     getCollections = mockGetCollections;
     createCollection = mockCreateCollection;
     createPayloadIndex = mockCreatePayloadIndex;
+    delete = mockDelete;
   }
   return { QdrantClient: MockQdrantClient };
 });
 
-// Create a fake embedder plugin that satisfies the 'embedder' dependency
-const fakeEmbedder: EmbeddingProvider = {
-  dimensions: 1536,
-  embed: vi.fn().mockResolvedValue([]),
-};
-
-function createEmbedderPlugin() {
-  return fp(
-    async (fastify) => {
-      fastify.decorate('embedder', fakeEmbedder);
-    },
-    { name: 'embedder' },
-  );
-}
-
 describe('qdrantPlugin', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockDelete.mockResolvedValue({});
   });
 
   it('creates collection when it does not exist', async () => {
@@ -52,7 +37,6 @@ describe('qdrantPlugin', () => {
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
     await app.register(qdrantPlugin);
     await app.ready();
 
@@ -67,12 +51,12 @@ describe('qdrantPlugin', () => {
     mockGetCollections.mockResolvedValue({
       collections: [{ name: 'cognivault' }],
     });
+    mockCreatePayloadIndex.mockResolvedValue({});
 
     const Fastify = (await import('fastify')).default;
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
     await app.register(qdrantPlugin);
     await app.ready();
 
@@ -90,7 +74,6 @@ describe('qdrantPlugin', () => {
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
     await app.register(qdrantPlugin);
     await app.ready();
 
@@ -102,32 +85,13 @@ describe('qdrantPlugin', () => {
     expect(indexedFields).toContain('status');
     expect(indexedFields).toContain('type');
     expect(indexedFields).toContain('chunk_index');
-    // 6 keyword/integer indexes + 3 full-text indexes (text, title, section_path)
-    expect(mockCreatePayloadIndex).toHaveBeenCalledTimes(9);
+    // 6 keyword/integer indexes + 3 full-text indexes + 1 user_id keyword index
+    expect(mockCreatePayloadIndex).toHaveBeenCalledTimes(10);
 
     await app.close();
   });
 
-  it('decorates fastify.qdrant after plugin ready', async () => {
-    mockGetCollections.mockResolvedValue({ collections: [] });
-    mockCreateCollection.mockResolvedValue({});
-    mockCreatePayloadIndex.mockResolvedValue({});
-
-    const Fastify = (await import('fastify')).default;
-    const { default: qdrantPlugin } = await import('../qdrant.js');
-
-    const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
-    await app.register(qdrantPlugin);
-    await app.ready();
-
-    expect(app.qdrant).toBeDefined();
-    expect(app.qdrant.getCollections).toBeDefined();
-
-    await app.close();
-  });
-
-  it('skips keyword/integer indexes but still creates text indexes when collection already exists', async () => {
+  it('creates user_id keyword index idempotently', async () => {
     mockGetCollections.mockResolvedValue({
       collections: [{ name: 'cognivault' }],
     });
@@ -137,18 +101,107 @@ describe('qdrantPlugin', () => {
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
+    await app.register(qdrantPlugin);
+    await app.ready();
+
+    const indexedFields = mockCreatePayloadIndex.mock.calls.map((call) => call[1].field_name);
+    expect(indexedFields).toContain('user_id');
+
+    const userIdCall = mockCreatePayloadIndex.mock.calls.find(
+      (call) => call[1].field_name === 'user_id',
+    );
+    expect(userIdCall?.[1].field_schema).toBe('keyword');
+
+    await app.close();
+  });
+
+  it('purges legacy vectors without user_id on startup', async () => {
+    mockGetCollections.mockResolvedValue({
+      collections: [{ name: 'cognivault' }],
+    });
+    mockCreatePayloadIndex.mockResolvedValue({});
+
+    const Fastify = (await import('fastify')).default;
+    const { default: qdrantPlugin } = await import('../qdrant.js');
+
+    const app = Fastify({ logger: false });
+    await app.register(qdrantPlugin);
+    await app.ready();
+
+    expect(mockDelete).toHaveBeenCalledWith('cognivault', {
+      filter: {
+        must: [{ is_empty: { key: 'user_id' } }],
+      },
+    });
+
+    await app.close();
+  });
+
+  it('decorates fastify.createTenantQdrant factory (not fastify.qdrant)', async () => {
+    mockGetCollections.mockResolvedValue({ collections: [] });
+    mockCreateCollection.mockResolvedValue({});
+    mockCreatePayloadIndex.mockResolvedValue({});
+
+    const Fastify = (await import('fastify')).default;
+    const { default: qdrantPlugin } = await import('../qdrant.js');
+
+    const app = Fastify({ logger: false });
+    await app.register(qdrantPlugin);
+    await app.ready();
+
+    expect(app.createTenantQdrant).toBeDefined();
+    expect(typeof app.createTenantQdrant).toBe('function');
+
+    const tenantClient = app.createTenantQdrant('test-user');
+    expect(tenantClient).toBeInstanceOf(TenantQdrantClient);
+
+    // Raw client should NOT be exposed
+    expect((app as unknown as Record<string, unknown>).qdrant).toBeUndefined();
+
+    await app.close();
+  });
+
+  it('decorates fastify.purgeUserVectors function', async () => {
+    mockGetCollections.mockResolvedValue({ collections: [] });
+    mockCreateCollection.mockResolvedValue({});
+    mockCreatePayloadIndex.mockResolvedValue({});
+
+    const Fastify = (await import('fastify')).default;
+    const { default: qdrantPlugin } = await import('../qdrant.js');
+
+    const app = Fastify({ logger: false });
+    await app.register(qdrantPlugin);
+    await app.ready();
+
+    expect(app.purgeUserVectors).toBeDefined();
+    expect(typeof app.purgeUserVectors).toBe('function');
+
+    await app.close();
+  });
+
+  it('skips keyword/integer indexes but still creates text and user_id indexes when collection already exists', async () => {
+    mockGetCollections.mockResolvedValue({
+      collections: [{ name: 'cognivault' }],
+    });
+    mockCreatePayloadIndex.mockResolvedValue({});
+
+    const Fastify = (await import('fastify')).default;
+    const { default: qdrantPlugin } = await import('../qdrant.js');
+
+    const app = Fastify({ logger: false });
     await app.register(qdrantPlugin);
     await app.ready();
 
     // Keyword/integer indexes are NOT created (inside if (!exists) block)
     expect(mockCreateCollection).not.toHaveBeenCalled();
-    // Text indexes ARE created idempotently (outside if (!exists) block)
+    // Text indexes + user_id index ARE created idempotently (outside if (!exists) block)
     const indexedFields = mockCreatePayloadIndex.mock.calls.map((call) => call[1].field_name);
     expect(indexedFields).toContain('text');
     expect(indexedFields).toContain('title');
     expect(indexedFields).toContain('section_path');
-    expect(mockCreatePayloadIndex).toHaveBeenCalledTimes(3);
+    expect(indexedFields).toContain('user_id');
+    // 3 text indexes + 1 user_id index
+    expect(mockCreatePayloadIndex).toHaveBeenCalledTimes(4);
 
     await app.close();
   });
@@ -162,7 +215,6 @@ describe('qdrantPlugin', () => {
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
     await app.register(qdrantPlugin);
     await app.ready();
 

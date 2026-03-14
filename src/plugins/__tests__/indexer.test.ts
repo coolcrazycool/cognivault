@@ -1,103 +1,493 @@
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { VaultIndexer } from '../../lib/indexer.js';
+import fp from 'fastify-plugin';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Mock OpenAI to avoid real API calls during embedding plugin validation
-vi.mock('openai', () => {
-  const mockEmbeddingsCreate = vi.fn().mockResolvedValue({
-    data: [{ index: 0, embedding: new Array(1536).fill(0.1) }],
-  });
-  class MockOpenAI {
-    embeddings = { create: mockEmbeddingsCreate };
+// ── Mocks ──
+
+const mockVaultIndexerStart = vi.fn();
+const mockVaultIndexerStop = vi.fn();
+const mockVaultIndexerOn = vi.fn();
+const mockVaultIndexerRemoveListener = vi.fn();
+
+vi.mock('../../lib/indexer.js', () => {
+  class MockVaultIndexer {
+    start = mockVaultIndexerStart;
+    stop = mockVaultIndexerStop;
+    on = mockVaultIndexerOn;
+    removeListener = mockVaultIndexerRemoveListener;
+    isIndexing = false;
   }
-  return { default: MockOpenAI };
+  return {
+    VaultIndexer: MockVaultIndexer,
+  };
 });
 
-// Mock Qdrant client to avoid connection to localhost:6333 during plugin init
-vi.mock('@qdrant/js-client-rest', () => {
-  class MockQdrantClient {
-    getCollections = vi.fn().mockResolvedValue({ collections: [{ name: 'cognivault' }] });
-    createCollection = vi.fn().mockResolvedValue({});
-    createPayloadIndex = vi.fn().mockResolvedValue({});
-    upsert = vi.fn().mockResolvedValue({});
-    delete = vi.fn().mockResolvedValue({});
-    setPayload = vi.fn().mockResolvedValue({});
-    search = vi.fn().mockResolvedValue([]);
-    query = vi.fn().mockResolvedValue({ points: [] });
-    scroll = vi.fn().mockResolvedValue({ points: [] });
-  }
-  return { QdrantClient: MockQdrantClient };
-});
-
-// Create temp directories for vault and data dir
-const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'indexer-plugin-test-'));
-const vaultRoot = path.join(tmpDir, 'vault');
-const dataDir = path.join(tmpDir, 'data');
-await fs.mkdir(vaultRoot, { recursive: true });
-
-// Create a .md file before app starts so it gets indexed
-await fs.writeFile(path.join(vaultRoot, 'test-note.md'), '# Test Note\n\nHello world', 'utf-8');
-
-// Set env vars before any module imports that trigger config parsing
-process.env.COGNIVAULT_API_KEY = 'test-api-key';
-process.env.VAULT_PATH = vaultRoot;
-process.env.COGNIVAULT_DATA_DIR = dataDir;
-process.env.OPENAI_API_KEY = 'test-openai-key';
-
-const { buildApp } = await import('../../app.js');
-
-describe('indexer plugin', () => {
-  let app: FastifyInstance;
-
-  beforeAll(async () => {
-    app = await buildApp({ logger: false });
-    await app.ready();
-  });
-
-  afterAll(async () => {
-    await app.close();
-    await fs.rm(tmpDir, { recursive: true, force: true });
-  });
-
-  it('decorates fastify with indexer property', () => {
-    expect(app.indexer).toBeDefined();
-  });
-
-  it('fastify.indexer is an instance of VaultIndexer', () => {
-    expect(app.indexer).toBeInstanceOf(VaultIndexer);
-  });
-
-  it('fastify.indexer.isIndexing is a boolean', () => {
-    expect(typeof app.indexer.isIndexing).toBe('boolean');
-  });
-
-  it('app.close() completes without error (onClose hook runs)', async () => {
-    // Tested implicitly by afterAll's app.close() — this just verifies readiness
-    expect(app.indexer).toBeDefined();
-  });
-
-  it('indexes .md file into DB after scan completes', async () => {
-    // Wait for background scan to complete
-    // The scan is async so we poll with a timeout
-    const maxWait = 5000;
-    const pollInterval = 100;
-    let elapsed = 0;
-    let rowCount = 0;
-
-    while (elapsed < maxWait) {
-      const { indexedFiles } = await import('../../db/schema.js');
-      const rows = app.db.select().from(indexedFiles).all();
-      rowCount = rows.length;
-
-      if (rowCount > 0) break;
-
-      await new Promise((resolve) => setTimeout(resolve, pollInterval));
-      elapsed += pollInterval;
+vi.mock('../../lib/vault.js', () => {
+  class MockVaultManager {
+    vaultRootPath: string;
+    constructor(rootPath: string) {
+      this.vaultRootPath = rootPath;
     }
+    initialize = vi.fn().mockResolvedValue(undefined);
+    listFiles = vi.fn().mockResolvedValue({ entries: [] });
+    readContent = vi.fn().mockResolvedValue({ content: '' });
+  }
+  return {
+    VaultManager: MockVaultManager,
+  };
+});
 
-    expect(rowCount).toBeGreaterThanOrEqual(1);
-  }, 10000);
+// Mock PQueue
+const mockQueueClear = vi.fn();
+const mockQueueOnIdle = vi.fn().mockResolvedValue(undefined);
+const mockQueueAdd = vi.fn();
+const mockQueueOn = vi.fn();
+let mockQueueSize = 0;
+let mockQueuePending = 0;
+
+vi.mock('p-queue', () => {
+  class MockPQueue {
+    add = mockQueueAdd;
+    clear = mockQueueClear;
+    onIdle = mockQueueOnIdle;
+    on = mockQueueOn;
+    get size() {
+      return mockQueueSize;
+    }
+    get pending() {
+      return mockQueuePending;
+    }
+  }
+  return { default: MockPQueue };
+});
+
+// Mock fs.access for vault path validation
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...original,
+    access: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
+// Set required env vars
+process.env.VAULT_PATH = '/tmp/test-vault';
+process.env.OPENAI_API_KEY = 'test-openai-key';
+process.env.QDRANT_URL = 'http://localhost:6333';
+process.env.EMBEDDING_MODEL = 'text-embedding-3-small';
+
+// ── Test helpers ──
+
+interface MockUser {
+  userId: string;
+  apiKey: string;
+  vaultPath: string;
+  openaiKey: string;
+  obsidian: { email: string; password: string; vault: string };
+}
+
+function createMockUser(userId: string, vaultPath = '/tmp/vault'): MockUser {
+  return {
+    userId,
+    apiKey: `cv-${userId}`,
+    vaultPath,
+    openaiKey: 'test-key',
+    obsidian: { email: 'test@test.com', password: 'pass', vault: 'vault' },
+  };
+}
+
+async function buildTestApp(opts?: {
+  users?: MockUser[];
+  accessFails?: boolean;
+}): Promise<FastifyInstance> {
+  const Fastify = (await import('fastify')).default;
+  const app = Fastify({ logger: false });
+
+  const users = opts?.users ?? [];
+  const registryListeners = new Map<string, Array<(...args: unknown[]) => void>>();
+
+  if (opts?.accessFails) {
+    const fsAccess = fs.access as ReturnType<typeof vi.fn>;
+    fsAccess.mockRejectedValue(new Error('ENOENT'));
+  } else {
+    const fsAccess = fs.access as ReturnType<typeof vi.fn>;
+    fsAccess.mockResolvedValue(undefined);
+  }
+
+  // Register mock dependencies
+  await app.register(
+    fp(
+      async (f) => {
+        f.decorate('registry', {
+          getAllUsers: vi.fn().mockReturnValue(users),
+          on: vi.fn().mockImplementation((event: string, handler: (...args: unknown[]) => void) => {
+            const handlers = registryListeners.get(event) ?? [];
+            handlers.push(handler);
+            registryListeners.set(event, handlers);
+          }),
+          removeListener: vi.fn(),
+        } as unknown as FastifyInstance['registry']);
+
+        f.decorate(
+          'getUserDbById',
+          vi.fn().mockReturnValue({
+            select: vi.fn().mockReturnValue({
+              from: vi.fn().mockReturnValue({ all: vi.fn().mockReturnValue([]) }),
+            }),
+            update: vi.fn().mockReturnValue({
+              set: vi.fn().mockReturnValue({ where: vi.fn().mockReturnValue({ run: vi.fn() }) }),
+            }),
+            insert: vi.fn().mockReturnValue({
+              values: vi.fn().mockReturnValue({
+                onConflictDoUpdate: vi.fn().mockReturnValue({ run: vi.fn() }),
+              }),
+            }),
+            delete: vi.fn().mockReturnValue({ where: vi.fn().mockReturnValue({ run: vi.fn() }) }),
+          }) as unknown as FastifyInstance['getUserDbById'],
+        );
+
+        f.decorate(
+          'createTenantQdrant',
+          vi.fn().mockReturnValue({
+            upsert: vi.fn().mockResolvedValue({}),
+            delete: vi.fn().mockResolvedValue({}),
+            search: vi.fn().mockResolvedValue([]),
+            setPayload: vi.fn().mockResolvedValue({}),
+          }) as unknown as FastifyInstance['createTenantQdrant'],
+        );
+
+        f.decorate(
+          'getUserEmbedder',
+          vi.fn().mockReturnValue({
+            embed: vi.fn().mockResolvedValue([[0.1, 0.2]]),
+            dimensions: 1536,
+          }) as unknown as FastifyInstance['getUserEmbedder'],
+        );
+
+        f.decorate('metrics', {
+          indexQueueDepth: { set: vi.fn() },
+          staleVectorCleanups: { inc: vi.fn() },
+          embeddingRequests: { inc: vi.fn() },
+          chunksProcessed: { inc: vi.fn() },
+          pipelineDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
+          removeUserMetrics: vi.fn(),
+          promRegistry: {},
+        } as unknown as FastifyInstance['metrics']);
+
+        // processFileChanges is decorated by pipeline plugin
+        f.decorate(
+          'processFileChanges',
+          vi.fn() as unknown as FastifyInstance['processFileChanges'],
+        );
+      },
+      { name: 'test-deps' },
+    ),
+  );
+
+  // Register fp dependency name stubs
+  for (const name of ['db', 'registry', 'qdrant', 'embedder', 'metrics', 'pipeline'] as const) {
+    await app.register(fp(async () => {}, { name }));
+  }
+
+  // Store registryListeners on the app for test access
+  (app as unknown as Record<string, unknown>)._registryListeners = registryListeners;
+
+  const { default: indexerPlugin } = await import('../indexer.js');
+  await app.register(indexerPlugin);
+
+  return app;
+}
+
+function getRegistryListeners(
+  app: FastifyInstance,
+): Map<string, Array<(...args: unknown[]) => void>> {
+  return (app as unknown as Record<string, unknown>)._registryListeners as Map<
+    string,
+    Array<(...args: unknown[]) => void>
+  >;
+}
+
+// ── Tests ──
+
+describe('indexer plugin (per-user)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockQueueSize = 0;
+    mockQueuePending = 0;
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+  });
+
+  describe('initialization', () => {
+    it('decorates fastify with indexers Map', async () => {
+      const app = await buildTestApp();
+      await app.ready();
+
+      expect(app.indexers).toBeDefined();
+      expect(app.indexers).toBeInstanceOf(Map);
+
+      await app.close();
+    });
+
+    it('creates indexers for existing registry users on ready', async () => {
+      const users = [
+        createMockUser('user-1', '/tmp/vault1'),
+        createMockUser('user-2', '/tmp/vault2'),
+      ];
+      const app = await buildTestApp({ users });
+      await app.ready();
+
+      expect(app.indexers.size).toBe(2);
+      expect(app.indexers.has('user-1')).toBe(true);
+      expect(app.indexers.has('user-2')).toBe(true);
+
+      // Each indexer should have been started
+      expect(mockVaultIndexerStart).toHaveBeenCalledTimes(2);
+
+      await app.close();
+    });
+
+    it('skips indexer creation if vault path does not exist', async () => {
+      const users = [createMockUser('user-1', '/nonexistent/vault')];
+      const app = await buildTestApp({ users, accessFails: true });
+      await app.ready();
+
+      expect(app.indexers.size).toBe(0);
+      expect(mockVaultIndexerStart).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
+  describe('user-added event', () => {
+    it('creates and starts a new indexer for added user', async () => {
+      const app = await buildTestApp();
+      await app.ready();
+
+      const listeners = getRegistryListeners(app);
+      const addedHandlers = listeners.get('user-added') ?? [];
+      expect(addedHandlers.length).toBeGreaterThan(0);
+
+      // Reset mocks after init
+      mockVaultIndexerStart.mockClear();
+
+      // Simulate user-added event
+      const newUser = createMockUser('new-user', '/tmp/new-vault');
+      for (const handler of addedHandlers) {
+        await (handler as (user: MockUser) => Promise<void>)(newUser);
+      }
+
+      expect(app.indexers.has('new-user')).toBe(true);
+      expect(mockVaultIndexerStart).toHaveBeenCalledTimes(1);
+
+      await app.close();
+    });
+
+    it('skips indexer creation if new user vault path never appears (timeout)', async () => {
+      const app = await buildTestApp();
+      await app.ready();
+
+      // Override fs.access to always fail — vault never materialises
+      const fsAccess = fs.access as ReturnType<typeof vi.fn>;
+      fsAccess.mockRejectedValue(new Error('ENOENT'));
+
+      const listeners = getRegistryListeners(app);
+      const addedHandlers = listeners.get('user-added') ?? [];
+
+      const newUser = createMockUser('bad-path-user', '/nonexistent');
+
+      vi.useFakeTimers();
+      try {
+        const handlerPromise = Promise.all(
+          addedHandlers.map((h) => (h as (user: MockUser) => Promise<void>)(newUser)),
+        );
+
+        // Advance past the 30 second retry window
+        await vi.advanceTimersByTimeAsync(31000);
+
+        await handlerPromise;
+
+        expect(app.indexers.has('bad-path-user')).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+
+      await app.close();
+    });
+  });
+
+  describe('user-removed event', () => {
+    it('stops indexer, clears queue, removes metrics, and deletes from Map', async () => {
+      const users = [createMockUser('user-1', '/tmp/vault1')];
+      const app = await buildTestApp({ users });
+      await app.ready();
+
+      expect(app.indexers.has('user-1')).toBe(true);
+
+      const listeners = getRegistryListeners(app);
+      const removedHandlers = listeners.get('user-removed') ?? [];
+      expect(removedHandlers.length).toBeGreaterThan(0);
+
+      // Simulate user-removed event
+      const removedUser = createMockUser('user-1', '/tmp/vault1');
+      for (const handler of removedHandlers) {
+        await (handler as (user: MockUser) => Promise<void>)(removedUser);
+      }
+
+      expect(app.indexers.has('user-1')).toBe(false);
+      expect(mockVaultIndexerStop).toHaveBeenCalled();
+      expect(mockQueueClear).toHaveBeenCalled();
+      expect(mockQueueOnIdle).toHaveBeenCalled();
+      expect(app.metrics.removeUserMetrics as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(
+        'user-1',
+      );
+
+      await app.close();
+    });
+  });
+
+  describe('onClose', () => {
+    it('stops all indexers on server close', async () => {
+      const users = [createMockUser('user-1', '/tmp/v1'), createMockUser('user-2', '/tmp/v2')];
+      const app = await buildTestApp({ users });
+      await app.ready();
+
+      expect(app.indexers.size).toBe(2);
+
+      mockVaultIndexerStop.mockClear();
+      await app.close();
+
+      expect(mockVaultIndexerStop).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('indexers Map entries', () => {
+    it('each entry has indexer, queue, and vault properties', async () => {
+      const users = [createMockUser('user-1', '/tmp/vault1')];
+      const app = await buildTestApp({ users });
+      await app.ready();
+
+      const entry = app.indexers.get('user-1');
+      expect(entry).toBeDefined();
+      expect(entry!.indexer).toBeDefined();
+      expect(entry!.queue).toBeDefined();
+      expect(entry!.vault).toBeDefined();
+
+      await app.close();
+    });
+  });
+
+  describe('changes forwarding', () => {
+    it('wires indexer changes event to processFileChanges with userId', async () => {
+      const users = [createMockUser('user-1', '/tmp/vault1')];
+      const app = await buildTestApp({ users });
+      await app.ready();
+
+      // VaultIndexer.on should have been called with 'changes'
+      const onCall = mockVaultIndexerOn.mock.calls.find((c: unknown[]) => c[0] === 'changes');
+      expect(onCall).toBeDefined();
+
+      await app.close();
+    });
+  });
+
+  describe('vault path retry on user-added', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(async () => {
+      vi.useRealTimers();
+    });
+
+    it('retries vault path and starts indexer when path appears on 2nd attempt', async () => {
+      const app = await buildTestApp();
+      await app.ready();
+
+      const fsAccess = fs.access as ReturnType<typeof vi.fn>;
+      // Fail twice, then succeed
+      fsAccess.mockRejectedValueOnce(new Error('ENOENT'));
+      fsAccess.mockRejectedValueOnce(new Error('ENOENT'));
+      fsAccess.mockResolvedValue(undefined);
+
+      mockVaultIndexerStart.mockClear();
+
+      const listeners = getRegistryListeners(app);
+      const addedHandlers = listeners.get('user-added') ?? [];
+      const newUser = createMockUser('retry-user', '/tmp/retry-vault');
+
+      // Fire handler but don't await — it will run async with fake timers
+      const handlerPromise = Promise.all(
+        addedHandlers.map((h) => (h as (user: MockUser) => Promise<void>)(newUser)),
+      );
+
+      // Advance timers by 2s for each retry
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(2000);
+
+      await handlerPromise;
+
+      expect(app.indexers.has('retry-user')).toBe(true);
+      expect(mockVaultIndexerStart).toHaveBeenCalledTimes(1);
+
+      await app.close();
+    });
+
+    it('gives up after max wait time if vault never appears', async () => {
+      const app = await buildTestApp();
+      await app.ready();
+
+      const fsAccess = fs.access as ReturnType<typeof vi.fn>;
+      // Always fail
+      fsAccess.mockRejectedValue(new Error('ENOENT'));
+
+      mockVaultIndexerStart.mockClear();
+
+      const listeners = getRegistryListeners(app);
+      const addedHandlers = listeners.get('user-added') ?? [];
+      const newUser = createMockUser('timeout-user', '/tmp/timeout-vault');
+
+      const handlerPromise = Promise.all(
+        addedHandlers.map((h) => (h as (user: MockUser) => Promise<void>)(newUser)),
+      );
+
+      // Advance past 30 second timeout
+      await vi.advanceTimersByTimeAsync(31000);
+
+      await handlerPromise;
+
+      expect(app.indexers.has('timeout-user')).toBe(false);
+      expect(mockVaultIndexerStart).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('starts immediately when vault path exists (no retry delay)', async () => {
+      const app = await buildTestApp();
+      await app.ready();
+
+      const fsAccess = fs.access as ReturnType<typeof vi.fn>;
+      // Succeed immediately
+      fsAccess.mockResolvedValue(undefined);
+
+      mockVaultIndexerStart.mockClear();
+
+      const listeners = getRegistryListeners(app);
+      const addedHandlers = listeners.get('user-added') ?? [];
+      const newUser = createMockUser('immediate-user', '/tmp/immediate-vault');
+
+      // Fire and await directly — should not need timer advancement
+      await Promise.all(
+        addedHandlers.map((h) => (h as (user: MockUser) => Promise<void>)(newUser)),
+      );
+
+      expect(app.indexers.has('immediate-user')).toBe(true);
+      expect(mockVaultIndexerStart).toHaveBeenCalledTimes(1);
+
+      await app.close();
+    });
+  });
 });
