@@ -150,4 +150,96 @@ describe('/metrics endpoint', () => {
     });
     expect(response.body).toContain('cognivault_pipeline_duration_seconds');
   });
+
+  it('response contains cognivault_context_packs_total metric', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/metrics',
+    });
+    expect(response.body).toContain('cognivault_context_packs_total');
+  });
+});
+
+describe('metrics user_id labels', () => {
+  let app: FastifyInstance;
+
+  beforeAll(async () => {
+    app = await buildApp({ logger: false });
+    await app.ready();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('searchDuration records with type and user_id labels', async () => {
+    const timer = app.metrics.searchDuration.startTimer({ type: 'semantic', user_id: 'alice' });
+    timer();
+    const metrics = await app.metrics.promRegistry.metrics();
+    expect(metrics).toContain('user_id="alice"');
+    expect(metrics).toContain('type="semantic"');
+  });
+
+  it('searchRequests records with type and user_id labels', async () => {
+    app.metrics.searchRequests.inc({ type: 'hybrid', user_id: 'bob' });
+    const metrics = await app.metrics.promRegistry.metrics();
+    expect(metrics).toContain('cognivault_search_requests_total{type="hybrid",user_id="bob"}');
+  });
+
+  it('indexQueueDepth records with user_id label', async () => {
+    app.metrics.indexQueueDepth.set({ user_id: 'alice' }, 5);
+    const metrics = await app.metrics.promRegistry.metrics();
+    expect(metrics).toContain('cognivault_index_queue_depth{user_id="alice"} 5');
+  });
+
+  it('staleVectorCleanups records with user_id label', async () => {
+    app.metrics.staleVectorCleanups.inc({ user_id: 'alice' });
+    const metrics = await app.metrics.promRegistry.metrics();
+    expect(metrics).toContain('user_id="alice"');
+  });
+
+  it('embeddingRequests records with user_id label', async () => {
+    app.metrics.embeddingRequests.inc({ user_id: 'alice' });
+    const metrics = await app.metrics.promRegistry.metrics();
+    expect(metrics).toContain('cognivault_embedding_requests_total{user_id="alice"}');
+  });
+
+  it('chunksProcessed records with user_id label', async () => {
+    app.metrics.chunksProcessed.inc({ user_id: 'alice' }, 3);
+    const metrics = await app.metrics.promRegistry.metrics();
+    expect(metrics).toContain('user_id="alice"');
+  });
+
+  it('pipelineDuration records with user_id label', async () => {
+    const timer = app.metrics.pipelineDuration.startTimer({ user_id: 'alice' });
+    timer();
+    const metrics = await app.metrics.promRegistry.metrics();
+    expect(metrics).toContain('user_id="alice"');
+  });
+
+  it('contextPacks counter records with user_id label', async () => {
+    app.metrics.contextPacks.inc({ user_id: 'alice' });
+    const metrics = await app.metrics.promRegistry.metrics();
+    expect(metrics).toContain('cognivault_context_packs_total{user_id="alice"}');
+  });
+
+  it('removeUserMetrics removes all label combinations for a userId', async () => {
+    // Set some metrics for a user
+    app.metrics.searchRequests.inc({ type: 'semantic', user_id: 'remove-me' });
+    app.metrics.searchRequests.inc({ type: 'hybrid', user_id: 'remove-me' });
+    app.metrics.indexQueueDepth.set({ user_id: 'remove-me' }, 10);
+    app.metrics.embeddingRequests.inc({ user_id: 'remove-me' });
+    app.metrics.contextPacks.inc({ user_id: 'remove-me' });
+
+    // Verify metrics exist
+    let metrics = await app.metrics.promRegistry.metrics();
+    expect(metrics).toContain('user_id="remove-me"');
+
+    // Remove
+    app.metrics.removeUserMetrics('remove-me');
+
+    // Verify removed
+    metrics = await app.metrics.promRegistry.metrics();
+    expect(metrics).not.toContain('user_id="remove-me"');
+  });
 });
