@@ -27,7 +27,10 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
             request.getUserQdrant(),
             fastify.getUserEmbedder(userId),
           );
-          const endTimer = fastify.metrics.searchDuration.startTimer({ type: 'semantic', user_id: userId });
+          const endTimer = fastify.metrics.searchDuration.startTimer({
+            type: 'semantic',
+            user_id: userId,
+          });
           const results = await searchService.semantic(query, limit, filters);
           endTimer();
           fastify.metrics.searchRequests.inc({ type: 'semantic', user_id: userId });
@@ -69,7 +72,10 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
             request.getUserQdrant(),
             fastify.getUserEmbedder(userId),
           );
-          const endTimer = fastify.metrics.searchDuration.startTimer({ type: 'hybrid', user_id: userId });
+          const endTimer = fastify.metrics.searchDuration.startTimer({
+            type: 'hybrid',
+            user_id: userId,
+          });
           const results = await searchService.hybrid(query, limit, filters);
           endTimer();
           fastify.metrics.searchRequests.inc({ type: 'hybrid', user_id: userId });
@@ -111,7 +117,10 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
             request.getUserQdrant(),
             fastify.getUserEmbedder(userId),
           );
-          const endTimer = fastify.metrics.searchDuration.startTimer({ type: 'lexical', user_id: userId });
+          const endTimer = fastify.metrics.searchDuration.startTimer({
+            type: 'lexical',
+            user_id: userId,
+          });
           const results = await searchService.lexical(query, limit, filters);
           endTimer();
           fastify.metrics.searchRequests.inc({ type: 'lexical', user_id: userId });
