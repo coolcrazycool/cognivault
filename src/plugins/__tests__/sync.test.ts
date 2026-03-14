@@ -321,14 +321,14 @@ describe('sync plugin', () => {
       await app.close();
     });
 
-    it('sets cognivault_sync_running gauge to 0 when process stops', async () => {
+    it('removes cognivault_sync_running gauge labels when user is removed', async () => {
       const app = await buildTestApp();
       await app.ready();
 
       const user = createMockUser('user-1', '/tmp/vault1');
       await emitUserAdded(app, user);
 
-      // Remove user to stop process and set gauge to 0
+      // Remove user to stop process and clean up metric labels
       await emitUserRemoved(app, user);
 
       const runningMetric = app.metrics.promRegistry.getSingleMetric(
@@ -336,7 +336,8 @@ describe('sync plugin', () => {
       ) as Gauge;
       const values = await runningMetric.get();
       const val = values.values.find((v) => v.labels.user_id === 'user-1');
-      expect(val?.value).toBe(0);
+      // Label should be removed entirely (not set to 0) to prevent stale metrics
+      expect(val).toBeUndefined();
 
       await app.close();
     });
