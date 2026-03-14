@@ -26,7 +26,10 @@ export async function contextRoutes(fastify: FastifyInstance): Promise<void> {
           span.setAttribute('context.token_budget', token_budget);
 
           // Fetch top 50 hybrid results (per locked decision)
-          const searchService = new SearchService(request.getUserQdrant(), fastify.embedder);
+          const searchService = new SearchService(
+            request.getUserQdrant(),
+            fastify.getUserEmbedder(request.user!.userId),
+          );
           const results = await searchService.hybrid(query, 50, filters);
           fastify.metrics.searchRequests.inc({ type: 'hybrid' });
 

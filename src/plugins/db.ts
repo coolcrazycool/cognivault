@@ -12,6 +12,9 @@ type DbInstance = BetterSQLite3Database<typeof schema>;
 type SqliteInstance = ReturnType<typeof import('../db/client.js').createDatabase>['sqlite'];
 
 declare module 'fastify' {
+  interface FastifyInstance {
+    getUserDbById: (userId: string) => DbInstance;
+  }
   interface FastifyRequest {
     getUserDb: () => DbInstance;
     getUserQdrant: () => TenantQdrantClient;
@@ -86,6 +89,13 @@ async function dbPlugin(fastify: FastifyInstance): Promise<void> {
     // Purge user vectors from Qdrant
     await fastify.purgeUserVectors(user.userId);
     fastify.log.info({ userId: user.userId }, 'Removed per-user database and vectors');
+  });
+
+  // Fastify-level accessor for pipeline use outside request context
+  fastify.decorate('getUserDbById', (userId: string): DbInstance => {
+    const entry = userDbs.get(userId);
+    if (!entry) throw new Error(`No database for user: ${userId}`);
+    return entry.db;
   });
 
   // Decorate request with getUserDb and getUserQdrant (placeholder functions replaced per-request)

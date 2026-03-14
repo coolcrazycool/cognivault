@@ -116,7 +116,7 @@ async function buildTestApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
 
   // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial EmbeddingProvider
-  app.decorate('embedder', mockEmbedder as any);
+  app.decorate('getUserEmbedder', (_userId: string) => mockEmbedder as any);
   const { default: fp } = await import('fastify-plugin');
 
   // Mock metrics plugin (named, for auth dependency resolution)

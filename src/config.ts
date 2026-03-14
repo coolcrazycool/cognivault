@@ -9,7 +9,7 @@ const configSchema = z.object({
   COGNIVAULT_DATA_DIR: z.string().default('./.cognivault'),
   POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   STABILITY_DELAY_MS: z.coerce.number().int().positive().default(2000),
-  OPENAI_API_KEY: z.string().min(1, 'OPENAI_API_KEY is required'),
+  OPENAI_API_KEY: z.string().optional(),
   OPENAI_BASE_URL: z.string().url().optional(),
   EMBEDDING_MODEL: z.string().default('text-embedding-3-small'),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),

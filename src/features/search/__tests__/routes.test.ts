@@ -85,9 +85,9 @@ async function buildTestApp(): Promise<FastifyInstance> {
 
   const app = Fastify({ logger: false });
 
-  // Decorate with mocked embedder (cast to satisfy Fastify TypeScript type checks)
+  // Decorate with mocked per-user embedder lookup
   // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial EmbeddingProvider
-  app.decorate('embedder', mockEmbedder as any);
+  app.decorate('getUserEmbedder', (_userId: string) => mockEmbedder as any);
 
   const { default: fp } = await import('fastify-plugin');
 

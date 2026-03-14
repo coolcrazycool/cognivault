@@ -245,6 +245,32 @@ describe('db plugin', () => {
     await app.close();
   });
 
+  it('getUserDbById returns correct DB for existing user', async () => {
+    const frank = makeUser('frank');
+    const { app } = await buildTestFastify({ users: [frank] });
+
+    const { default: dbPlugin } = await import('../db.js');
+    await app.register(dbPlugin);
+    await app.ready();
+
+    const db = app.getUserDbById('frank');
+    expect(db).toBeDefined();
+
+    await app.close();
+  });
+
+  it('getUserDbById throws for unknown user', async () => {
+    const { app } = await buildTestFastify();
+
+    const { default: dbPlugin } = await import('../db.js');
+    await app.register(dbPlugin);
+    await app.ready();
+
+    expect(() => app.getUserDbById('nonexistent')).toThrow('No database for user: nonexistent');
+
+    await app.close();
+  });
+
   it('deletes legacy index.db on startup', async () => {
     // Create legacy files before plugin init
     await fs.mkdir(testDataDir, { recursive: true });
