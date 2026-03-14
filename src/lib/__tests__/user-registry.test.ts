@@ -2,8 +2,8 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { UserRegistry } from '../user-registry.js';
 import type { UserRecord } from '../user-registry.js';
+import { UserRegistry } from '../user-registry.js';
 
 function makeTmpDir(): string {
   return path.join(
