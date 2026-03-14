@@ -83,11 +83,11 @@ Plans:
   1. Qdrant queries always include a mandatory user_id filter; a search by User A returns zero results from User B's vectors
   2. Each user has a separate SQLite database file at a user-scoped path (e.g., data/{userId}/index.db)
   3. Adding a new user via registry creates their SQLite database with correct schema on first access
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] 17-01: TBD
-- [ ] 17-02: TBD
+- [ ] 17-01-PLAN.md — TenantQdrantClient wrapper (TDD) + qdrant plugin refactoring (user_id index, legacy purge, internalize raw client)
+- [ ] 17-02-PLAN.md — Per-user SQLite DB plugin, request decorators, pipeline/search updates
 
 ### Phase 18: Per-User Indexing and Routes
 **Goal**: The indexing pipeline and all API routes operate in multi-tenant mode with per-user OpenAI keys and metrics
@@ -161,7 +161,7 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 14. Infrastructure Hardening & Cleanup | v1.0 | 3/3 | Complete | 2026-03-12 |
 | 15. Registry Foundation | 2/2 | Complete    | 2026-03-14 | - |
 | 16. Multi-Tenant Auth | v2.0 | Complete    | 2026-03-14 | 2026-03-14 |
-| 17. Data Isolation | v2.0 | 0/TBD | Not started | - |
+| 17. Data Isolation | v2.0 | 0/2 | Not started | - |
 | 18. Per-User Indexing and Routes | v2.0 | 0/TBD | Not started | - |
 | 19. CLI and Vault Sync | v2.0 | 0/TBD | Not started | - |
 | 20. Docker and Integration Hardening | v2.0 | 0/TBD | Not started | - |
