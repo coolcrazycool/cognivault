@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
-status: completed
-stopped_at: Phase 18 context gathered
-last_updated: "2026-03-14T09:31:23.182Z"
-last_activity: 2026-03-14 — Phase 17 Plan 02 (Per-User DB Plugin) complete
+status: executing
+stopped_at: Completed 18-01-PLAN.md
+last_updated: "2026-03-14T10:00:55.615Z"
+last_activity: 2026-03-14 — Phase 18 Plan 01 (Plugin Refactoring) complete
 progress:
   total_phases: 6
   completed_phases: 3
-  total_plans: 5
-  completed_plans: 5
-  percent: 80
+  total_plans: 8
+  completed_plans: 6
+  percent: 75
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-14)
 
 **Core value:** AI agents can find and retrieve the right knowledge from an Obsidian vault in under one second, with high precision across mixed Russian/English content, exact technical terms, and freeform metadata.
-**Current focus:** v2.0 Multi-User — Phase 17: Data Isolation
+**Current focus:** v2.0 Multi-User — Phase 18: Per-User Indexing and Routes
 
 ## Current Position
 
-Phase: 17 of 20 (Data Isolation) — third of 6 v2.0 phases
-Plan: 02 of 02 complete (Per-User DB + Search Tenant Isolation)
-Status: Phase 17 complete
-Last activity: 2026-03-14 — Phase 17 Plan 02 (Per-User DB Plugin) complete
+Phase: 18 of 20 (Per-User Indexing and Routes) — fourth of 6 v2.0 phases
+Plan: 01 of 03 complete (Plugin Refactoring)
+Status: Phase 18 in progress
+Last activity: 2026-03-14 — Phase 18 Plan 01 (Plugin Refactoring) complete
 
-Progress: [████████░░] 80%
+Progress: [████████░░] 75%
 
 ## Performance Metrics
 
@@ -64,6 +64,9 @@ All decisions logged in PROJECT.md Key Decisions table.
 - [Phase 17]: Filter merging via unknown[] types with Record cast at Qdrant client boundary
 - [Phase 17]: Disabled pipeline and indexer entirely for Phase 17 (clean break for Phase 18 multi-tenant refactoring)
 - [Phase 17]: Per-user SQLite via Map<userId, db> with request decorators getUserDb/getUserQdrant
+- [Phase 18]: Qdrant uses DIMENSION_MAP[config.EMBEDDING_MODEL] instead of fastify.embedder.dimensions (2026-03-14)
+- [Phase 18]: Per-user EmbeddingProvider Map with registry event lifecycle (2026-03-14)
+- [Phase 18]: No validate() on per-user embedder creation — fail on first use (2026-03-14)
 
 ### Roadmap Evolution
 
@@ -81,6 +84,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T09:31:23.178Z
-Stopped at: Phase 18 context gathered
-Resume file: .planning/phases/18-per-user-indexing-and-routes/18-CONTEXT.md
+Last session: 2026-03-14T10:00:49.977Z
+Stopped at: Completed 18-01-PLAN.md
+Resume file: None
