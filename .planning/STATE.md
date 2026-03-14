@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
 status: in-progress
-stopped_at: Phase 22 context gathered
-last_updated: "2026-03-14T16:51:51.003Z"
+stopped_at: Completed 22-01-PLAN.md
+last_updated: "2026-03-14T17:19:12.813Z"
 last_activity: 2026-03-14 — Phase 19 Plan 02 (Sync Plugin) complete
 progress:
   total_phases: 8
   completed_phases: 6
-  total_plans: 17
-  completed_plans: 16
+  total_plans: 19
+  completed_plans: 17
   percent: 67
 ---
 
@@ -89,6 +89,7 @@ All decisions logged in PROJECT.md Key Decisions table.
 - [Phase 21-cli-server-event-wiring]: Emit 'user-added'/'user-removed' directly in addUser()/removeUser() after atomicWrite — any registry instance fires events reliably without fs.watch
 - [Phase 21-cli-server-event-wiring]: Retry loop wraps createUserIndexer calls — createUserIndexer itself unchanged, still returns null on ENOENT
 - [Phase 21-cli-server-event-wiring]: try/catch wraps entire user-added handler body to prevent unhandled rejections from async EventEmitter handler
+- [Phase 22]: VaultManager.initialize() required in createUserIndexer to set realRootPath via fs.realpath — without it macOS symlink /tmp->private/tmp causes 403 PATH_TRAVERSAL on all non-root vault paths
 
 ### Roadmap Evolution
 
@@ -106,6 +107,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T16:51:50.997Z
-Stopped at: Phase 22 context gathered
-Resume file: .planning/phases/22-milestone-verification-closure/22-CONTEXT.md
+Last session: 2026-03-14T17:19:12.811Z
+Stopped at: Completed 22-01-PLAN.md
+Resume file: None

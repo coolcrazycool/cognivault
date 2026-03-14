@@ -21,15 +21,15 @@ Requirements for multi-user deployment. Each maps to roadmap phases.
 ### Vault Sync
 
 - [x] **SYNC-01**: Each user's vault is synced via `ob sync --continuous` child process with per-user auth token injected as env var
-- [ ] **SYNC-02**: Sync processes restart automatically with exponential backoff on failure
-- [ ] **SYNC-03**: Stale `.obsidian/.sync.lock` files are cleaned up before each sync process start
-- [ ] **SYNC-04**: Sync process failures are logged with structured context and exposed as Prometheus metrics
+- [x] **SYNC-02**: Sync processes restart automatically with exponential backoff on failure
+- [x] **SYNC-03**: Stale `.obsidian/.sync.lock` files are cleaned up before each sync process start
+- [x] **SYNC-04**: Sync process failures are logged with structured context and exposed as Prometheus metrics
 
 ### CLI Management
 
 - [x] **CLI-01**: `cognivault-ctl add-user <name>` creates a user with `--obsidian-email`, `--obsidian-password`, `--vault`, `--openai-key` flags
 - [x] **CLI-02**: `cognivault-ctl remove-user <name>` stops sync, removes user from registry
-- [ ] **CLI-03**: `cognivault-ctl list-users` shows all users with sync status and vault path
+- [x] **CLI-03**: `cognivault-ctl list-users` shows all users with sync status and vault path
 - [x] **CLI-04**: `add-user` performs `ob login` + `ob sync-setup` inline and stores auth token in registry
 
 ### Observability
@@ -93,12 +93,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DATA-01 | Phase 17 | Complete |
 | DATA-02 | Phase 17 | Complete |
 | SYNC-01 | Phase 19 → 21, 22 | Complete |
-| SYNC-02 | Phase 19 → 22 | Pending |
-| SYNC-03 | Phase 19 → 22 | Pending |
-| SYNC-04 | Phase 19 → 22 | Pending |
+| SYNC-02 | Phase 19 → 22 | Complete |
+| SYNC-03 | Phase 19 → 22 | Complete |
+| SYNC-04 | Phase 19 → 22 | Complete |
 | CLI-01 | Phase 19 → 21, 22 | Complete |
 | CLI-02 | Phase 19 → 21, 22 | Complete |
-| CLI-03 | Phase 19 → 22 | Pending |
+| CLI-03 | Phase 19 → 22 | Complete |
 | CLI-04 | Phase 19 → 21, 22 | Complete |
 | OBS-01 | Phase 18 | Complete |
 | OBS-02 | Phase 20 | Complete |
