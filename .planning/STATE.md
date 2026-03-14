@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
 status: in-progress
-stopped_at: Completed 21-cli-server-event-wiring-01-PLAN.md
-last_updated: "2026-03-14T16:37:36.305Z"
+stopped_at: Completed 21-cli-server-event-wiring-02-PLAN.md
+last_updated: "2026-03-14T16:40:57.627Z"
 last_activity: 2026-03-14 — Phase 19 Plan 02 (Sync Plugin) complete
 progress:
   total_phases: 8
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 17
-  completed_plans: 15
+  completed_plans: 16
   percent: 67
 ---
 
@@ -87,6 +87,8 @@ All decisions logged in PROJECT.md Key Decisions table.
 - [Phase 20-docker-and-integration-hardening]: Process-level Node.js metrics intentionally exempt from user_id filtering — plan truth was overspecified
 - [Phase 20-docker-and-integration-hardening]: v2.0 isolation proven via search-based empty results (200+empty), not 404 vault path reads — INFRA-03 satisfied
 - [Phase 21-cli-server-event-wiring]: Emit 'user-added'/'user-removed' directly in addUser()/removeUser() after atomicWrite — any registry instance fires events reliably without fs.watch
+- [Phase 21-cli-server-event-wiring]: Retry loop wraps createUserIndexer calls — createUserIndexer itself unchanged, still returns null on ENOENT
+- [Phase 21-cli-server-event-wiring]: try/catch wraps entire user-added handler body to prevent unhandled rejections from async EventEmitter handler
 
 ### Roadmap Evolution
 
@@ -104,6 +106,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T16:37:36.303Z
-Stopped at: Completed 21-cli-server-event-wiring-01-PLAN.md
+Last session: 2026-03-14T16:40:57.625Z
+Stopped at: Completed 21-cli-server-event-wiring-02-PLAN.md
 Resume file: None

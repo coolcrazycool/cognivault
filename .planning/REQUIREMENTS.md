@@ -20,7 +20,7 @@ Requirements for multi-user deployment. Each maps to roadmap phases.
 
 ### Vault Sync
 
-- [ ] **SYNC-01**: Each user's vault is synced via `ob sync --continuous` child process with per-user auth token injected as env var
+- [x] **SYNC-01**: Each user's vault is synced via `ob sync --continuous` child process with per-user auth token injected as env var
 - [ ] **SYNC-02**: Sync processes restart automatically with exponential backoff on failure
 - [ ] **SYNC-03**: Stale `.obsidian/.sync.lock` files are cleaned up before each sync process start
 - [ ] **SYNC-04**: Sync process failures are logged with structured context and exposed as Prometheus metrics
@@ -92,7 +92,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TENANT-03 | Phase 15 | Complete |
 | DATA-01 | Phase 17 | Complete |
 | DATA-02 | Phase 17 | Complete |
-| SYNC-01 | Phase 19 → 21, 22 | Pending |
+| SYNC-01 | Phase 19 → 21, 22 | Complete |
 | SYNC-02 | Phase 19 → 22 | Pending |
 | SYNC-03 | Phase 19 → 22 | Pending |
 | SYNC-04 | Phase 19 → 22 | Pending |
