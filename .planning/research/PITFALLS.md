@@ -1,237 +1,283 @@
 # Pitfalls Research
 
-**Domain:** Knowledge-access RAG service for Obsidian vaults (vector indexing, hybrid retrieval, multilingual, context assembly)
-**Researched:** 2026-03-10
-**Confidence:** HIGH (core RAG/indexing pitfalls well-documented across multiple sources; CogniVault-specific combinations at MEDIUM)
+**Domain:** Multi-tenant Fastify service with obsidian-headless process management, per-user API keys, registry hot-reload, single-container architecture
+**Researched:** 2026-03-14
+**Confidence:** HIGH for process management and multi-tenancy patterns (well-documented); MEDIUM for obsidian-headless specifics (beta software, limited production usage data)
+
+---
 
 ## Critical Pitfalls
 
-### Pitfall 1: Naive Markdown Chunking Destroys Retrieval Quality
+### Pitfall 1: Stale .sync.lock Blocks All Future Syncs After Unclean ob Exit
 
 **What goes wrong:**
-Fixed-size text splitting (e.g., 512 tokens with overlap) breaks markdown at arbitrary points -- splitting code blocks, cutting tables in half, separating a heading from its body, or merging unrelated sections into one chunk. Studies show naive chunking achieves faithfulness scores of 0.47-0.51 vs. 0.79-0.82 for structure-aware chunking. For Obsidian vaults with freeform structure, this is especially destructive because notes vary wildly in length and organization.
+When an `ob sync --continuous` process is hard-killed (SIGKILL, container crash, OOM kill), it leaves behind a lock directory at `<vault>/.obsidian/.sync.lock`. Every subsequent `ob sync` call fails with "Another sync instance is already running" even though no `ob` process is running. In a single container managing N user sync processes, one crash can silently halt that user's vault sync indefinitely — with no external signal that sync has stopped.
 
 **Why it happens:**
-Developers reach for `RecursiveCharacterTextSplitter` or equivalent as a quick start and never revisit it. Markdown looks like plain text, so the structural signals (headers, lists, code fences, frontmatter) get treated as noise rather than semantic boundaries.
+The `ob` lock implementation uses directory-based locking (not file-based) and only removes the lock directory if a `verify()` check passes on shutdown. `verify()` compares modification timestamps with required exact equality. If the process is hard-killed before the clean shutdown hook runs, or if filesystem timestamp precision causes a mismatch, the lock is never released. SIGTERM (graceful stop) releases locks correctly; SIGKILL does not.
 
 **How to avoid:**
-- Split on markdown headers first (H1 > H2 > H3), keeping each section as a chunk candidate.
-- Preserve header hierarchy as metadata on each chunk: `section_path: ["Note Title", "## Architecture", "### Data Flow"]`. This is already in PROJECT.md requirements -- enforce it from day one.
-- Keep code blocks, tables, and YAML frontmatter intact (never split mid-block).
-- For sections exceeding the max chunk size (~512 tokens), split on paragraph boundaries within that section, carrying the section_path metadata forward.
-- Strip frontmatter from chunk content but index it as payload metadata (tags, project, status).
-- Preserve markdown formatting in chunk text -- the `##` prefix tells an LLM "this was a heading" which aids comprehension.
+- Before spawning an `ob sync --continuous` child process, detect and remove any stale lock: `rmdir <vault>/.obsidian/.sync.lock` if the directory exists. This is safe because the lock auto-expires after ~5 seconds anyway — any lock older than 10 seconds is definitionally stale.
+- In the process manager, implement a pre-start lock cleanup routine run as part of user sync initialization.
+- After any child process exit with a non-zero code, remove the lock before attempting restart.
+- Log lock cleanup operations with `user_id` for observability.
+- Add a health check metric: `cognivault_sync_stale_locks_cleared_total` per user.
 
 **Warning signs:**
-- Retrieved chunks that start mid-sentence or mid-code-block.
-- Search results that match the query but the chunk content is too fragmentary to be useful.
-- Chunks where the first line is a continuation of a previous thought.
+- `ob sync` exits immediately with "Another sync instance is already running" on startup.
+- Child process for a user exits instantly (exit code non-zero) without any sync activity in logs.
+- Process manager shows user's sync process in a restart loop.
+- Vault on disk stops updating after a container restart.
 
 **Phase to address:**
-Phase 1 (Indexing foundation). Chunking quality is the single highest-impact decision in the entire pipeline. Get this right before building retrieval.
+Phase covering `ob sync` process lifecycle management (process manager implementation). Lock cleanup must be the first step in the start sequence.
 
 ---
 
-### Pitfall 2: Stale Vectors After File Edits, Renames, and Deletes
+### Pitfall 2: obsidian-headless Auth Token Stored in $HOME — Breaks Multi-User Process Management
 
 **What goes wrong:**
-A note is edited, but old chunks remain in Qdrant alongside new ones. A note is renamed/moved, but vectors still reference the old path. A note is deleted, but its vectors persist. Over weeks, the vector store accumulates ghost data that pollutes search results. This is particularly insidious because retrieval "mostly works" -- stale results mix with fresh ones and nobody notices until an agent acts on outdated information.
+`ob login` stores credentials in `$HOME/.obsidian-headless/auth_token` (or `$HOME/.config/obsidian-headless/auth_token`). When running N user sync processes inside one container as the same system user, all users share the same `$HOME`. Running `ob login` for user B overwrites user A's stored token. Subsequent user A sync calls authenticate as user B and attempt to sync to the wrong remote vault — or fail entirely.
 
 **Why it happens:**
-The write-then-index path has a gap: the file changes on disk immediately, but re-embedding is async. During that gap, stale vectors are live. Rename/move operations are the worst case -- they look like a delete + create, and if only the "create" side is handled, the old path's vectors remain forever. Obsidian Sync compounds this because synced changes arrive without clear "rename" events -- you see a new file appear and an old file disappear.
+obsidian-headless is designed for single-user CLI use. It has no concept of per-profile token storage. The `$HOME`-based credential store is a standard Unix pattern for single-user tools that becomes a collision point in multi-user server scenarios.
 
 **How to avoid:**
-- Content hashing in SQLite: store `content_hash` per file. On each poll cycle, compare hashes. Changed hash = delete all old chunks for that path, then re-chunk and re-embed.
-- For renames: detect via content hash. If a file disappears at path A and a file with the same hash appears at path B, treat it as a rename (update path in Qdrant payloads, update SQLite) rather than delete+reindex.
-- For deletes: if a path exists in SQLite but not on disk, delete all its vectors from Qdrant and remove the SQLite record.
-- Use Qdrant's scroll/filter API to verify cleanup: after reindex, count vectors per path and assert it matches expected chunk count.
-- Add a Prometheus metric: `cognivault_stale_vectors_cleaned_total` to track how often cleanup runs and catches stale data.
+- Use the `OBSIDIAN_AUTH_TOKEN` environment variable instead of stored credentials. Extract the token from `$HOME/.obsidian-headless/auth_token` after initial `ob login` setup and inject it per-process via environment variables.
+- Spawn each user's `ob sync` child process with a separate `env` object that includes only that user's `OBSIDIAN_AUTH_TOKEN` — never fall through to the shared filesystem credential.
+- Store each user's `auth_token` value encrypted in the registry or a separate secrets store, not in `$HOME`.
+- Never run `ob login` inside the live container — token enrollment must happen at `add-user` time via CLI and be stored securely before the container starts.
 
 **Warning signs:**
-- Vector count in Qdrant grows monotonically even as vault size is stable.
-- Search results return content from notes you know were edited/deleted.
-- Multiple chunks from the same note with slightly different content (old vs. new versions).
+- User A's vault syncing content from user B's remote vault.
+- `ob sync` failing with authentication errors for some users after adding a new user.
+- `$HOME/.obsidian-headless/auth_token` contains a single token (not per-user).
+- Adding user C causes user A or B's sync to break.
 
 **Phase to address:**
-Phase 1-2 (Indexing + Filesystem watching). The cleanup logic must be built into the core indexing loop, not bolted on later.
+Phase covering user registry design and CLI `add-user` command. The token isolation model must be decided before any process spawning code is written.
 
 ---
 
-### Pitfall 3: Multilingual Embedding Bias Silently Degrades Russian Retrieval
+### Pitfall 3: Global SDK State in OpenAI Client Causes Per-Request Key Leakage
 
 **What goes wrong:**
-Multilingual embedding models (including OpenAI's text-embedding-3) have measurably different retrieval quality across languages. English queries against English content work well. Russian queries against Russian content work acceptably. But the critical failure mode is cross-language: an English technical term query ("ingestion pipeline") failing to retrieve a Russian note that discusses the same concept in Russian, or a Russian query failing to match English code comments within a note. The system appears to work in demos (same-language queries) but fails in production where code-switching is constant.
+The OpenAI Node.js SDK allows setting a default API key globally (`openai.apiKey = ...`). In a concurrent Fastify service with per-user OpenAI API keys, using any global or singleton OpenAI client causes key leakage: concurrent requests for users A and B can swap keys mid-flight. User A's embedding gets charged to user B's OpenAI account, or worse, user A's key is used for user B's embeddings, causing their budget to be consumed.
 
 **Why it happens:**
-Embedding models are trained predominantly on English data. Russian performance is lower but not zero, creating a "good enough to ship, bad enough to hurt" situation. The vault's 80%+ Russian content with mixed English technical terms means every query is implicitly cross-lingual. OpenAI's embedding models handle this better than many alternatives but still show retrieval bias toward the query language.
+The natural pattern for single-tenant apps is a singleton client constructed at startup. Multi-tenant per-request key switching requires constructing a new client instance (or a scoped client) per request. Developers often assume the SDK is stateless between calls, but the default key is stored in module-level state.
 
 **How to avoid:**
-- Use OpenAI text-embedding-3-large (not small) -- larger models show less cross-lingual degradation.
-- Build an evaluation set early: 30-50 queries with known-relevant notes, covering pure Russian, pure English, and mixed-language queries. Measure recall@10 for each category separately. If Russian recall is more than 15% below English recall, investigate.
-- Lexical search is your safety net for this: exact term matching catches "Compass catalog" or "SLA" regardless of embedding quality. The hybrid fusion (semantic + lexical) design in PROJECT.md is critical -- do not defer lexical search to a later phase.
-- Cross-encoder reranking (Cohere multilingual or BGE-reranker-v2-m3) significantly improves multilingual precision on the top-K results. This narrows the language gap.
-- Normalize Unicode before embedding: NFC normalization, consistent handling of Cyrillic `e` vs `ё`, Latin look-alikes vs Cyrillic characters (e.g., Latin `c` vs Cyrillic `с`).
+- Construct a new `OpenAI({ apiKey: user.openaiApiKey })` instance per request, not per application startup. The SDK is lightweight — per-request instantiation is safe at 5-20 concurrent users.
+- Never call any method that sets global SDK state.
+- Pass the user's `openaiApiKey` through the Fastify request lifecycle (resolve from registry after auth, attach to `request.user`) so embedding calls always have explicit access to the correct key.
+- Add integration tests that assert user A's embeddings cannot be generated when user A's key is intentionally wrong but user B's key is correct.
 
 **Warning signs:**
-- Agents report "can't find X" for notes you know exist -- especially for Russian-language notes retrieved with English queries.
-- Retrieval evaluation shows recall divergence between language categories.
-- Reranker consistently reorders results significantly (indicating initial retrieval ranking was wrong).
+- OpenAI API errors (401/403) appearing intermittently under concurrent load.
+- OpenAI usage dashboard showing unexpected spikes attributed to specific users.
+- Embeddings succeeding for a user whose API key is known to be invalid.
+- Flaky tests that pass in isolation but fail when run concurrently.
 
 **Phase to address:**
-Phase 2-3 (Retrieval implementation). Build the evaluation harness in the same phase as retrieval, not after. Lexical search must ship alongside semantic search, not after.
+Phase covering per-user embeddings and OpenAI client architecture. Design the per-request client pattern before implementing any multi-user embedding calls.
 
 ---
 
-### Pitfall 4: Filesystem Polling Misses Changes or Creates Race Conditions
+### Pitfall 4: Missing user_id Filter in Any Qdrant Query Leaks Cross-Tenant Vectors
 
 **What goes wrong:**
-Three failure modes: (1) Poll interval too long -- changes sit unindexed for minutes, agents retrieve stale content. (2) Poll catches a file mid-write -- Obsidian Sync writes files in chunks, and reading during sync yields partial/corrupt content. (3) Poll interval too short -- constant disk I/O and hashing burns CPU on large vaults, especially on macOS where stat() on thousands of files is slower than Linux.
+CogniVault v1.0 already uses Qdrant with `user_id` payload filtering. But every new query path, reindex trigger, and admin operation must consistently apply the `user_id` filter — one missed `filter` parameter in any search or scroll call exposes all users' vectors to the requesting user. The v1.0 codebase has a single tenant, so any query without a filter "accidentally" works correctly. In multi-tenant operation, the same code becomes a data leak.
 
 **Why it happens:**
-Obsidian Sync does not trigger reliable filesystem events (inotify/FSEvents). The PROJECT.md correctly identifies polling as the robust approach. But polling has its own failure modes that are less obvious. The fundamental tension: you want freshness (short interval) but safety (don't read mid-write) and efficiency (don't burn CPU).
+Query functions written for single-tenant use have no `user_id` parameter — they never needed one. When migrating to multi-tenant, developers add the filter to the happy path but miss admin endpoints, reconciliation jobs, cleanup routines, reindex paths, and error recovery flows. These code paths are less tested and the omission is invisible until a user accidentally sees another's content.
 
 **How to avoid:**
-- Two-pass stability check: on each poll, record `(path, mtime, size)`. On the *next* poll, if mtime/size changed between polls, the file is still settling -- skip it. Only process files whose mtime/size was stable across two consecutive polls. This handles Obsidian Sync's multi-step writes.
-- Content hash before embedding: even after stability check, hash the file content and compare to SQLite. Skip if unchanged. This makes frequent polling cheap (hash comparison) while catching all changes.
-- Poll interval: 5-10 seconds is the sweet spot for 500-5000 files. Below 5s, CPU cost on macOS is noticeable. Above 15s, freshness degrades.
-- Debounce rapid changes: if a file changes multiple times within a poll window (common during Obsidian editing sessions), only index the final version.
-- Log skipped files with reason ("settling", "unchanged", "error reading") for debugging.
+- Wrap all Qdrant interactions in a `UserScopedQdrant` service that requires `user_id` as a mandatory first argument. Make it structurally impossible to call any query without passing a `user_id`.
+- Audit every existing Qdrant call site in the v1.0 codebase during the migration phase. Search for all `qdrant.search(`, `qdrant.scroll(`, `qdrant.delete(`, `qdrant.upsert(` and verify each carries a `must: [{ key: 'user_id', match: { value: userId } }]` condition.
+- Confirm `user_id` payload index exists with `is_tenant: true` (required since Qdrant v1.11.0) for performance optimization.
+- Add cross-tenant leak detection test: index a doc for user A, query as user B — assert zero results.
 
 **Warning signs:**
-- Indexing errors with partial/corrupt file content.
-- Files that are "never indexed" because they're always in a settling state.
-- High CPU usage from the polling loop on larger vaults.
-- Agent complaints about notes not being findable shortly after creation/edit.
+- Search results returning content from unexpected sources.
+- Reconciliation counts not matching expected per-user document counts.
+- Any Qdrant call site that does not accept `userId` as a parameter.
+- Shared reindex or cleanup utilities that operate on the whole collection.
 
 **Phase to address:**
-Phase 1 (Filesystem layer). This is foundational -- the indexing pipeline cannot be tested without reliable change detection.
+Phase covering multi-tenant auth layer and Qdrant scoping. This is the first security boundary to establish before any per-user data is written.
 
 ---
 
-### Pitfall 5: Embedding Model Version Migration Without Downtime Strategy
+### Pitfall 5: Node.js as PID 1 in Docker Does Not Reap Zombie ob Processes
 
 **What goes wrong:**
-You switch from `text-embedding-3-small` to `text-embedding-3-large` (or from OpenAI to a local model like BGE). Queries now use the new model's embedding space, but existing vectors in Qdrant were embedded with the old model. Cosine similarity between embeddings from different models is meaningless -- retrieval returns garbage. You must re-embed the entire corpus, but during re-embedding (which takes hours for 5000 notes), the system is either down or returning mixed results.
+When CogniVault (a Node.js process) runs as PID 1 in a Docker container and spawns `ob sync` child processes, Node.js does not implement init-process semantics. When an `ob` child process exits, Linux sends SIGCHLD to the parent (Node.js). If `ob` itself spawned grandchild processes (e.g., for file watching or sync workers), those grandchildren become orphans adopted by PID 1. Node.js as PID 1 does not call `waitpid()` on adopted processes — they become zombie entries in the process table. Under sustained restarts (stale lock cycles, auth retries), the zombie count grows until the process table fills.
 
 **Why it happens:**
-Embedding models produce vectors in incompatible spaces. There is no mathematical relationship between `text-embedding-3-small` and `text-embedding-3-large` vector spaces. This is a known problem, but teams defer the migration strategy until they actually need to migrate, at which point they discover there is no clean path.
+Node.js is not designed to be an init process. The Linux kernel assigns orphaned processes to PID 1, which is responsible for reaping them. Standard init systems (systemd, tini, s6) handle this; Node.js does not.
 
 **How to avoid:**
-- Store `embedding_model_version` in SQLite per-file (already in PROJECT.md requirements). On query, verify that the query embedding model matches the stored model. If mismatch, refuse to search and report the mismatch rather than returning garbage.
-- Use Qdrant collection aliases for zero-downtime migration: create new collection `vault_v2`, re-embed into it in background, atomically swap alias from `vault_v1` to `vault_v2`, delete old collection.
-- Build the reindex endpoint from the start -- full reindex is not a rare operation, it is a regular maintenance task. Make it resumable (track progress in SQLite so interrupted reindexing can continue).
-- For the 500-5000 note scale, full reindex takes 10-30 minutes with OpenAI API (rate limits are the bottleneck). This is fast enough that collection-swap is the right strategy over gradual migration.
-- Record the embedding model name and version in the Qdrant collection metadata and in SQLite, not just in config.
+- Add `tini` as PID 1 in the Dockerfile: `ENTRYPOINT ["/sbin/tini", "--", "node", "dist/server.js"]`. Tini handles zombie reaping and signal forwarding correctly.
+- Alternatively, use the `--init` flag in Docker Compose for each service.
+- In the Node.js process manager, attach `child.on('exit', ...)` handlers that call `child.kill()` on the child's process group (not just the child PID) using negative PIDs (`process.kill(-child.pid, 'SIGTERM')`) to signal all members of the process group.
+- Spawn `ob sync` with `{ detached: false }` to keep it in the same process group as the parent.
 
 **Warning signs:**
-- Config references one embedding model but SQLite records show a different model was used.
-- Retrieval quality suddenly drops after a deployment change.
-- Query latency changes dramatically (different dimension sizes = different performance characteristics).
+- `ps aux | grep Z` shows zombie processes after container uptime > a few hours.
+- Process table entries with state `Z` accumulating over time.
+- Container OOM or slowdown without corresponding memory growth in the Node.js heap.
+- Docker container failing to stop cleanly within the grace period (SIGTERM not reaching child processes).
 
 **Phase to address:**
-Phase 1 (Data model design). The version tracking schema must be designed into SQLite and Qdrant from day one, even if migration tooling is built later.
+Phase covering Docker containerization and process supervisor setup. Tini must be added to the Dockerfile before the process manager is implemented.
 
 ---
 
-### Pitfall 6: Context Pack Assembly That Maximizes Tokens Instead of Relevance
+### Pitfall 6: Registry File Hot-Reload Race Condition Corrupts User Mappings
 
 **What goes wrong:**
-The context pack endpoint fills the ~32K token budget greedily: stuff in as many retrieved chunks as will fit. The result is a context window full of tangentially related content that dilutes the actually relevant chunks. Research shows accuracy drops 10-20+ percentage points when relevant information is buried in the middle of irrelevant context. Agents make worse decisions with 20 mediocre chunks than with 5 excellent ones.
+The API-key-to-user-id registry is a JSON file watched with `fs.watch()`. The CLI writes a new user entry while the server is reading the file for an incoming request. The read gets a partial write (the file write is not atomic by default), resulting in invalid JSON that crashes the parser. The registry is now `null` in memory, routing all requests to "unknown user" until the server rereads. In the worst case, a stale mapping persists and a new user's API key routes to an existing user's vault.
 
 **Why it happens:**
-Token budget feels like a resource to "use efficiently" -- leaving 20K of a 32K budget unused feels wasteful. But context assembly is not bin-packing; it is curation. The retrieval pipeline returns ranked results, but the assembly step often ignores ranking and just fills space.
+`fs.writeFile()` is not atomic — it truncates then writes, creating a window where the file is empty or incomplete. `fs.watch()` fires on file open (before write completes), not on close. A server read triggered by the watch event catches the file mid-write. This is a classic TOCTOU (time-of-check to time-of-use) race condition.
 
 **How to avoid:**
-- Set a relevance floor: after reranking, drop any chunk below a minimum similarity/reranker score. Do not include low-relevance chunks just because budget allows.
-- Implement diminishing returns logic: if the 6th chunk's reranker score is less than 70% of the 1st chunk's score, stop adding chunks.
-- Deduplicate aggressively: overlapping chunks from the same note or adjacent sections add tokens without adding information. Merge or pick the best.
-- Position high-relevance chunks at the start and end of the context pack (avoiding the "lost in the middle" effect).
-- Include metadata headers per chunk in the context pack (source note title, section path) so the agent can attribute information. This costs tokens but massively improves agent decision quality.
-- Make the relevance floor and max-chunks configurable per request so agents can tune behavior.
+- Use atomic writes for the registry file: write to a temp file in the same directory, then `fs.rename()` (rename is atomic on POSIX filesystems). The `write-file-atomic` npm package implements this correctly.
+- In the `fs.watch()` handler, add a 50-100ms debounce before rereading. Multiple rapid events (editors, atomic rename) collapse into one read.
+- Parse the JSON in a try/catch; on parse failure, keep the previous in-memory registry and log an error — do not replace a valid registry with a failed parse.
+- Add a file integrity check: after parsing, verify the registry contains at least one user before replacing the in-memory copy.
+- Validate with Zod before swapping into the active registry.
 
 **Warning signs:**
-- Context packs where most chunks come from different unrelated notes (indicates low-relevance padding).
-- Agent responses that reference information from the context pack but misattribute or confuse sources.
-- Consistently hitting the full token budget on every request (suggests no quality filtering).
+- "Unexpected end of JSON input" or "SyntaxError: JSON Parse error" in logs during `add-user` or `remove-user` CLI operations.
+- Requests returning 401 "unknown API key" immediately after user management operations.
+- `fs.watch` events firing twice for a single CLI write (common on macOS).
 
 **Phase to address:**
-Phase 3 (Context assembly). Build after retrieval and reranking are solid. The assembly layer depends on reranker scores for quality filtering.
+Phase covering registry design and CLI user management. The atomic write and defensive parse pattern must be in the initial implementation, not patched in after seeing corruption in production.
 
 ---
 
-### Pitfall 7: SQLite and Qdrant Index State Divergence
+### Pitfall 7: fs.watch Is Unreliable on Linux for Single-File Watching
 
 **What goes wrong:**
-SQLite says file X has 5 chunks indexed. Qdrant actually has 3 (two deletes failed silently) or 7 (two old chunks were not cleaned up). The index state tracker and the actual vector store disagree. This divergence compounds over time and is extremely hard to diagnose because everything "looks right" from the application's perspective -- SQLite reports the file as indexed, queries return results, but the results are subtly wrong.
+`fs.watch()` has documented unreliability on Linux: it can miss events, fire duplicate events, and behaves differently from macOS (kqueue/FSEvents) and Linux (inotify). For a single registry JSON file, missed events mean the server runs on a stale registry (a new user cannot authenticate) and duplicate events cause redundant — and potentially concurrent — reload operations. In Docker on Linux (the production environment), `inotify` event behavior differs from macOS development environments, causing bugs that only appear in production.
 
 **Why it happens:**
-SQLite writes and Qdrant writes are not atomic. A crash or error between "delete old vectors from Qdrant" and "update SQLite record" leaves them inconsistent. Network errors to Qdrant (even on localhost Docker networking) can cause silent failures. Qdrant operations are eventually consistent -- a delete may not be immediately visible.
+`fs.watch()` is a thin wrapper over OS-specific file notification APIs with explicitly documented cross-platform inconsistencies. Node.js documentation warns: "The behavior of fs.watch() is not consistent across platforms and is unavailable in some situations." Linux inotify fires IN_CLOSE_WRITE, IN_MOVED_FROM/TO events — but the mapping to Node.js event types is not always 1:1 with macOS FSEvents.
 
 **How to avoid:**
-- Order of operations matters: (1) upsert new vectors to Qdrant, (2) verify upsert with a count/scroll query, (3) delete old vectors from Qdrant, (4) update SQLite. If step 1 or 2 fails, SQLite still reflects the old state (safe to retry). If step 3 fails, you have duplicates (caught by next reconciliation).
-- Build a reconciliation job: periodically (e.g., every hour or on-demand via API), compare SQLite chunk counts per file against actual Qdrant vector counts per path. Log discrepancies and auto-repair.
-- Use WAL mode for SQLite (`PRAGMA journal_mode=WAL`) for better concurrent read/write performance and crash safety. Set `busy_timeout` to 5000ms to handle lock contention from concurrent agent requests.
-- Keep Qdrant point IDs deterministic (e.g., hash of `vault_name + file_path + chunk_index`). This makes upserts idempotent -- re-indexing the same content produces the same IDs and naturally deduplicates.
-- Wrap SQLite updates in transactions per-file, not per-chunk.
+- Use `chokidar` instead of raw `fs.watch()` for registry file watching. Chokidar abstracts platform differences and provides stable `add`, `change`, `unlink` events with proper debouncing.
+- Alternatively, implement a polling fallback: check the registry file's mtime every 2-3 seconds. At one small JSON file, polling overhead is negligible. This is 100% reliable cross-platform.
+- Do not depend solely on file watching — also poll on a slow interval as a safety net even if using watch events.
+- Test file watching explicitly on Linux (in Docker) during development, not just macOS.
 
 **Warning signs:**
-- Reconciliation job reports count mismatches.
-- `cognivault_index_reconciliation_errors` metric trends upward.
-- Duplicate chunks in search results (same content, different point IDs).
-- "Database is locked" errors in logs (indicates transaction contention).
+- `add-user` CLI completes successfully but new user cannot authenticate until server restarts.
+- Duplicate reload logs (same timestamp, two "registry reloaded" log entries).
+- Works correctly on macOS dev machine, breaks in Docker Linux production.
 
 **Phase to address:**
-Phase 1-2 (Core indexing pipeline). Deterministic point IDs and WAL mode should be in the initial schema. Reconciliation job can come in Phase 2.
+Phase covering registry file watching implementation. Choose the watching strategy before building CLI commands — the write side must be tested against the read side.
 
 ---
 
-### Pitfall 8: Multi-Format Indexing (PDF/Canvas/Excalidraw) as Afterthought
+### Pitfall 8: Single-Tenant SQLite Schema Applied to Multi-Tenant Data Without user_id Columns
 
 **What goes wrong:**
-The system is designed and tested entirely on markdown files. When PDF, Canvas, Excalidraw, and CSV support is added later, the chunking pipeline, metadata schema, and retrieval logic all assume markdown structure. PDF text extraction produces flat text without headers. Canvas JSON contains node-based content that does not chunk like documents. Excalidraw text is fragmented across drawing elements. Each format requires different chunking logic, but the system has a single rigid pipeline.
+The existing v1.0 SQLite schema tracks index state (file paths, content hashes, chunk counts, embedding model version) without a `user_id` column — it was single-tenant. Migrating to multi-tenant by simply running multiple file paths for different users in the same tables without `user_id` causes: incorrect change detection (user B's file looks like a rename of user A's file with the same content hash), cascading cross-user reindexes, and reconciliation that cannot distinguish which Qdrant vectors belong to which user.
 
 **Why it happens:**
-Markdown is 80%+ of the vault content, so it is natural to optimize for it. Multi-format support is scoped as "just extract text and run it through the same pipeline." But text extraction quality varies enormously, and structure-aware chunking that works for markdown does not work for other formats.
+Single-tenant schema assumes globally unique file paths. Multi-tenant requires `(user_id, vault_path)` as the composite key. Adding `user_id` to a live SQLite database requires a migration, and developers often defer the schema change, instead prefixing paths (e.g., `alice:/notes/foo.md`) as a workaround — which breaks all existing path-based queries and logic.
 
 **How to avoid:**
-- Design the chunking pipeline with a `ChunkingStrategy` interface from day one: `chunk(file_content, file_type, metadata) -> Chunk[]`. Each format gets its own strategy implementation.
-- For PDFs: extract text with a library that preserves paragraph boundaries (not just raw text dump). Store `source_format: "pdf"` in chunk metadata so retrieval can filter or weight by format.
-- For Canvas: each node is a natural chunk. Preserve node relationships in metadata.
-- For CSV: each row or logical group of rows is a chunk. Column headers become metadata.
-- Defer Excalidraw and image metadata to a later phase -- they add complexity with low ROI at 500-5000 notes scale. But ensure the interface supports them.
-- Do NOT attempt to force non-markdown formats through the markdown header splitter.
+- Write and run a SQLite migration that adds `user_id TEXT NOT NULL DEFAULT 'default'` to all index state tables as the first step of the multi-tenant migration phase.
+- Update all primary keys to `(user_id, vault_path)` composite keys.
+- Update all Drizzle ORM queries to include `where(eq(table.userId, userId))` before any other filter.
+- For the initial migration, assign the existing single tenant's data to a designated `user_id` (e.g., the first user in the registry).
+- Test the migration path: run the migration against the existing production SQLite file and verify zero data loss.
 
 **Warning signs:**
-- PDF chunks that are walls of text with no structure.
-- Canvas content that is unchunkable or produces nonsensical chunks.
-- Format-specific bugs that require changes to the core chunking pipeline (indicates coupling).
+- Content hash collisions between users causing one user's unchanged file to be skipped for reindex (because its hash matches another user's file in the table).
+- Reconciliation jobs operating on wrong users' data.
+- Path-based queries returning results across users.
 
 **Phase to address:**
-Phase 1 (Design the interface), Phase 2+ (Implement non-markdown strategies). The abstraction boundary must exist from day one even if only markdown is implemented initially.
+Phase covering SQLite multi-tenant migration. Must be the first database change in the v2.0 milestone — all other phases depend on correct user-scoped index state.
 
 ---
 
-### Pitfall 9: Hybrid Search Fusion Weighting Without Empirical Tuning
+### Pitfall 9: Child Process Manager Does Not Handle ob Crash-Restart Loop
 
 **What goes wrong:**
-RRF (Reciprocal Rank Fusion) combines semantic and lexical results with a constant `k` parameter (typically 60). Teams pick a value from a blog post, ship it, and never tune it. For CogniVault's mixed Russian/English technical content, the optimal balance between semantic and lexical differs significantly from English-only corpora. Lexical search is disproportionately important for short technical identifiers ("SLA", "Compass", "ingestion") that embedding models handle poorly. With default RRF weights, semantic search dominates and exact-match terms get buried.
+If `ob sync --continuous` fails repeatedly (bad credentials, Obsidian Sync outage, stale lock that is not cleaned up), the process manager restarts it immediately on each exit. Without backoff, the container spawns processes at a rate that exhausts file descriptors, CPU, and piles up stale lock directories faster than cleanup can remove them. In a container with 5-20 users, one user's sync failure in a tight restart loop degrades service for all others.
 
 **Why it happens:**
-RRF "just works" as a reasonable default, so there is no obvious failure -- results are acceptable but not good. Without an evaluation framework, teams cannot measure the impact of different fusion parameters. The degradation is gradual: slightly worse results that agents compensate for by making more queries.
+Naive restart logic: `child.on('exit', () => spawn(user))`. This is straightforward to implement but has no concept of failure rate. The process manager cannot distinguish a clean restart (new vault content available) from a crash loop (unrecoverable auth error).
 
 **How to avoid:**
-- Build the evaluation harness (30-50 queries with ground truth) before tuning. Measure retrieval precision and recall separately for: pure semantic queries, exact-term queries, mixed queries.
-- Make the RRF `k` parameter and the semantic/lexical weight ratio configurable at query time, not just in config.
-- Consider a query classifier: if the query contains short exact terms (< 3 words, all ASCII/Latin), boost lexical weight. If the query is a natural language question, boost semantic weight.
-- Test with real vault queries from agent logs, not synthetic benchmarks.
+- Implement exponential backoff with a cap: first restart after 1s, then 2s, 4s, 8s, up to 60s maximum. Reset the backoff counter after a process has been running cleanly for at least 60 seconds.
+- Track consecutive failures per user. After 5 consecutive failures within 5 minutes, mark that user's sync as "degraded" and stop auto-restarting. Emit a metric and alert.
+- Expose the per-user sync status via the health endpoint (`/health` or `/admin/users`) so operators can observe degraded sync states.
+- Perform lock cleanup before each restart attempt (Pitfall 1 prevention), not only on first start.
 
 **Warning signs:**
-- Agents find notes by exact path browsing that search failed to retrieve.
-- Short technical term queries return poor results while natural language queries work well (or vice versa).
-- Reranker consistently promotes lexical-matched results that semantic search ranked low.
+- Logs show rapid-fire "starting sync for user X" / "sync exited for user X" cycles.
+- File descriptor count (`/proc/<pid>/fd`) growing in the container.
+- CPU spike not correlated with actual vault activity.
+- One user's sync issue affecting request latency for other users.
 
 **Phase to address:**
-Phase 2-3 (Retrieval implementation and tuning). Build the evaluation harness in the same phase as retrieval. Do not defer tuning to "later."
+Phase covering process manager implementation. Backoff and failure threshold must be in the initial design, not added after observing runaway restart loops.
+
+---
+
+### Pitfall 10: obsidian-headless Native Binaries Not Available for Linux ARM64
+
+**What goes wrong:**
+The `obsidian-headless` package ships prebuilt native binaries only for Windows (x64, ARM64, ia32) and macOS (x64, ARM64). Linux ARM64 is not listed among the prebuilt targets. If the production Docker host is ARM64 (Apple Silicon Mac running Docker via qemu, AWS Graviton, Raspberry Pi), `npm install -g obsidian-headless` will fail to install the native module, and `ob sync` will not work.
+
+**Why it happens:**
+obsidian-headless is a beta tool (v0.0.3+, released February 2026) with limited platform coverage. Linux x86_64 appears to be supported (the documented deployment target), but ARM64 Linux support is not confirmed in available documentation as of this research date.
+
+**How to avoid:**
+- Explicitly test `npm install -g obsidian-headless` inside the target Docker image (linux/amd64 base) before committing to the architecture.
+- Pin to `linux/amd64` in the Dockerfile `FROM` directive: `FROM --platform=linux/amd64 node:22-slim`. This forces x86_64 emulation on ARM64 hosts.
+- Track the obsidian-headless GitHub releases for Linux ARM64 native binary additions — this is likely to be added as the tool matures.
+- Have a fallback plan if native binaries are missing: the `ob` CLI can potentially run without native modules for basic sync (the `birthtime` limitation is documented as graceful degradation on Linux), but this needs explicit testing.
+
+**Warning signs:**
+- `npm install -g obsidian-headless` fails with "No native binary found for platform linux arm64".
+- `ob` command not found after installation.
+- Docker build fails on ARM64 CI runners.
+
+**Phase to address:**
+Phase covering Dockerfile and container build. The platform target must be verified in the first Dockerfile iteration before any process manager code depends on `ob` being available.
+
+---
+
+### Pitfall 11: CLI Modifying Live System State Without IPC — TOCTOU on User Add/Remove
+
+**What goes wrong:**
+The CLI writes to the user registry file to add or remove users while the CogniVault server is running. The CLI does not know whether the server has picked up the change. An operator adds a user, the server is mid-request when the registry reloads, and the new user's first API request arrives before the registry is fully loaded — they get a 401. More dangerously: `remove-user` removes a user from the registry while the server is mid-flight on a request from that user, causing the request to fail partway through (vectors written to Qdrant for a user whose index state has been partially torn down).
+
+**Why it happens:**
+File-based IPC (registry file + fs.watch) is inherently asynchronous. The CLI writes, the server reads eventually — there is no acknowledgement. This is acceptable for reads but problematic for destructive operations like `remove-user` where partial state is worse than no change.
+
+**How to avoid:**
+- For `add-user`: the TOCTOU risk is low (a delayed 401 on first request is recoverable). Acceptable if registry reload is fast (< 500ms).
+- For `remove-user`: implement a soft-delete approach. Mark the user as `status: "removing"` in the registry, let the server stop accepting new requests for that user (returns 503 "user being removed"), wait for in-flight requests to drain (a configurable grace period, e.g., 10 seconds), then write the final removal. The CLI should wait for the grace period before confirming removal.
+- Consider adding an admin REST endpoint (`DELETE /admin/users/:userId`) that the CLI calls instead of writing to the file directly. The server can handle the state transition atomically.
+- Log all registry mutations with timestamps and operation type for audit trail.
+
+**Warning signs:**
+- `remove-user` completing on the CLI while the server is still processing requests for that user.
+- Partial Qdrant vector deletion (some vectors removed, some still present for a removed user).
+- 401 errors for a newly added user within the first second after `add-user` completes.
+
+**Phase to address:**
+Phase covering CLI user management commands. The soft-delete pattern for `remove-user` must be designed before the CLI is implemented.
 
 ---
 
@@ -239,100 +285,119 @@ Phase 2-3 (Retrieval implementation and tuning). Build the evaluation harness in
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
 |----------|-------------------|----------------|-----------------|
-| Hardcoded embedding model name instead of config/DB tracking | Faster initial development | Cannot detect model mismatch, migration requires code changes | Never -- version tracking is cheap and critical |
-| Single chunking pipeline for all formats | Less code initially | Painful refactor when adding PDF/Canvas support, format-specific bugs leak into core pipeline | MVP if markdown-only, but interface must exist |
-| No evaluation harness | Ship retrieval faster | Cannot measure regression, cannot tune fusion weights, cannot compare embedding models | Never -- even 20 queries with ground truth is sufficient |
-| Synchronous embedding in request path | Simpler architecture | API blocks for 200-500ms per note on write, user-visible latency | Never for write operations; acceptable for manual single-note reindex endpoint |
-| Skipping content hash, relying on mtime only | Simpler polling logic | Obsidian Sync can update mtime without changing content (metadata sync), causing unnecessary re-embeds; also misses changes if clock skew occurs | Early prototype only, replace before production |
-| Global SQLite lock for all operations | Simple concurrency model | Read operations blocked during reindexing, agent search queries stall | Acceptable if using WAL mode (reads and writes do not block each other) |
+| Single OpenAI client singleton instead of per-request instances | Simpler code | Cross-tenant key leakage under concurrency | Never — instantiating per-request is cheap |
+| Storing auth tokens in $HOME instead of env vars | Easier `ob login` | Multi-user token collision, impossible to manage N users | Never for server-side multi-user use |
+| Non-atomic registry file writes (`fs.writeFile` directly) | Less code | Race condition corrupts registry on concurrent CLI use | Never — `write-file-atomic` is a trivial dependency |
+| No backoff on child process restart | Simpler process manager | Crash loops exhaust resources and degrade all users | Never — exponential backoff must be in initial implementation |
+| Skipping `user_id` SQLite migration, using path prefixes instead | Avoids schema migration | All path-based queries break, cross-user hash collisions | Never — schema migration is the only safe approach |
+| `fs.watch()` without polling fallback | Less code | Missed events on Linux, stale registry in production | MVP only if development is macOS-only; add fallback before Docker deployment |
+| Immediate `remove-user` without graceful drain | Simpler CLI | Partial cleanup of in-flight requests, orphaned Qdrant vectors | Never for production; acceptable in development with no live traffic |
+
+---
 
 ## Integration Gotchas
 
 | Integration | Common Mistake | Correct Approach |
 |-------------|----------------|------------------|
-| Qdrant | Using auto-generated point IDs, making upserts non-idempotent | Use deterministic IDs (hash of path + chunk index) so re-indexing is naturally idempotent |
-| Qdrant | Not setting `on_disk: true` for payload indexes on larger collections | Enable on-disk payload indexing for path, tags, project fields to keep memory usage bounded |
-| OpenAI Embeddings API | Not handling rate limits (429 errors) during bulk reindex | Implement exponential backoff with jitter; batch embeddings (up to 2048 per request); track rate limit headers |
-| OpenAI Embeddings API | Sending empty or whitespace-only text for embedding | Validate chunk content is non-empty and has meaningful tokens before embedding call |
-| Cohere Reranker | Sending too many documents per rerank call (latency spike) | Rerank only top-20 from initial retrieval, not all results. Cohere recommends max 100 documents per call |
-| SQLite | Not enabling WAL mode, getting "database is locked" under concurrent agent requests | Set `PRAGMA journal_mode=WAL` and `PRAGMA busy_timeout=5000` on connection initialization |
-| Docker networking | Assuming Qdrant is always available at startup (container startup order) | Implement health check loop on startup: retry Qdrant connection for 30s before failing. Use `depends_on` with `condition: service_healthy` in docker-compose |
+| obsidian-headless `ob sync` | Relying on `ob login` credentials in `$HOME` for multi-user | Inject per-user `OBSIDIAN_AUTH_TOKEN` as environment variable in each spawned process |
+| obsidian-headless `ob sync` | Not removing stale `.sync.lock` before restart | Check and remove `<vault>/.obsidian/.sync.lock` before every process start |
+| OpenAI Node.js SDK | Using a singleton client with global API key | Construct `new OpenAI({ apiKey })` per-request; never set module-level defaults |
+| Qdrant | Calling `search()` or `scroll()` without `user_id` filter | Wrap all Qdrant operations in a `UserScopedQdrant` class that requires `userId` parameter |
+| Qdrant | Not setting `is_tenant: true` on the `user_id` payload index | Recreate the index with `is_tenant: true` — omitting it degrades multi-tenant search performance |
+| SQLite (Drizzle) | Adding multi-tenant data to single-tenant schema without migration | Write and run a Drizzle migration adding `user_id` column with composite primary key before any multi-user operations |
+| Docker / Node.js PID 1 | Running `node` as PID 1 without tini | Add `tini` to Dockerfile `ENTRYPOINT` to handle zombie reaping and signal forwarding |
+| Docker Compose | Not pinning platform in FROM directive | Use `--platform=linux/amd64` if obsidian-headless Linux ARM64 binaries are unavailable |
+| Registry file watching | Using `fs.watch()` directly | Use `chokidar` or polling with debounce; never trust `fs.watch()` alone on Linux |
+
+---
 
 ## Performance Traps
 
 | Trap | Symptoms | Prevention | When It Breaks |
 |------|----------|------------|----------------|
-| Embedding all chunks sequentially via API | Full reindex takes hours, API costs spike from retries | Batch embeddings (send multiple texts per API call), parallelize with 3-5 concurrent requests | > 1000 notes (single-threaded reindex exceeds 30 min) |
-| Loading all file content into memory during poll | Memory spike during full scan of vault | Stream files, process and release one at a time | > 2000 notes with large PDFs |
-| Qdrant scroll without limit for cleanup queries | Timeout or OOM on large collections | Always set `limit` on scroll operations, paginate if needed | > 50K vectors (achievable with 5K notes at 10 chunks/note) |
-| Cross-encoder reranking on every search | 200-500ms added latency per query | Only rerank when top results have close scores (score spread < threshold), or make reranking optional per request | Noticeable at > 50ms latency budget, but worth the tradeoff for quality |
-| Full vault hash scan on every poll cycle | CPU-bound polling loop, I/O contention with Obsidian | Incremental: check mtime first (cheap), only hash files with changed mtime | > 3000 files on macOS (stat() is slower than Linux) |
+| Starting all N user sync processes simultaneously on container start | Obsidian Sync rate limiting, thundering herd on first startup | Stagger process starts with 2-5 second delays between each user | > 5 users starting simultaneously |
+| Per-request `new OpenAI()` client construction without connection reuse | Increased TLS handshake overhead per embedding call | Node.js HTTP keep-alive is maintained per-instance — at 5-20 users this is acceptable, but monitor latency | > 50 concurrent embedding calls/second |
+| SQLite write contention from N concurrent indexing loops | "Database is locked" errors, slow reindex | WAL mode already in v1.0 — verify WAL is enabled; index in serial per-user, not all-users-parallel | > 10 concurrent users all reindexing simultaneously |
+| Registry file reloads triggering expensive validation on every fs.watch event | Validation latency spike on each user management operation | Cache the last-known-good registry; validate only on file change events, not on reads | Immediate — validation should always be cheap (Zod schema is fast) |
+| Polling vault directories for N users with existing single-tenant poll interval | N × file stat operations per poll cycle | Verify CPU usage with N users; consider increasing poll interval or staggering user polls | > 10 users × 5000 files = 50,000 stat() calls per poll cycle |
+
+---
 
 ## Security Mistakes
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| Path traversal in file operations API | Agent reads/writes files outside vault root (`../../etc/passwd`) | Resolve absolute path after join, verify it starts with vault root. Reject paths with `..` components. Already noted in PROJECT.md -- implement in the filesystem layer, not the API layer |
-| API key in query parameters instead of headers | Keys logged in access logs, browser history, proxy logs | Accept API keys only via `Authorization` header, never in URL |
-| Embedding API key exposed in health/debug endpoints | OpenAI API key leaked to anyone with service access | Never include secrets in any API response. Use environment variables, never config files in the image |
-| No rate limiting on write endpoints | Compromised agent floods vault with files, triggers massive reindex | Per-key rate limits on write operations (e.g., 60 writes/minute) |
+| Storing Obsidian credentials (email/password) in registry file | Credential exposure if registry file is read by other container processes or leaked | Store only the `auth_token` value (opaque token), never the raw credentials; encrypt at rest if possible |
+| User A's API key working for User B's vault endpoints | Full cross-tenant data access | Enforce `user_id` extraction from API key as the first middleware step; all downstream operations use only this resolved `user_id`, never a user-supplied one |
+| Admin CLI accessible without authentication | Any container process can add/remove users | CLI commands operate only on the local filesystem (not network-accessible); Docker volume permissions restrict registry file access to the container operator |
+| Per-user OpenAI keys logged in debug output | API key exposure in log files | Redact all API key values from logs; log only the key prefix (first 8 chars) for debugging identity, never the full value |
+| `remove-user` not cleaning Qdrant vectors | Removed user's vault content remains searchable by future users assigned same `user_id` | `remove-user` must delete all Qdrant vectors for that `user_id` before completion; verify with a scroll query that returns zero results |
+
+---
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **Markdown chunking:** Often missing code fence preservation -- verify chunks never split mid-code-block
-- [ ] **Frontmatter parsing:** Often missing multiline YAML values and nested objects -- verify with real vault frontmatter, not synthetic examples
-- [ ] **File rename handling:** Often missing rename detection (treated as delete + create, causing unnecessary re-embedding) -- verify by renaming a file and checking vector count does not double
-- [ ] **Stale vector cleanup:** Often missing orphan detection after partial indexing failures -- verify by killing the service mid-reindex and checking for orphan vectors
-- [ ] **Hybrid search:** Often missing lexical search for short queries -- verify that searching for "SLA" returns notes containing exactly "SLA" even if embedding similarity is low
-- [ ] **Context pack:** Often missing deduplication of overlapping chunks from the same note -- verify that adjacent sections from one note are merged or deduplicated
-- [ ] **Multi-vault isolation:** Often missing cross-vault leakage in search -- verify that searching vault A never returns results from vault B
-- [ ] **Unicode normalization:** Often missing Cyrillic/Latin look-alike normalization -- verify that searching for "с" (Cyrillic) matches content with "c" (Latin) in technical terms
-- [ ] **Reindex resumability:** Often missing progress tracking -- verify that a killed full reindex can resume from where it stopped, not restart from scratch
+- [ ] **Multi-tenant auth:** Often missing cross-tenant rejection test — verify User A's API key returns 401 on all of User B's routes, not just the primary search route
+- [ ] **Qdrant scoping:** Often missing `user_id` filter on the reindex and cleanup code paths — verify that a full reindex triggered by User A does not touch User B's vectors
+- [ ] **ob process management:** Often missing lock cleanup on startup — verify that the process manager successfully starts `ob sync` after a simulated unclean kill (leave a `.sync.lock` behind, then start)
+- [ ] **Registry hot-reload:** Often missing error handling on parse failure — verify that corrupting the registry JSON file does not clear the in-memory registry (server should log error and keep old registry)
+- [ ] **Per-user OpenAI keys:** Often missing concurrent request test — verify that two simultaneous embedding calls for User A and User B use the correct respective keys (inject intentionally wrong keys and assert 401)
+- [ ] **SQLite migration:** Often missing existing data migration — verify the migration assigns existing single-tenant data to the first user's `user_id`, not loses it
+- [ ] **remove-user cleanup:** Often missing Qdrant cleanup verification — after `remove-user`, scroll Qdrant with that `user_id` filter and assert zero results
+- [ ] **Tini / PID 1:** Often missing from Dockerfile — verify `ps aux` inside container shows tini as PID 1, not node
+- [ ] **ob auth token isolation:** Often tested single-user only — verify adding User C does not break User A's or User B's ongoing sync
+
+---
 
 ## Recovery Strategies
 
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| Stale vectors accumulated | LOW | Run full reindex (10-30 min for 5K notes). Deterministic IDs make this safe and idempotent |
-| SQLite-Qdrant divergence | LOW | Run reconciliation endpoint. For severe cases, delete SQLite index and run full reindex |
-| Wrong embedding model in production | MEDIUM | Create new Qdrant collection, full re-embed with correct model, swap alias. ~30 min + API cost |
-| Corrupt chunks from mid-write reads | LOW | Re-poll detects content hash change on next cycle, triggers re-chunk and re-embed automatically |
-| Context packs too noisy | LOW | Adjust relevance floor and max-chunks parameters. No reindex needed -- this is query-time configuration |
-| Multilingual retrieval bias | MEDIUM | Requires evaluation harness to diagnose, then tuning RRF weights or switching to better multilingual model. May need full reindex |
-| Chunking strategy regression | HIGH | Changing chunking logic requires full reindex of all vaults. Design chunking versioning from the start to avoid surprise full reindexes |
+| Stale .sync.lock blocking a user's sync | LOW | `rmdir <vault>/.obsidian/.sync.lock`; process manager restart for that user |
+| Cross-tenant auth token collision ($HOME) | MEDIUM | Re-run `add-user` with correct token for affected users; verify each user's sync process is using the correct `OBSIDIAN_AUTH_TOKEN` env var |
+| OpenAI key leakage between users | MEDIUM | Rotate all affected users' OpenAI API keys immediately; audit OpenAI usage dashboard for anomalous charges; restart server with corrected per-request client pattern |
+| Corrupted registry JSON | LOW | Restore last-known-good registry from backup (implement registry versioned backup in CLI); restart triggers clean reload |
+| SQLite schema without user_id (data loss risk) | HIGH | Stop server; write and run migration with Drizzle; verify no data loss; restart. Do not attempt in-place column addition without transaction |
+| Zombie process accumulation | LOW | Add tini to Dockerfile and redeploy; existing zombies cleared on container restart |
+| Cross-tenant Qdrant data leak | HIGH | Audit all query paths; add `UserScopedQdrant` wrapper; force full test suite pass before redeploying; notify affected users |
+| User removal with incomplete cleanup | MEDIUM | Re-run cleanup: delete all Qdrant vectors for that `user_id`; remove SQLite rows; verify empty state |
+
+---
 
 ## Pitfall-to-Phase Mapping
 
 | Pitfall | Prevention Phase | Verification |
 |---------|------------------|--------------|
-| Naive markdown chunking | Phase 1: Indexing foundation | Inspect 20 random chunks from real vault, verify none are split mid-block |
-| Stale vectors | Phase 1-2: Indexing + filesystem watching | Delete/rename 5 notes, verify vector count decreases correctly after next poll |
-| Multilingual embedding bias | Phase 2-3: Retrieval + evaluation | Evaluation harness shows < 15% recall gap between Russian and English query sets |
-| Filesystem polling race conditions | Phase 1: Filesystem layer | Edit a note during sync simulation, verify no corrupt chunks are indexed |
-| Embedding version migration | Phase 1: Data model design | Version field exists in SQLite, mismatch detection works before first reindex |
-| Context pack relevance | Phase 3: Context assembly | Context packs with low-relevance queries return fewer chunks (not padding to budget) |
-| SQLite-Qdrant divergence | Phase 2: Reconciliation | Run reconciliation after 100-file reindex, zero discrepancies |
-| Multi-format afterthought | Phase 1: Interface design | ChunkingStrategy interface exists with markdown implementation; adding PDF does not modify core |
-| Hybrid fusion weighting | Phase 2-3: Retrieval + tuning | Evaluation harness with exact-term queries shows acceptable precision |
+| Stale .sync.lock | Process manager implementation phase | Simulate unclean kill; verify manager starts cleanly after lock removal |
+| Auth token collision ($HOME) | Registry design + CLI add-user phase | Add User C; verify User A and B sync continues without errors |
+| OpenAI global SDK state | Per-user embeddings phase | Concurrent embedding test with intentionally mismatched keys |
+| Missing user_id Qdrant filter | Multi-tenant auth layer phase | Cross-tenant search returns zero results |
+| Node.js PID 1 zombie | Docker / Dockerfile phase | Verify tini is PID 1; run for 30 min under restart load; `ps aux | grep Z` shows zero zombies |
+| Registry file race condition | Registry design phase | Concurrent CLI write + server read; verify no parse errors and no stale registry |
+| fs.watch unreliability | Registry watching implementation | Deploy to Linux Docker; add-user; verify server picks up change within 5 seconds |
+| SQLite single-tenant schema | Database migration phase | Migration runs clean on v1.0 SQLite file; all existing data assigned to first user |
+| Crash-restart loop (no backoff) | Process manager implementation phase | Kill user's ob process 10 times in 60s; verify restart interval grows and sync is eventually marked degraded |
+| Linux ARM64 native binary missing | Dockerfile / container build phase | Build Docker image on linux/amd64 target; verify `ob sync --version` runs inside container |
+| CLI TOCTOU on remove-user | CLI implementation phase | Issue remove-user while server is handling that user's request; verify no partial Qdrant cleanup |
+
+---
 
 ## Sources
 
-- [Top 10 RAG Mistakes Developers Make](https://ergobite.com/us/top-rag-mistakes-developers-make-and-how-to-fix-them/)
-- [Document Chunking for RAG: 9 Strategies Tested](https://langcopilot.com/posts/2025-10-11-document-chunking-for-rag-practical-guide)
-- [Best Chunking Strategies for RAG in 2026](https://www.firecrawl.dev/blog/best-chunking-strategies-rag)
-- [Building and Evaluating Multilingual RAG Systems (Microsoft)](https://medium.com/data-science-at-microsoft/building-and-evaluating-multilingual-rag-systems-943c290ab711)
-- [Beyond English: Implementing a Multilingual RAG Solution](https://towardsdatascience.com/beyond-english-implementing-a-multilingual-rag-solution-12ccba0428b6/)
-- [Structured RAG for Unknown and Mixed Languages](https://www.jocheojeda.com/2026/01/05/structured-rag-for-unknown-and-mixed-languages/)
-- [The Cross-Lingual Cost: Retrieval Biases in RAG](https://arxiv.org/html/2507.07543)
-- [Different Embedding Models, Different Spaces: The Hidden Cost of Model Upgrades](https://medium.com/data-science-collective/different-embedding-models-different-spaces-the-hidden-cost-of-model-upgrades-899db24ad233)
-- [Qdrant Collection Aliases for Zero-Downtime Migration](https://qdrant.tech/documentation/concepts/collections/)
-- [SQLite Concurrent Writes and "Database is Locked" Errors](https://tenthousandmeters.com/blog/sqlite-concurrent-writes-and-database-is-locked-errors/)
-- [How to Corrupt an SQLite Database File](https://sqlite.org/howtocorrupt.html)
-- [RAG vs Large Context Window Trade-offs](https://redis.io/blog/rag-vs-large-context-window-ai-apps/)
-- [Enterprise RAG: Common Pitfalls and Solutions](https://wearefram.com/blog/enterprise-rag/)
-- [Migrating Vector Embeddings to Qdrant: Challenges and Learnings](https://0xhagen.medium.com/migrating-vector-embeddings-from-postgresql-to-qdrant-challenges-learnings-and-insights-f101f42f78f5)
-- [Syncthing: Polling vs. File System Watch](https://forum.syncthing.net/t/polling-vs-file-system-watch/953)
+- [obsidian-headless GitHub — Stale .sync.lock Issue #4](https://github.com/obsidianmd/obsidian-headless/issues/4)
+- [obsidian-headless GitHub README](https://github.com/obsidianmd/obsidian-headless)
+- [Obsidian Help — Headless Sync](https://help.obsidian.md/headless)
+- [OBSIDIAN_AUTH_TOKEN token storage discussion — Obsidian Forum](https://forum.obsidian.md/t/headless-sync-how-to-get-obsidian-auth-token-variable/111740)
+- [Obsidian Sync Headless Client announcement — Hacker News](https://news.ycombinator.com/item?id=47197267)
+- [Qdrant Multitenancy Guide](https://qdrant.tech/documentation/guides/multitenancy/)
+- [OpenAI per-user key safety in multi-tenant Node.js — openai-agents-js Issue #642](https://github.com/openai/openai-agents-js/issues/642)
+- [Node.js Child Process — Process signals in Docker](https://maximorlov.com/process-signals-inside-docker-containers/)
+- [Node.js as PID 1 and zombie process pitfalls — nodebestpractices](https://github.com/goldbergyoni/nodebestpractices/blob/master/sections/docker/graceful-shutdown.md)
+- [write-file-atomic npm package](https://www.npmjs.com/package/write-file-atomic)
+- [fs.watch reliability issues — Node.js issue #47058](https://github.com/nodejs/node/issues/47058)
+- [Drizzle ORM SQLite WAL concurrent writes discussion](https://github.com/drizzle-team/drizzle-orm/discussions/1994)
+- [Multi-tenant Node.js patterns](https://medium.com/@shital.pimpale5/creating-scalable-multi-tenant-applications-with-node-js-0a49babc97d5)
 
 ---
-*Pitfalls research for: CogniVault -- Obsidian knowledge service with vector indexing and hybrid retrieval*
-*Researched: 2026-03-10*
+*Pitfalls research for: CogniVault v2.0 — Multi-tenant migration with obsidian-headless sync*
+*Researched: 2026-03-14*

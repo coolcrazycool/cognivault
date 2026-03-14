@@ -1,248 +1,270 @@
 # Feature Research
 
-**Domain:** Knowledge access layer / vault API / RAG-as-a-service for AI agents
-**Researched:** 2026-03-10
-**Confidence:** HIGH (multiple products analyzed, well-established domain patterns)
+**Domain:** Multi-tenant vault sync + user lifecycle management (v2.0 milestone)
+**Researched:** 2026-03-14
+**Confidence:** HIGH for multi-tenant routing patterns, MEDIUM for obsidian-headless auth flow (beta tool, limited documentation), HIGH for CLI management patterns
 
-## Competitive Landscape Summary
+> **Scope:** This file covers ONLY the new features being added in v2.0. It does not re-document the v1.0 features (vault CRUD, hybrid search, context packs, etc.) which are fully shipped and stable. All v2.0 features build on top of the existing codebase.
 
-Products analyzed:
-- **Obsidian Local REST API** -- CRUD + search over Obsidian vault, no vector/semantic layer
-- **Khoj** -- personal AI with semantic search, chat, agents; PostgreSQL + pgvector
-- **Onyx (Danswer)** -- enterprise search + RAG; 40+ connectors, hybrid search, document permissions
-- **PrivateGPT** -- private document chat; ingestion + chunks + completions API; LlamaIndex-based
-- **AnythingLLM** -- workspace-based RAG; document upload, embedding, chat; developer API
-- **RAGFlow** -- open-source RAG engine; deep document parsing, hybrid search
+---
 
-CogniVault occupies a unique niche: none of these products combine Obsidian-native file operations with vector indexing and structured context assembly in a single agent-facing API. Obsidian Local REST API has no semantic search. RAG tools have no Obsidian file awareness. This gap is the opportunity.
+## Existing Foundation (v1.0 — Do Not Rebuild)
 
-## Feature Landscape
+The following are already production-complete and must be preserved intact:
 
-### Table Stakes (Users Expect These)
+- Single-user REST API with API key auth
+- Hybrid search (semantic + lexical + RRF fusion)
+- Context pack assembly
+- Multi-format indexing (MD, PDF, Canvas, Excalidraw, CSV, images)
+- Docker deployment with Qdrant sidecar
+- Prometheus + Grafana dashboards
+- SQLite index state, Qdrant vector store
 
-Features that any knowledge-access API for AI agents must have. Missing these means agents cannot function.
+---
+
+## Feature Landscape (v2.0 — New Features Only)
+
+### Table Stakes (Required for Multi-Tenant to Work)
+
+Features that must exist for v2.0 to be viable. Without these, multi-tenancy breaks.
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| **Note CRUD (list, read, create, update, delete)** | Every vault API provides this. Agents need to read and write notes. | MEDIUM | Must handle Markdown, preserve frontmatter. Obsidian Local REST API sets baseline. |
-| **Frontmatter read/write** | Metadata is how agents tag, categorize, and filter notes. All Obsidian tools expose this. | LOW | YAML parsing with freeform schema support. Must not corrupt existing frontmatter. |
-| **Semantic/vector search** | Khoj, PrivateGPT, AnythingLLM, Onyx all provide this. Keyword search alone is insufficient for agents. | HIGH | Requires embedding pipeline, vector store, chunking strategy. |
-| **Keyword/lexical search** | Exact term matching for technical identifiers, acronyms, code references. All search products support this. | MEDIUM | BM25 or full-text index. Critical for mixed-language queries with short technical terms. |
-| **Document ingestion with chunking** | PrivateGPT, AnythingLLM, Onyx all auto-chunk documents on ingest. Agents expect indexed content. | HIGH | Markdown-aware chunking preserving section hierarchy is harder than generic chunking. |
-| **Multi-format support (MD, PDF, CSV)** | PrivateGPT supports "most common formats." AnythingLLM handles PDF, DOCX, CSV. | MEDIUM | Start with MD as primary; PDF text extraction, CSV, Canvas JSON are secondary. |
-| **API key authentication** | Every product uses API keys or bearer tokens. Minimum security expectation. | LOW | Role separation (read-only vs write) adds value without complexity. |
-| **Health/readiness endpoints** | Standard for any deployable service. Docker/k8s health checks depend on this. | LOW | /health and /ready -- trivial but required. |
-| **OpenAPI/Swagger documentation** | Obsidian REST API provides /openapi.yaml. PrivateGPT uses FastAPI auto-docs. Agents and developers expect machine-readable API specs. | LOW | Auto-generated from route definitions. |
-| **Metadata filtering on search** | Onyx filters by document source/permissions. PrivateGPT filters by document ID. Agents need to scope queries. | MEDIUM | Filter by tags, project, status, folder path, content type. |
-| **Incremental indexing** | No product requires full reindex on every change. File-level change detection is expected. | HIGH | Content hashing + timestamp tracking in SQLite. Must handle Obsidian Sync's non-standard FS events. |
-| **Stale content cleanup** | Agents must not get results from deleted/renamed notes. All production RAG systems handle this. | MEDIUM | Detect obsolete vectors, propagate deletes, handle renames as delete+create. |
+| **API key → user_id registry lookup** | Every multi-tenant system maps credentials to tenants. Without this, there's no routing. | LOW | In-memory map loaded from users.json. O(1) lookup per request. Auth plugin reads map; no DB hit on hot path. |
+| **Per-request tenant routing (vault path + Qdrant namespace)** | Each request must land in the correct user's data. Without namespace isolation, users see each other's data. | MEDIUM | Qdrant uses payload filter `user_id` field (is_tenant=true for perf). Vault path derived from registry. Fastify request decorator carries `tenantCtx`. |
+| **users.json registry file** | Operator-editable user config is the simplest registry that avoids a new DB dependency. | LOW | JSON file: `{ users: [{ user_id, api_key, vault_name, openai_key, obs_email, obs_password }] }`. Loaded at startup, hot-reloaded on fs.watch change. |
+| **Registry hot-reload via fs.watch** | Operators must be able to add/remove users without restarting the server. Restart causes downtime; downtime is unacceptable in production. | LOW | fs.watch (or chokidar) on users.json path. On change event: re-read, validate, swap in-memory map atomically. Log diff (added/removed users). |
+| **Per-user OpenAI API key for embeddings** | Embedding costs must be attributed to the user whose vault is being indexed. Shared key conflates costs and exhausts a single quota. | LOW | OpenAI client instantiated per-user at index time using the user's `openai_key` from registry. Not hard — it's constructor injection on the embedding call. |
+| **Qdrant per-user namespace via payload field** | Vector isolation prevents cross-tenant data leakage in search results. | MEDIUM | All Qdrant upserts include `user_id` in payload. All queries include `must: [{ key: 'user_id', match: { value } }]`. Collection stays shared (single `cognivault` collection). Create payload index on `user_id` with `is_tenant: true` for Qdrant v1.11+ optimization. |
+| **SQLite per-user index state partitioning** | Index state (hash tracking, change detection) must be scoped to each user or they overwrite each other's tracking. | LOW | Add `user_id` column to existing `index_state` table. All queries filter by user_id. No schema redesign — additive migration. |
 
-### Differentiators (Competitive Advantage)
+### Differentiators (Competitive Advantage in Multi-Tenant Context)
 
-Features that no single competitor provides, or that CogniVault does uniquely well for the AI agent use case.
+Features that go beyond functional correctness and make v2.0 operationally excellent.
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| **Unified file ops + vector search in one API** | No existing product combines Obsidian CRUD with semantic retrieval. Agents currently need 2+ services. Eliminates integration overhead. | HIGH | This is the core value proposition. Single endpoint for "find relevant notes, read them, update them." |
-| **Context pack assembly endpoint** | No competitor offers structured, token-budgeted knowledge bundles. Agents currently do manual chunk assembly. Reduces agent complexity and token waste. | HIGH | Assemble ~32K token context from search results with section hierarchy, metadata, source attribution. Configurable budget per request. |
-| **TOON content negotiation** | ~40% token reduction vs JSON. No other API supports TOON. Direct cost savings for agent operations. | MEDIUM | Accept: text/toon returns TOON format. Unique to CogniVault. Requires TOON serializer. |
-| **Hybrid retrieval with RRF fusion + cross-encoder reranking** | Most RAG tools offer basic semantic search. Onyx does hybrid search. Few expose reranking as a configurable pipeline. Critical for mixed-language precision. | HIGH | Reciprocal Rank Fusion merges semantic + lexical results. Cross-encoder (Cohere/BGE) reranks top-K. Measurable precision improvement for Russian/English queries. |
-| **Markdown-aware chunking with section hierarchy** | Generic chunkers (LlamaIndex, LangChain) split on token count. Obsidian notes have meaningful structure (headings, sections). Preserving this hierarchy improves retrieval precision. | MEDIUM | Chunk boundaries at section breaks. Each chunk carries section_path metadata (e.g., "Note Title > H2 > H3"). |
-| **Multi-vault isolation** | Khoj supports one knowledge base. PrivateGPT has flat document space. Onyx uses connectors but no vault-level isolation. Multi-vault from v1 enables clean workspace separation. | MEDIUM | vault_name as namespace in Qdrant collections + SQLite. Complete data isolation between vaults. |
-| **Embedding model versioning and migration** | No competitor exposes embedding model version tracking. When upgrading models, you need to know which chunks use which embeddings. Prevents silent degradation. | MEDIUM | Track model version per chunk in SQLite. Reindex endpoint can target specific model versions. Migration path when switching providers. |
-| **Async write-then-index pipeline** | Most RAG tools block on ingestion. Async write decouples file write latency from embedding latency. Agents get fast write acknowledgment. | MEDIUM | Write to disk immediately, return success. Filesystem watcher triggers background reindexing. Eventually consistent (seconds, not minutes). |
-| **Structured Qdrant payload schema** | Most RAG tools treat vector metadata as opaque. Explicit payload schema (path, title, chunk_id, section_path, tags, project, status) enables rich filtering and debugging. | LOW | Well-defined schema documented in API. Enables agents to construct precise filtered queries. |
+| **obsidian-headless sync process per user** | Each user gets a continuously-running `ob sync --continuous` process that keeps their vault up-to-date from Obsidian Sync cloud. Operators do not manage sync manually. | HIGH | Most complex new feature. Requires spawn, monitor, restart-on-crash, and auth setup per user. See Process Management section below. |
+| **`add-user` CLI command** | Single command provisions a complete user: writes registry entry, runs `ob login`, runs `ob sync-setup`, starts sync process. Operator doesn't need to know internals. | HIGH | Interactive: prompts for Obsidian creds if not provided as flags. Sequence: validate inputs → append to users.json → run `ob login --email --password` → run `ob sync-setup --vault <name> --path <vault_path>` → hot-reload triggers sync process start. |
+| **`remove-user` CLI command** | Single command tears down a user: stops sync process, removes registry entry, optionally purges vault data. Clean removal matters for billing and security. | MEDIUM | Sequence: send SIGTERM to sync process → wait for clean exit → remove from users.json → hot-reload triggers deregistration. Optionally: delete Qdrant vectors for user_id, delete SQLite rows, delete vault directory. |
+| **`list-users` CLI command** | Operator visibility into who is active, which vaults are syncing, and process health at a glance. | LOW | Output: table of user_id, vault_name, sync process PID, last sync timestamp, process uptime. JSON flag for machine-readable output. |
+| **Process health monitoring with auto-restart** | `ob sync --continuous` is a beta tool. It will crash. When it does, data goes stale. Auto-restart keeps sync running without operator intervention. | MEDIUM | Exponential backoff restart (not tight loop). Track consecutive crashes; alert (log ERROR) if crash rate exceeds threshold. Expose process status via `/admin/sync-status` endpoint. |
+| **Multi-tenant Prometheus metrics (user_id label)** | Operators need per-user observability. Which user is hammering search? Which vault is slow to index? Per-user labels enable Grafana filtering. | MEDIUM | Add `user_id` label to existing prom-client metrics: request duration, search latency, index events, embedding calls. Grafana dashboard gains user dropdown filter variable. |
+| **`/admin/sync-status` endpoint** | Operator-facing REST endpoint showing all sync process states. Complements CLI for programmatic monitoring (alerting, dashboards). | LOW | Returns: `[{ user_id, vault_name, pid, status: running|crashed|starting, uptime_s, restart_count, last_sync_at }]`. Admin-only (API key with admin scope or separate admin token). |
 
-### Anti-Features (Commonly Requested, Often Problematic)
-
-Features to explicitly NOT build. Each has been considered and rejected for specific reasons.
+### Anti-Features (Commonly Requested, Explicitly Rejected)
 
 | Feature | Why Requested | Why Problematic | Alternative |
 |---------|---------------|-----------------|-------------|
-| **Chat/completions endpoint (LLM integration)** | Khoj, PrivateGPT, AnythingLLM all bundle LLM chat. "Why not just add chat?" | Couples retrieval to specific LLM providers. Agents already have their own LLM. Duplicates agent's existing capability. Adds massive complexity (streaming, model management, prompt engineering). | Provide excellent retrieval + context packs. Let agents use their own LLM with the retrieved context. |
-| **Wikilink/backlink graph traversal** | Obsidian's graph view is iconic. "Agents should follow links." | Graph traversal is a different retrieval paradigm. Agents use semantic search, not link-following. Implementing graph queries adds significant complexity for minimal agent benefit. | Semantic search with metadata filtering achieves same "find related notes" goal more reliably. |
-| **Real-time WebSocket push** | "Agents should get notified when notes change." | Agents are request/response oriented. WebSocket connections are stateful, complex to manage, and most agent frameworks don't support them. Adds connection management overhead. | Agents poll search endpoints or use request/response pattern. Index staleness is seconds, not problematic. |
-| **UI/dashboard/admin panel** | Onyx and AnythingLLM have dashboards. "Need a UI for monitoring." | UI development is a separate product. Admin operations should be API-first. Prometheus + Grafana provide better monitoring than any custom dashboard. | REST admin endpoints + Prometheus metrics + structured JSON logs. Use Grafana for visualization. |
-| **Multi-user authentication (OAuth, SSO)** | Enterprise RAG tools (Onyx) support SSO/RBAC. "Need user management." | CogniVault serves local agents, not end users. Multi-user auth adds massive complexity. API keys with role separation is sufficient for 1-3 agents. | API key auth with read-only vs write/admin roles. If multi-user ever needed, add it as a later layer. |
-| **Aggressive query caching** | "Cache search results for performance." | Qdrant latency is already < 100ms. Cache invalidation with continuous indexing creates stale results. Complexity outweighs benefit at 500-5000 note scale. | Direct Qdrant queries. Optimize embedding/reranking latency instead. |
-| **Obsidian plugin / direct integration** | "Ship an Obsidian plugin for seamless access." | CogniVault is a server-side service. Obsidian plugins run in Electron, have limited capabilities, and create a dependency on Obsidian's plugin API. The vault is accessed via filesystem. | Standalone Docker service. Access vault via mounted filesystem. Compatible with any sync method. |
-| **Web search / internet access** | Khoj and Onyx integrate web search. "Combine vault + web knowledge." | Scope creep. Web search is a fundamentally different retrieval domain. Mixing web results with vault results degrades precision. Agents can use separate web search tools. | Stay focused on vault knowledge. Agents compose CogniVault results with their own web search capabilities. |
-| **Document permissions / ACL** | Onyx mirrors source system permissions. "Control who sees what." | Single-user vault. No users to restrict. Permission systems add query-time overhead and index complexity. | Multi-vault isolation provides workspace separation. Within a vault, all content is accessible. |
+| **Per-user Docker containers** | Seems like natural isolation unit | Resource explosion: each container needs 2G RAM, 1 CPU. N=10 users = 20G RAM, 10 CPUs. Also rejected in PROJECT.md architectural pivot. Single-container multi-tenant is the explicit decision. | Single Fastify process, per-request tenant routing, Qdrant payload isolation |
+| **Separate Qdrant collection per user** | Feels like the most isolated option | Qdrant Cloud limits 1,000 collections per cluster. Creates schema drift risk. Management overhead scales with user count. Official Qdrant docs say "Don't do this at scale." | Single shared collection with `user_id` payload index + `is_tenant: true` optimization |
+| **Caddy reverse proxy for multi-tenant routing** | Common in multi-tenant web apps | Overkill for single-host operator deployment. Adds Caddy config maintenance. Single-container multi-tenant doesn't need external routing — tenant is determined by API key, not subdomain. OUT OF SCOPE per PROJECT.md. | API key → user_id in-process routing |
+| **Per-user separate databases (SQLite files)** | Each user gets their own SQLite | File proliferation, no atomic cross-user queries, migration coordination nightmare. | Single SQLite with `user_id` column and indexed queries |
+| **Obsidian GUI / VNC access** | Per-user container stack (Phase 16, now abandoned) required VNC. | Out of scope after architectural pivot. VNC+GUI was the old approach. obsidian-headless replaces it cleanly. | obsidian-headless `ob sync --continuous` |
+| **OAuth / SSO user authentication** | "Real" multi-tenant systems use OAuth | Massive complexity for an operator-managed self-hosted tool. The operator IS the admin. API keys are sufficient. | API key per user, generated by `add-user` CLI, stored in users.json |
+| **Automatic user discovery from Obsidian** | "Can't you just read vault list from Obsidian API?" | Obsidian Sync API is not a public API. `ob sync-list-remote` lists vaults but requires interactive auth. Operator must explicitly configure each user. | `add-user` CLI with explicit vault name |
+| **Cross-user vault search** | "Can user A search user B's vault?" | Security violation. Multi-tenancy means strict isolation. Never expose cross-tenant data, even to admin users. | Admin can query any single user's vault by authenticating as that user |
 
-## Feature Dependencies
+---
+
+## Feature Dependencies (v2.0 Specific)
 
 ```
-[Semantic Search]
-    |--requires--> [Document Ingestion + Chunking]
-    |                   |--requires--> [Note CRUD / File Access]
-    |                   |--requires--> [Embedding Pipeline]
-    |--requires--> [Qdrant Vector Store]
+[Multi-tenant Routing]
+    |--requires--> [users.json Registry]
+    |                   |--requires--> [Registry Hot-reload]
+    |--requires--> [API key → user_id Lookup]
+    |--requires--> [Qdrant user_id Payload Index]
+    |--requires--> [SQLite user_id Column Migration]
 
-[Keyword/Lexical Search]
-    |--requires--> [Document Ingestion + Chunking]
-    |--requires--> [Full-text Index (SQLite FTS or similar)]
+[obsidian-headless Sync Process]
+    |--requires--> [users.json Registry] (reads obs_email, obs_password, vault_name)
+    |--requires--> [ob login --email --password] (non-interactive auth)
+    |--requires--> [ob sync-setup --vault --path] (one-time per user)
+    |--requires--> [Process Manager] (spawn, monitor, restart)
+    |--enhances--> [Incremental Indexing] (vault on disk updated by sync, filesystem poller picks up changes)
 
-[Hybrid Retrieval with RRF]
-    |--requires--> [Semantic Search]
-    |--requires--> [Keyword/Lexical Search]
+[CLI: add-user]
+    |--requires--> [users.json Registry] (writes to it)
+    |--requires--> [obsidian-headless CLI] (runs ob login + ob sync-setup)
+    |--triggers--> [Registry Hot-reload] (server picks up new user automatically)
+    |--triggers--> [obsidian-headless Sync Process] (new user starts syncing)
 
-[Cross-encoder Reranking]
-    |--enhances--> [Hybrid Retrieval with RRF]
-    |--requires--> [Reranker Model (Cohere API or local BGE)]
+[CLI: remove-user]
+    |--requires--> [users.json Registry] (removes entry)
+    |--requires--> [Process Manager] (stops sync process)
+    |--triggers--> [Registry Hot-reload] (server stops routing to removed user)
 
-[Context Pack Assembly]
-    |--requires--> [Hybrid Retrieval with RRF]
-    |--requires--> [Note CRUD / File Access] (to fetch full note content)
-    |--enhances--> [TOON Content Negotiation]
+[CLI: list-users]
+    |--requires--> [users.json Registry] (reads entries)
+    |--requires--> [Process Manager] (reads process status)
+    |--independent-- (read-only, no side effects)
 
-[Metadata Filtering]
-    |--requires--> [Frontmatter Read/Write]
-    |--requires--> [Structured Qdrant Payload Schema]
-    |--enhances--> [Semantic Search]
-    |--enhances--> [Keyword/Lexical Search]
+[Process Health Monitoring]
+    |--requires--> [Process Manager]
+    |--enhances--> [/admin/sync-status endpoint]
+    |--enhances--> [Multi-tenant Prometheus Metrics]
 
-[Incremental Indexing]
-    |--requires--> [Document Ingestion + Chunking]
-    |--requires--> [SQLite Index State Tracking]
-    |--enhances--> [Stale Content Cleanup]
+[Per-user Prometheus Metrics]
+    |--requires--> [Multi-tenant Routing] (user_id available per request)
+    |--enhances--> [Grafana Dashboards] (existing dashboards gain user_id filter)
 
-[Multi-vault Isolation]
-    |--requires--> [Qdrant Collection Namespacing]
-    |--requires--> [SQLite Per-vault State]
-    |--enhances--> [Note CRUD] (vault_name prefix on all operations)
-
-[TOON Content Negotiation]
-    |--independent-- (serialization layer, can be added at any phase)
-
-[Embedding Model Versioning]
-    |--requires--> [SQLite Index State Tracking]
-    |--enhances--> [Incremental Indexing] (selective reindex by model version)
+[Per-user OpenAI Keys]
+    |--requires--> [users.json Registry] (reads openai_key per user)
+    |--requires--> [Multi-tenant Routing] (user context available at embedding time)
 ```
 
 ### Dependency Notes
 
-- **Hybrid Retrieval requires both search types:** Semantic and lexical search must both work before RRF fusion can combine them. This is the critical path.
-- **Context Pack Assembly requires working retrieval:** Cannot assemble context packs without functioning hybrid search. This should be a later phase feature.
-- **Metadata Filtering requires frontmatter parsing:** Structured Qdrant payloads depend on frontmatter extraction during ingestion.
-- **TOON is independent:** Serialization format can be layered on at any point without architectural changes. Just content negotiation middleware.
-- **Multi-vault requires namespacing:** Must be designed into the data model from the start (collection naming, path prefixes) even if only one vault is used initially.
+- **Registry is the keystone dependency:** Every other v2.0 feature reads from users.json. It must be implemented first.
+- **ob sync-setup is a one-time operation:** Must run exactly once per user (when `add-user` is called). Running it again for an already-configured vault may fail or create duplicate configs. The process manager just runs `ob sync --continuous`; setup is CLI-only.
+- **Hot-reload must be atomic:** If hot-reload fails mid-read (malformed JSON during write), the server must keep the last-good registry, not crash. Read-validate-swap pattern.
+- **Qdrant payload index must exist before first user is added:** Creating the index on a populated collection works, but creating it before any data is cheaper. Migration phase must create the `user_id` payload index with `is_tenant: true` before first user is provisioned.
+- **SQLite migration is additive:** Adding `user_id` column with NOT NULL DEFAULT '' to existing tables, then backfilling with a known user_id for any legacy data from v1.0 single-user operation.
+- **Per-user OpenAI keys do not affect routing:** They only affect which client is used during embedding calls. The routing (API key → user_id) uses CogniVault API keys, not OpenAI keys.
 
-## MVP Definition
+---
 
-### Launch With (v1)
+## MVP Definition (v2.0 Milestone)
 
-Minimum viable service that an AI agent can use to replace the existing REST API + Smart Connections setup.
+### Launch With (v2.0)
 
-- [ ] **Note CRUD operations** -- list, read, create, update, delete, append/prepend via REST
-- [ ] **Frontmatter read/write** -- YAML metadata extraction and update
-- [ ] **Document ingestion with Markdown-aware chunking** -- section hierarchy preservation
-- [ ] **Semantic search via Qdrant** -- embedding with OpenAI text-embedding-3
-- [ ] **Keyword search** -- exact term matching for technical identifiers
-- [ ] **Hybrid retrieval with RRF fusion** -- combine semantic + lexical results
-- [ ] **Metadata filtering** -- filter by tags, project, folder, status
-- [ ] **Incremental indexing** -- filesystem polling + content hashing
-- [ ] **Stale vector cleanup** -- delete/rename propagation
-- [ ] **API key authentication** -- read-only vs write roles
-- [ ] **Health/readiness endpoints** -- Docker deployment support
-- [ ] **SQLite index state** -- hash, timestamp, model version tracking
-- [ ] **Single vault support** -- multi-vault data model designed but single vault operational
+Minimum viable multi-tenant system. Every item is load-bearing.
 
-### Add After Validation (v1.x)
+- [ ] **users.json registry with hot-reload** — fundamental tenant configuration store
+- [ ] **API key → user_id lookup with per-request tenant context** — core routing mechanism
+- [ ] **Qdrant user_id payload index + query filter** — data isolation in vector store
+- [ ] **SQLite user_id column migration** — data isolation in index state
+- [ ] **Per-user OpenAI API key injection at embedding time** — cost attribution
+- [ ] **`ob login` + `ob sync-setup` integration in `add-user` CLI** — user provisioning
+- [ ] **`ob sync --continuous` process spawn + health monitoring + restart** — continuous vault sync
+- [ ] **`add-user` CLI command** — operator-facing user provisioning
+- [ ] **`remove-user` CLI command** — operator-facing user deprovisioning
+- [ ] **`list-users` CLI command** — operator visibility
 
-Features to add once core retrieval is proven accurate and performant.
+### Add After Core Works (v2.x)
 
-- [ ] **Cross-encoder reranking** -- add Cohere/BGE reranker to hybrid pipeline; trigger: when precision on mixed-language queries is measured and found wanting
-- [ ] **Context pack assembly** -- structured token-budgeted bundles; trigger: when agents are observed manually assembling context from search results
-- [ ] **TOON content negotiation** -- token-efficient responses; trigger: when token costs become a concern or TOON library is stable
-- [ ] **Multi-vault support** -- activate namespace isolation; trigger: when user needs second vault
-- [ ] **Multi-format indexing (PDF, CSV, Canvas)** -- extend beyond Markdown; trigger: when non-MD content in vault needs retrieval
-- [ ] **OpenAPI spec endpoint** -- auto-generated API documentation
-- [ ] **Prometheus metrics + structured logging** -- operational observability
+Features to add once multi-tenant routing and sync are verified working.
 
-### Future Consideration (v2+)
+- [ ] **Multi-tenant Prometheus metrics (user_id labels)** — trigger: when operator needs per-user performance visibility
+- [ ] **`/admin/sync-status` REST endpoint** — trigger: when programmatic monitoring needed
+- [ ] **Per-user Grafana dashboard filter** — trigger: when per-user observability is needed
+- [ ] **Sync process crash alerting** — trigger: when production stability becomes priority
 
-Features to defer until core product is stable and patterns emerge from real usage.
+### Future Consideration (v3+)
 
-- [ ] **Embedding model migration tooling** -- bulk reindex with new model; defer: only matters when switching embedding providers
-- [ ] **Excalidraw/image metadata extraction** -- specialized parsers; defer: low volume content type
-- [ ] **OpenTelemetry tracing** -- distributed tracing; defer: useful at scale, unnecessary for 1-3 agents
-- [ ] **Embedding provider abstraction (local models)** -- swap to BGE/nomic-embed; defer: OpenAI is good enough initially
+- [ ] **User-level rate limiting** — per-user request quotas; defer: not needed at 1-5 users
+- [ ] **Vault encryption key management** — `ob sync-setup --password`; defer: only when encrypted vaults are in use
+- [ ] **Cross-encoder reranking (RET-04)** — deferred from v1.0; add to shared retrieval pipeline when per-user precision metrics expose gaps
+
+---
 
 ## Feature Prioritization Matrix
 
 | Feature | User Value | Implementation Cost | Priority |
 |---------|------------|---------------------|----------|
-| Note CRUD | HIGH | MEDIUM | P1 |
-| Frontmatter read/write | HIGH | LOW | P1 |
-| Semantic search (Qdrant) | HIGH | HIGH | P1 |
-| Keyword/lexical search | HIGH | MEDIUM | P1 |
-| Hybrid retrieval (RRF) | HIGH | MEDIUM | P1 |
-| Markdown-aware chunking | HIGH | MEDIUM | P1 |
-| Incremental indexing | HIGH | HIGH | P1 |
-| Stale vector cleanup | HIGH | MEDIUM | P1 |
-| Metadata filtering | HIGH | MEDIUM | P1 |
-| API key auth | MEDIUM | LOW | P1 |
-| Health endpoints | LOW | LOW | P1 |
-| Cross-encoder reranking | HIGH | MEDIUM | P2 |
-| Context pack assembly | HIGH | HIGH | P2 |
-| TOON negotiation | MEDIUM | MEDIUM | P2 |
-| Multi-vault isolation | MEDIUM | MEDIUM | P2 |
-| Multi-format (PDF, CSV) | MEDIUM | MEDIUM | P2 |
-| Prometheus metrics | MEDIUM | LOW | P2 |
-| OpenAPI spec | LOW | LOW | P2 |
-| Embedding migration | LOW | MEDIUM | P3 |
-| OpenTelemetry tracing | LOW | MEDIUM | P3 |
-| Local embedding models | LOW | HIGH | P3 |
+| users.json registry + hot-reload | HIGH | LOW | P1 |
+| API key → user_id routing | HIGH | LOW | P1 |
+| Qdrant user_id isolation | HIGH | MEDIUM | P1 |
+| SQLite user_id migration | HIGH | LOW | P1 |
+| Per-user OpenAI key injection | HIGH | LOW | P1 |
+| `add-user` CLI + ob auth flow | HIGH | HIGH | P1 |
+| `ob sync --continuous` process mgmt | HIGH | HIGH | P1 |
+| `remove-user` CLI | HIGH | MEDIUM | P1 |
+| `list-users` CLI | MEDIUM | LOW | P1 |
+| Multi-tenant Prometheus metrics | MEDIUM | MEDIUM | P2 |
+| `/admin/sync-status` endpoint | MEDIUM | LOW | P2 |
+| Per-user Grafana filter | MEDIUM | LOW | P2 |
+| Sync crash alerting | LOW | LOW | P2 |
 
 **Priority key:**
-- P1: Must have for launch -- agents cannot function without these
-- P2: Should have, add post-validation -- improves precision, DX, or efficiency
-- P3: Nice to have, future consideration -- only when triggered by real need
+- P1: Must have for v2.0 launch — multi-tenancy doesn't work without these
+- P2: Should have, add post-validation — improves operations, not correctness
+- P3: Deferred — future milestone material
 
-## Competitor Feature Analysis
+---
 
-| Feature | Obsidian REST API | Khoj | PrivateGPT | Onyx | AnythingLLM | CogniVault |
-|---------|-------------------|------|------------|------|-------------|------------|
-| Note CRUD | Yes (full) | No (read-only indexing) | No (ingest only) | No (connector-based) | No (upload only) | Yes (full, Obsidian-native) |
-| Frontmatter R/W | Yes | No | No | N/A | No | Yes |
-| Semantic search | No | Yes (pgvector) | Yes (LlamaIndex) | Yes (custom) | Yes (built-in) | Yes (Qdrant) |
-| Keyword search | Basic text search | No | No | Yes (hybrid) | No | Yes (BM25/FTS) |
-| Hybrid search | No | No | No | Yes | No | Yes (RRF fusion) |
-| Reranking | No | No | No | Yes | No | Yes (cross-encoder) |
-| Context pack assembly | No | No | No | No | No | Yes (unique) |
-| TOON format | No | No | No | No | No | Yes (unique) |
-| Token budget control | No | No | No | No | No | Yes (unique) |
-| Multi-vault | N/A (one Obsidian instance) | No | No | N/A | Workspaces | Yes (isolated namespaces) |
-| Incremental indexing | N/A | Yes | Manual | Yes (connectors) | Manual | Yes (filesystem polling) |
-| LLM chat built-in | No | Yes | Yes | Yes | Yes | No (by design) |
-| Multi-format | N/A | PDF, MD, org, Word | Most formats | 40+ connectors | PDF, DOCX, CSV | MD, PDF, CSV, Canvas |
-| Self-hosted | Obsidian plugin | Yes (Docker) | Yes (Docker) | Yes (Docker) | Yes (Docker) | Yes (Docker) |
-| Agent-first API | No (human automation) | No (human UI first) | Partial (OpenAI-compatible) | No (enterprise UI) | Partial (workspace API) | Yes (designed for agents) |
+## Implementation Notes by Feature
 
-### Key Competitive Insight
+### obsidian-headless Auth Flow (MEDIUM confidence — beta tool)
 
-Every competitor is either:
-1. **File-aware but not search-capable** (Obsidian REST API) -- can read/write notes but cannot find relevant content semantically
-2. **Search-capable but not file-aware** (Khoj, PrivateGPT, Onyx, AnythingLLM) -- can find content but cannot operate on the source files natively
-3. **Human-UI-first with API bolted on** (all of the above) -- APIs are afterthoughts, not designed for agent consumption
+The auth flow for non-interactive server use is the most uncertain part of v2.0. Current state as of 2026-03-14 (obsidian-headless v0.0.3+):
 
-CogniVault is unique in being **agent-first, combining file operations with retrieval, and offering structured context assembly**. No competitor occupies this exact position.
+1. **`ob login --email <email> --password <password>`** — flags exist for non-interactive auth. MFA flag `--mfa` available if user has 2FA enabled. This produces an auth token stored in `~/.config/obsidian-headless/auth_token` (or `OBSIDIAN_AUTH_TOKEN` env var equivalent).
+
+2. **`ob sync-setup --vault <name> --path <path>`** — links a local directory to a named remote vault. Historically failed on headless Linux due to missing keychain (gnome-keyring D-Bus). Version 0.0.3+ resolved this for non-encrypted vaults. The `--password` flag handles encrypted vaults.
+
+3. **`ob sync --continuous`** — long-running WebSocket process that watches for Obsidian Sync cloud changes and applies them to the local vault directory.
+
+**Critical unknown:** Whether `ob login` with `--email`/`--password` flags works fully non-interactively (no TTY prompt at all) is not confirmed by official docs. The flags exist but the forum notes suggest interactive was the original design. Must verify by running `ob login --email test@test.com --password secret < /dev/null` during phase research. If interactive TTY is required, workaround is to pre-generate auth tokens during `add-user` (which IS interactive) and store them for process restart use.
+
+**Keychain workaround:** v0.0.3 resolved headless keychain issues for non-encrypted vaults. If vault encryption is used (`--password` flag on sync-setup), the keychain dependency may resurface. For v2.0: assume no vault encryption (simplest case) and document as known constraint.
+
+### Process Manager Pattern
+
+The sync process manager lives inside the CogniVault Fastify process (not a separate daemon). Standard Node.js `child_process.spawn()` is sufficient — no external process manager needed.
+
+Pattern:
+```
+SyncProcessManager class:
+  - Map<user_id, SyncProcess> (PID, status, restart_count, last_crash_at)
+  - start(user): spawn("ob", ["sync", "--continuous"], { cwd: vaultPath, env: { HOME: userConfigDir } })
+  - stop(user): process.kill(pid, 'SIGTERM') → wait for exit
+  - onExit(user, code): if code !== 0, schedule restart with exponential backoff
+  - maxRestarts: 10, backoff: [1s, 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s, 512s] (cap at 512s)
+  - status(): returns array of { user_id, pid, status, restart_count, uptime_s }
+```
+
+Per-user HOME directory isolation is critical: each user's `ob` config (auth token, vault linkage) must live in a separate directory. Use `userConfigDir = /data/users/<user_id>/.config` and set `HOME` env var when spawning.
+
+### users.json Registry Schema
+
+```json
+{
+  "users": [
+    {
+      "user_id": "alice",
+      "api_key": "cv-abc123...",
+      "vault_name": "My Vault",
+      "vault_path": "/data/vaults/alice",
+      "openai_key": "sk-...",
+      "obs_email": "alice@example.com",
+      "obs_password": "..."
+    }
+  ]
+}
+```
+
+**Security note:** `obs_password` and `openai_key` are secrets stored in plaintext. In v2.0 this is acceptable for a self-hosted operator-controlled deployment. Document clearly. Future: reference to env vars instead of inline values.
+
+### Qdrant Isolation Strategy
+
+Use single shared `cognivault` collection (already exists). Add `user_id` to all point payloads on upsert. Create payload index:
+
+```
+PUT /collections/cognivault/index
+{ "field_name": "user_id", "field_schema": { "type": "keyword", "is_tenant": true } }
+```
+
+All search queries get an implicit must-filter:
+```json
+{ "must": [{ "key": "user_id", "match": { "value": "<user_id>" } }] }
+```
+
+This is Qdrant's recommended pattern for multi-tenancy. `is_tenant: true` co-locates vectors by tenant, making per-user queries significantly faster via sequential reads.
+
+---
 
 ## Sources
 
-- [Obsidian Local REST API - GitHub](https://github.com/coddingtonbear/obsidian-local-rest-api)
-- [Obsidian Local REST API - Interactive Documentation](https://coddingtonbear.github.io/obsidian-local-rest-api/)
-- [Khoj AI Documentation](https://docs.khoj.dev/)
-- [Khoj - GitHub](https://github.com/khoj-ai/khoj)
-- [Onyx (Danswer) - GitHub](https://github.com/onyx-dot-app/onyx)
-- [Onyx Documentation](https://docs.onyx.app/welcome)
-- [PrivateGPT Documentation](https://docs.privategpt.dev/api-reference)
-- [PrivateGPT - GitHub](https://github.com/zylon-ai/private-gpt)
-- [AnythingLLM Documentation](https://docs.anythingllm.com/)
-- [RAGFlow - RAG Review 2025](https://ragflow.io/blog/rag-review-2025-from-rag-to-context)
-- [Weaviate - Context Engineering for AI Agents](https://weaviate.io/blog/context-engineering)
-- [Superlinked - Optimizing RAG with Hybrid Search & Reranking](https://superlinked.com/vectorhub/articles/optimizing-rag-with-hybrid-search-reranking)
+- [obsidian-headless GitHub (obsidianmd)](https://github.com/obsidianmd/obsidian-headless) — command reference, auth flags
+- [Obsidian Forum: OBSIDIAN_AUTH_TOKEN retrieval](https://forum.obsidian.md/t/headless-sync-how-to-get-obsidian-auth-token-variable/111740) — non-interactive auth workarounds
+- [Obsidian Forum: ob sync-setup keychain issue](https://forum.obsidian.md/t/ob-sync-setup-fails-on-headless-linux-keychain-unavailable/111679) — v0.0.3 fix confirmed
+- [Qdrant Multitenancy Documentation](https://qdrant.tech/documentation/guides/multitenancy/) — is_tenant, payload filter, single-collection recommendation
+- [Qdrant Multitenancy Article](https://qdrant.tech/articles/multitenancy/) — payload_m=16 optimization for per-tenant HNSW indices
+- [Node.js child_process documentation](https://nodejs.org/api/child_process.html) — spawn, SIGTERM, exit event
+- [Commander.js GitHub](https://github.com/tj/commander.js) — CLI framework for add-user/remove-user/list-users
 
 ---
-*Feature research for: CogniVault - Knowledge access layer for AI agents*
-*Researched: 2026-03-10*
+*Feature research for: CogniVault v2.0 — Multi-tenant vault sync + user lifecycle*
+*Researched: 2026-03-14*

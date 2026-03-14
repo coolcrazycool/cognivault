@@ -1,442 +1,532 @@
-# Architecture Patterns
+# Architecture Research
 
-**Domain:** Unified knowledge access service (file ops + indexing + hybrid retrieval + context assembly)
-**Researched:** 2026-03-10
+**Domain:** Multi-tenant knowledge access service — single-container, registry-driven, per-user vault sync
+**Researched:** 2026-03-14
+**Confidence:** HIGH (codebase read directly; obsidian-headless docs verified via GitHub; patterns from v1.0 code confirmed)
 
-## Recommended Architecture
+---
 
-CogniVault is a single-process Node.js/TypeScript service with internally modular subsystems communicating through in-process event bus and direct function calls. No microservices, no message queues -- simplicity for 1-3 concurrent agents.
+## Context: v2.0 Milestone Scope
 
-```
-                         REST API Layer
-                    (Fastify + TOON negotiation)
-                              |
-         +--------------------+--------------------+
-         |                    |                    |
-    File Ops            Retrieval            Context Pack
-    Module              Pipeline             Assembler
-         |                    |                    |
-         |          +---------+---------+          |
-         |          |         |         |          |
-         |      Semantic   Lexical   Metadata      |
-         |      Search     Search    Filter         |
-         |          |         |         |          |
-         |          +----+----+---------+          |
-         |               |                         |
-         |          RRF Fusion                     |
-         |               |                         |
-         |          Cross-Encoder                  |
-         |          Reranker                       |
-         |               |                         |
-         +-------+-------+-------+---------+-------+
-                 |               |         |
-            Vault Manager    Qdrant    SQLite
-            (filesystem)    (vectors)  (index state)
-                 |
-            FS Poller
-            (change detection)
-                 |
-           Indexing Pipeline
-           (chunk -> embed -> store)
-```
+This document focuses exclusively on the **new** and **modified** components for v2.0 multi-tenant support. The v1.0 architecture (Fastify plugin system, chunking pipeline, Qdrant hybrid search, context pack assembly) is proven and unchanged in design. The research question is: **what changes, what is new, and what must be built first?**
 
-### Component Boundaries
+---
 
-| Component | Responsibility | Communicates With | Data Owned |
-|-----------|---------------|-------------------|------------|
-| **API Layer** | HTTP routing, auth, content negotiation (JSON/TOON), request validation | All modules via direct calls | None (stateless) |
-| **Vault Manager** | Multi-vault registry, path resolution, path traversal protection, file CRUD | API Layer, FS Poller, Indexing Pipeline | Vault configs, path mappings |
-| **File Ops Module** | Note/file CRUD, frontmatter parsing, atomic writes | API Layer, Vault Manager | None (filesystem is source of truth) |
-| **FS Poller** | Periodic filesystem scanning, content hash comparison, change event emission | Vault Manager, Indexing Pipeline, SQLite (index state) | Poll state (last scan timestamps) |
-| **Indexing Pipeline** | Markdown-aware chunking, multi-format parsing, embedding generation, Qdrant upsert, stale vector cleanup | FS Poller (triggered by), Vault Manager, Embedding Provider, Qdrant, SQLite | Chunk metadata, processing queue |
-| **Embedding Provider** | Abstract interface over embedding models, batching, rate limiting | Indexing Pipeline, Retrieval Pipeline | Provider config |
-| **Retrieval Pipeline** | Hybrid search orchestration: semantic + lexical + metadata filtering, RRF fusion, reranking | API Layer, Qdrant, Reranker, Vault Manager | None (stateless query path) |
-| **Reranker** | Cross-encoder scoring of candidate results | Retrieval Pipeline | Provider config |
-| **Context Pack Assembler** | Token-budget-aware assembly of search results into structured knowledge bundles | API Layer, Retrieval Pipeline, File Ops (for full note fetching) | None (stateless) |
-| **Observability** | Structured logging, Prometheus metrics, OpenTelemetry tracing | Cross-cutting (all components) | None (emits to external collectors) |
+## Standard Architecture
 
-### Critical Boundary Rule
-
-The filesystem is the single source of truth. Qdrant and SQLite are derived state. If they are lost, a full reindex from disk restores everything. This means:
-- Writes always go to disk first, then trigger reindexing
-- Reads of note content come from disk (not Qdrant payloads)
-- Qdrant stores embeddings + metadata for search, not authoritative content
-
-## Data Flow
-
-### Write Path (Async)
+### System Overview
 
 ```
-Agent POST /vaults/:vault/notes/:path
-    |
-    v
-API Layer (validate, auth)
-    |
-    v
-File Ops Module (atomic write to disk via temp-file + rename)
-    |
-    v
-Return 201/200 to agent immediately
-    |
-    (async, decoupled)
-    v
-FS Poller detects change on next scan cycle
-    |
-    v
-Indexing Pipeline:
-  1. Read file from disk
-  2. Parse frontmatter + extract metadata
-  3. Chunk content (markdown-aware, section hierarchy)
-  4. Hash chunks, compare to SQLite index state
-  5. Embed only changed/new chunks (batch to embedding provider)
-  6. Upsert vectors to Qdrant with payload
-  7. Delete stale vectors (removed chunks, renamed files)
-  8. Update SQLite index state (hashes, timestamps, model version)
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Single Docker Container                      │
+│                                                                      │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │                   CLI Layer (Commander.js)                    │    │
+│  │  add-user | remove-user | list-users | docker-start          │    │
+│  └──────────────────────────┬──────────────────────────────────┘    │
+│                             │ reads/writes users.json                │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │                 User Registry (users.json)                    │    │
+│  │  { apiKey → { userId, vaultPath, openaiKey, obsidianCreds }} │    │
+│  └──────────────────────────┬──────────────────────────────────┘    │
+│                             │ fs.watch hot-reload                    │
+│  ┌─────────────────────────────────────────────────────────────┐    │
+│  │              Fastify API Process (existing)                   │    │
+│  │                                                              │    │
+│  │  Auth Plugin (MODIFIED)                                      │    │
+│  │    Bearer token → registry lookup → user context attached    │    │
+│  │                                                              │    │
+│  │  Registry Plugin (NEW)                                       │    │
+│  │    Loads users.json, fs.watch hot-reload, apiKey→user map    │    │
+│  │                                                              │    │
+│  │  Embedder Plugin (MODIFIED)                                  │    │
+│  │    Per-request user context → per-user OpenAI key            │    │
+│  │                                                              │    │
+│  │  Vault Plugin (MODIFIED)                                     │    │
+│  │    Per-request vault path from registry (not env var)        │    │
+│  │                                                              │    │
+│  │  Indexer Plugin (MODIFIED)                                   │    │
+│  │    Map<userId, VaultIndexer> — one poller per user           │    │
+│  │                                                              │    │
+│  │  Pipeline Plugin (MODIFIED)                                  │    │
+│  │    Per-user PQueue + per-user embedder from registry         │    │
+│  │                                                              │    │
+│  │  Feature Routes (MINOR MODIFICATION)                         │    │
+│  │    Pass userId from request context to Qdrant filter         │    │
+│  └─────────────────────────────────────────────────────────────┘    │
+│                                                                      │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐              │
+│  │  obsidian-   │  │  obsidian-   │  │  obsidian-   │              │
+│  │  headless    │  │  headless    │  │  headless    │              │
+│  │  (user-a)    │  │  (user-b)    │  │  (user-n)    │              │
+│  │  child proc  │  │  child proc  │  │  child proc  │              │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘              │
+│         │ sync writes      │ sync writes      │ sync writes          │
+│  ┌──────▼───────┐  ┌──────▼───────┐  ┌──────▼───────┐              │
+│  │  vault-a/    │  │  vault-b/    │  │  vault-n/    │              │
+│  │  (bind mount)│  │  (bind mount)│  │  (bind mount)│              │
+│  └──────────────┘  └──────────────┘  └──────────────┘              │
+└─────────────────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    External Sidecars (unchanged)                      │
+│         Qdrant | Prometheus | Grafana | SQLite (per-user DB)         │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Why async write:** Embedding latency (100-500ms per batch via OpenAI API) must not block the agent's write request. The agent gets a fast 200, and indexing catches up within the poll interval.
+### Component Responsibilities
 
-### Read/Search Path (Synchronous)
+| Component | Status | Responsibility |
+|-----------|--------|----------------|
+| **UserRegistry** | NEW | In-memory apiKey→UserRecord map, loaded from `users.json`, hot-reloaded via `fs.watch`. Zero-downtime user adds/removes. |
+| **CLI (`src/cli/`)** | NEW | Commander.js program: `add-user`, `remove-user`, `list-users`, `docker-start`. Reads/writes `users.json`. Spawns obsidian-headless child processes. |
+| **Auth Plugin** | MODIFIED | Was: validate against single `COGNIVAULT_API_KEY` env var. Now: look up apiKey in UserRegistry, attach `request.user = { userId, vaultPath, openaiKey }` on success. |
+| **Registry Plugin** | NEW | Fastify plugin that loads UserRegistry from disk, starts `fs.watch`, decorates `fastify.registry`. Depends on: nothing (loads before other plugins). |
+| **Vault Plugin** | MODIFIED | Was: single VaultManager from `VAULT_PATH` env var. Now: per-request VaultManager constructed from `request.user.vaultPath`. Vault is still resolved per-request, not cached (VaultManager is cheap to construct). |
+| **Embedder Plugin** | MODIFIED | Was: single OpenAI provider from global `OPENAI_API_KEY`. Now: per-request embedder from `request.user.openaiKey` (cached per-user by registry). |
+| **Indexer Plugin** | MODIFIED | Was: single VaultIndexer on `fastify.indexer`. Now: `Map<userId, VaultIndexer>` with start/stop on user add/remove. |
+| **Pipeline Plugin** | MODIFIED | Was: one PQueue listening to single indexer. Now: per-user PQueue, per-user embedder from registry, all wired in `onReady`. |
+| **DB Plugin** | MODIFIED | Was: single SQLite at `COGNIVAULT_DATA_DIR/index.db`. Now: per-user SQLite at `COGNIVAULT_DATA_DIR/{userId}/index.db`. |
+| **Qdrant Plugin** | MINOR MODIFICATION | Single QdrantClient unchanged. Collection name: single `cognivault` collection with `user_id` payload field (already present in v1 metrics, just not as index filter). |
+| **Search/Context/Admin Routes** | MINOR MODIFICATION | Pass `request.user.userId` as Qdrant filter on every search operation. |
+| **Metrics Plugin** | MINOR MODIFICATION | Counters/histograms already have `user_id` label slots from Phase 12. Wire actual userId from request context. |
+| **Config (Zod)** | MODIFIED | Remove `COGNIVAULT_API_KEY`, `VAULT_PATH`, `OPENAI_API_KEY` as required. Replace with `USERS_FILE` path and `COGNIVAULT_DATA_DIR`. |
+| **obsidian-headless processes** | NEW | One `ob sync --continuous` child process per user. Managed by CLI. Writes to per-user vault directory. CogniVault pollers detect sync'd changes. |
 
-```
-Agent GET /vaults/:vault/search?q=...&filters=...
-    |
-    v
-API Layer (validate, auth, parse content negotiation)
-    |
-    v
-Retrieval Pipeline (parallel execution):
-    |
-    +---> Semantic Search: embed query -> Qdrant ANN search
-    |     (filtered by vault_id payload + metadata filters)
-    |
-    +---> Lexical Search: BM25/trigram over indexed content
-    |     (SQLite FTS5 or in-memory index)
-    |
-    v
-RRF Fusion: merge ranked lists using Reciprocal Rank Fusion
-    |
-    v
-Cross-Encoder Reranker: score top-K candidates (Cohere or BGE)
-    |
-    v
-Return ranked results (JSON or TOON based on Accept header)
-```
+---
 
-### Context Pack Assembly
+## Recommended Project Structure (new/modified files only)
 
 ```
-Agent POST /vaults/:vault/context-pack
-  body: { query, token_budget: 32000, filters, include_metadata: true }
-    |
-    v
-Retrieval Pipeline (hybrid search as above)
-    |
-    v
-Context Pack Assembler:
-  1. Take reranked results
-  2. Fetch full note content from disk for top results
-  3. Extract relevant sections (not full notes if over budget)
-  4. Assemble structured bundle:
-     - Summary of sources
-     - Ranked content blocks with source attribution
-     - Metadata (tags, projects, dates)
-  4. Token counting: fit within budget, prioritize by relevance score
-  5. Format as TOON or JSON per Accept header
-    |
-    v
-Return context pack to agent
+src/
+├── cli/                          # NEW — Commander.js CLI
+│   ├── index.ts                  # Entry point: program.parse(process.argv)
+│   ├── commands/
+│   │   ├── add-user.ts           # ob login + ob sync-setup + users.json write
+│   │   ├── remove-user.ts        # users.json write + kill sync proc
+│   │   ├── list-users.ts         # Pretty-print users.json
+│   │   └── docker-start.ts       # spawn obsidian-headless procs + exec API server
+│   └── registry-file.ts          # Read/write users.json with schema validation
+│
+├── lib/
+│   ├── user-registry.ts          # NEW — UserRegistry class (in-memory map + fs.watch)
+│   ├── sync-manager.ts           # NEW — spawn/kill obsidian-headless child processes
+│   └── ... (existing lib files unchanged)
+│
+├── plugins/
+│   ├── registry.ts               # NEW — Fastify plugin: load UserRegistry, hot-reload
+│   ├── auth.ts                   # MODIFIED — registry lookup instead of single key
+│   ├── vault.ts                  # MODIFIED — per-request VaultManager
+│   ├── embedding.ts              # MODIFIED — per-user OpenAI provider
+│   ├── indexer.ts                # MODIFIED — Map<userId, VaultIndexer>
+│   ├── pipeline.ts               # MODIFIED — per-user PQueue + embedder
+│   ├── db.ts                     # MODIFIED — per-user SQLite path
+│   ├── qdrant.ts                 # MINOR MOD — ensure user_id payload index exists
+│   └── metrics.ts                # MINOR MOD — wire userId labels from request context
+│
+├── config.ts                     # MODIFIED — schema changes
+└── ... (existing app.ts, server.ts, features/ unchanged in structure)
+
+data/                             # COGNIVAULT_DATA_DIR (bind-mounted volume)
+├── users.json                    # Registry file (written by CLI)
+├── {userId}/
+│   ├── index.db                  # Per-user SQLite index state
+│   └── vault/                    # Per-user vault directory (obsidian-headless syncs here)
 ```
 
-### Indexing Pipeline Detail
+### Structure Rationale
 
-```
-File Change Detected
-    |
-    v
-Format Router:
-  .md  --> Markdown Parser (frontmatter + AST)
-  .pdf --> PDF text extractor
-  .canvas --> Canvas JSON parser
-  .excalidraw --> Excalidraw text extractor
-  .csv --> CSV/tabular parser
-  image --> Metadata extractor (EXIF, filename)
-    |
-    v
-Markdown-Aware Chunker:
-  - Split on heading boundaries (H1, H2, H3...)
-  - Preserve heading hierarchy in chunk metadata
-    (e.g., section_path: ["Project Setup", "Database", "Migrations"])
-  - Respect code block boundaries (never split mid-block)
-  - Target chunk size: 512-1024 tokens (tunable)
-  - Overlap: include parent heading in each chunk for context
-    |
-    v
-Chunk Differ (SQLite):
-  - Hash each chunk (content_hash)
-  - Compare against stored hashes
-  - Only embed NEW or CHANGED chunks
-  - Mark DELETED chunks for removal
-    |
-    v
-Embedding Batcher:
-  - Batch chunks (e.g., 20-50 per API call)
-  - Rate limit per provider config
-  - Retry with exponential backoff
-    |
-    v
-Qdrant Upsert:
-  - Point ID: deterministic from vault_id + path + chunk_index
-  - Vector: embedding
-  - Payload: {
-      vault_id, path, title, chunk_index, section_path,
-      tags, project, status, content_hash, content_preview,
-      language, updated_at, embedding_model
-    }
-    |
-    v
-Stale Cleanup:
-  - Delete points for removed chunks
-  - Handle renames: detect via content_hash match + path change
-  - Handle deletes: remove all points for deleted file
-```
+- **`src/cli/` directory:** CLI is a separate entry point (`bin` in package.json), not part of the Fastify app. It shares `src/lib/registry-file.ts` with the server for consistent schema validation.
+- **`src/lib/user-registry.ts`:** The hot-reload logic lives in a plain class, not inside a Fastify plugin, so it can be tested without starting a server.
+- **Per-user data dirs:** `{userId}/index.db` and `{userId}/vault/` keep all user state isolated and trivially removable (delete directory on `remove-user`).
 
-## Qdrant Collection Design
+---
 
-**Use a single collection per embedding model with payload-based vault isolation.** This is Qdrant's officially recommended multitenancy approach.
+## Architectural Patterns
 
-```
-Collection: "cognivault_embeddings"
-  - vault_id field with keyword index, is_tenant: true
-  - This co-locates vectors from same vault for sequential read performance
-  - At <5 vaults with <5000 notes each, well under the 20K promotion threshold
-```
+### Pattern 1: Registry Plugin — Single Source of Truth for User Context
 
-**Payload index configuration:**
-- `vault_id`: keyword index, `is_tenant: true` (tenant isolation)
-- `path`: keyword index (exact path lookups)
-- `tags`: keyword index (multi-value filtering)
-- `project`: keyword index (project filtering)
-- `status`: keyword index (status filtering)
-- `content_hash`: keyword index (dedup/stale detection)
-- `updated_at`: integer index (recency filtering)
+**What:** A Fastify plugin (`registry.ts`) loads `users.json` at startup, builds an in-memory `Map<apiKey, UserRecord>` (where `UserRecord = { userId, vaultPath, openaiKey, obsidianEmail }`), and starts `fs.watch` on the file. The Auth plugin uses `fastify.registry.lookup(apiKey)` to resolve user context. On file change, the registry atomically rebuilds the map.
 
-**Why not separate collections per vault:**
-- Resource overhead: each collection has its own HNSW graph, WAL, optimizer threads
-- At 2-5 vaults, the overhead is manageable but unnecessary
-- Payload filtering with `is_tenant: true` gives equivalent isolation with better resource utilization
-- If a vault grows beyond 20K points, Qdrant's tiered multitenancy can promote it to a dedicated shard transparently
+**When to use:** Every request that needs to know who the caller is. The registry is the only place this mapping lives.
 
-## Lexical Search Strategy
-
-For BM25/lexical search alongside Qdrant's semantic search, use **SQLite FTS5**. This avoids adding another external dependency (like Elasticsearch/Meilisearch) while providing solid full-text search:
-
-- FTS5 is built into SQLite, zero additional infrastructure
-- Supports tokenization customization (important for mixed Russian/English)
-- Handles exact term matching well (technical identifiers, acronyms)
-- Query-time performance is excellent for the 500-5000 note range
-- Already using SQLite for index state, so no new connection management
-
-**Table structure:**
-```sql
-CREATE VIRTUAL TABLE chunks_fts USING fts5(
-  content,
-  title,
-  tags,
-  vault_id UNINDEXED,
-  path UNINDEXED,
-  chunk_id UNINDEXED,
-  tokenize='unicode61'  -- handles Russian + English
-);
-```
-
-## Patterns to Follow
-
-### Pattern 1: Provider Abstraction with Strategy Pattern
-
-Abstract embedding and reranking behind interfaces so providers are swappable without touching business logic.
+**Trade-offs:**
+- Zero-downtime user adds: operator runs `cogvault add-user`, CLI writes `users.json`, server hot-reloads within ~1s without restart.
+- File corruption risk: if `users.json` is malformed mid-write, `fs.watch` fires on a partial file. Mitigation: CLI writes atomically via temp file + rename; registry skips reload if JSON parse fails.
 
 ```typescript
-interface EmbeddingProvider {
-  embed(texts: string[]): Promise<number[][]>;
-  readonly dimensions: number;
-  readonly modelId: string;
+// src/lib/user-registry.ts
+export interface UserRecord {
+  userId: string;
+  vaultPath: string;       // absolute path to vault directory
+  openaiKey: string;       // per-user OpenAI API key
+  obsidianEmail: string;   // stored for display only, creds managed by ob CLI
 }
 
-interface RerankerProvider {
-  rerank(query: string, documents: string[], topK: number): Promise<RerankResult[]>;
-}
+export class UserRegistry {
+  private map = new Map<string, UserRecord>(); // apiKey → UserRecord
 
-// Implementations
-class OpenAIEmbeddingProvider implements EmbeddingProvider { ... }
-class LocalBGEEmbeddingProvider implements EmbeddingProvider { ... }
-class CohereRerankerProvider implements RerankerProvider { ... }
-class BGERerankerProvider implements RerankerProvider { ... }
+  load(usersFilePath: string): void { /* parse JSON, build map */ }
+  lookup(apiKey: string): UserRecord | undefined { return this.map.get(apiKey); }
+  all(): UserRecord[] { return Array.from(this.map.values()); }
+}
 ```
 
-**Why:** The project explicitly requires starting with OpenAI embeddings but swapping to local models later. Baking provider details into business logic creates painful migrations.
+```typescript
+// src/plugins/registry.ts
+declare module 'fastify' {
+  interface FastifyInstance { registry: UserRegistry; }
+}
 
-### Pattern 2: Event-Driven Indexing with Backpressure
+async function registryPlugin(fastify: FastifyInstance): Promise<void> {
+  const registry = new UserRegistry();
+  registry.load(config.USERS_FILE);
 
-The FS Poller emits change events; the Indexing Pipeline consumes them with bounded concurrency.
+  const watcher = fs.watch(config.USERS_FILE, () => {
+    try { registry.load(config.USERS_FILE); }
+    catch { fastify.log.error('users.json parse failed — keeping previous registry'); }
+  });
+
+  fastify.decorate('registry', registry);
+  fastify.addHook('onClose', async () => watcher.close());
+}
+export default fp(registryPlugin, { name: 'registry' });
+```
+
+### Pattern 2: Request-Scoped User Context via Modified Auth Plugin
+
+**What:** Auth plugin now does a registry lookup on every request. On success, attaches user context to `request`. Downstream plugins (vault, embedder, search service) read from `request.user` rather than from process-level config.
+
+**When to use:** Every authenticated request. Health/readiness routes skip auth (unchanged from v1.0).
+
+**Trade-offs:**
+- VaultManager construction per-request: VaultManager is a thin path-resolver (no I/O at construction time). Cost is negligible.
+- Embedder per-request: OpenAIEmbeddingProvider construction is also cheap. Cache at plugin level keyed by apiKey if profiling reveals overhead.
 
 ```typescript
-// FS Poller emits typed events
-type FileChangeEvent = {
-  vault_id: string;
-  path: string;
-  type: 'created' | 'modified' | 'deleted' | 'renamed';
-  content_hash?: string;
-};
+// src/plugins/auth.ts (modified)
+declare module 'fastify' {
+  interface FastifyRequest { user: UserRecord; }
+}
 
-// Indexing Pipeline processes with concurrency control
-class IndexingPipeline {
-  private queue: PQueue; // concurrency: 1-3 files at a time
+fastify.addHook('onRequest', async (request, reply) => {
+  if (request.routeOptions.config?.skipAuth) return;
+  const token = extractBearerToken(request.headers.authorization);
+  const user = fastify.registry.lookup(token ?? '');
+  if (!user) {
+    return reply.status(401).send({ error: { code: 'UNAUTHORIZED', message: 'Invalid API key' } });
+  }
+  request.user = user;
+});
+```
 
-  async processChange(event: FileChangeEvent): Promise<void> {
-    await this.queue.add(() => this.indexFile(event));
+### Pattern 3: Per-User Indexer Map with Start/Stop Lifecycle
+
+**What:** The indexer plugin maintains a `Map<userId, VaultIndexer>`. On startup (`onReady`), start one poller per user in the registry. Registry hot-reload triggers start/stop of individual pollers when users are added/removed.
+
+**When to use:** This is the core multi-tenant indexing pattern. Each user's vault is polled independently.
+
+**Trade-offs:**
+- Memory: each VaultIndexer holds a poll timer and in-memory file state (~1KB per indexed file, so ~5MB for 5000 files per user). Acceptable for single-digit user counts.
+- SQLite: each user gets their own SQLite DB file (`{userId}/index.db`). No cross-user contention.
+
+```typescript
+// src/plugins/indexer.ts (modified)
+declare module 'fastify' {
+  interface FastifyInstance { indexers: Map<string, VaultIndexer>; }
+}
+
+// On registry hot-reload: start new indexers, stop removed ones
+registry.on('change', (added: UserRecord[], removed: UserRecord[]) => {
+  for (const user of added) { startIndexer(user); }
+  for (const user of removed) { stopIndexer(user.userId); }
+});
+```
+
+### Pattern 4: Per-User obsidian-headless Child Processes (CLI-Managed)
+
+**What:** The CLI's `docker-start` command spawns one `ob sync --continuous` process per user, then starts the Fastify server. Each sync process writes to the user's vault directory. The Fastify pollers detect these writes.
+
+**When to use:** `docker-start` is the container entrypoint command. Individual `add-user` / `remove-user` commands do not spawn processes — they only update `users.json`. The running container re-reads the registry; sync processes must be restarted separately or the container restarted.
+
+**Trade-offs:**
+- obsidian-headless stores credentials in its own config dir (`--config-dir`). The CLI's `add-user` command runs `ob login` and `ob sync-setup` interactively (or with `--email`/`--password` flags for scripted use). Credentials persist to disk in the data dir.
+- Child process failures: if `ob sync` exits (network loss, bad credentials), the container does not die. `docker-start` should restart failed sync processes with exponential backoff.
+- Sync latency: obsidian-headless syncs over WebSocket; typical latency is seconds. The FS poller detects changes within its poll interval (default 5s). End-to-end sync → indexed latency is `sync_latency + poll_interval`. Acceptable for the use case.
+
+```typescript
+// src/lib/sync-manager.ts
+export class SyncManager {
+  private processes = new Map<string, ChildProcess>();
+
+  start(user: UserRecord): void {
+    const proc = spawn('ob', ['sync', '--continuous',
+      '--config-dir', `${dataDir}/${user.userId}/.ob-config`,
+      '--vault', user.vaultPath,
+    ], { stdio: 'pipe' });
+    this.processes.set(user.userId, proc);
+    // restart on exit with backoff
+  }
+
+  stop(userId: string): void {
+    this.processes.get(userId)?.kill('SIGTERM');
+    this.processes.delete(userId);
   }
 }
 ```
 
-**Why:** Without backpressure, a full reindex (500-5000 files) will overwhelm the embedding API rate limit and consume all available memory loading files simultaneously.
+---
 
-### Pattern 3: Deterministic Point IDs in Qdrant
+## Data Flow
 
-Generate Qdrant point IDs deterministically from vault + path + chunk index so upserts are idempotent.
+### Request Flow (v2.0)
 
-```typescript
-function pointId(vaultId: string, path: string, chunkIndex: number): string {
-  return createHash('sha256')
-    .update(`${vaultId}:${path}:${chunkIndex}`)
-    .digest('hex')
-    .slice(0, 32); // UUID-length hex
-}
+```
+Agent: Bearer <api-key> → POST /api/vault/search
+    ↓
+Auth Plugin (MODIFIED)
+  registry.lookup(apiKey) → UserRecord { userId, vaultPath, openaiKey }
+  request.user = userRecord
+    ↓
+Search Route Handler
+  new VaultManager(request.user.vaultPath)           ← per-request vault
+  new OpenAIEmbeddingProvider(request.user.openaiKey) ← per-request embedder
+  filter: { must: [{ key: 'user_id', match: request.user.userId }] }
+    ↓
+Qdrant (single 'cognivault' collection)
+  user_id payload filter applied — returns only this user's vectors
+    ↓
+Response
 ```
 
-**Why:** Without deterministic IDs, reindexing the same file creates duplicate vectors. With them, upsert naturally replaces the old vector.
+### Indexing Flow (v2.0)
 
-### Pattern 4: Content Hash for Change Detection
-
-Hash file content (not just mtime) to avoid unnecessary reindexing when Obsidian Sync touches files without changing them.
-
-```typescript
-function contentHash(content: Buffer): string {
-  return createHash('xxhash64').update(content).digest('hex');
-  // xxhash for speed; cryptographic strength unnecessary
-}
+```
+obsidian-headless (user-a) writes file → /data/user-a/vault/note.md
+    ↓
+VaultIndexer[user-a] poll cycle detects content hash change
+    ↓
+FileChangeEvent emitted (path, type, hash)
+    ↓
+PQueue[user-a] picks up event
+    ↓
+chunkMarkdown() → chunks[]
+    ↓
+OpenAIEmbeddingProvider(user-a.openaiKey).embed(chunks)
+    ↓
+qdrant.upsert('cognivault', {
+  points: [{ payload: { user_id: 'user-a', path: '...', ... } }]
+})
+    ↓
+SQLite[user-a/index.db] updated
 ```
 
-**Why:** Obsidian Sync may update file metadata (mtime) without changing content. Content hashing prevents wasted embedding API calls.
+### Registry Hot-Reload Flow
 
-### Pattern 5: Graceful Degradation
+```
+CLI: cogvault add-user --email x@x.com --vault "My Vault" --openai-key sk-...
+    ↓
+ob login --email x@x.com --password ... --config-dir /data/{userId}/.ob-config
+    ↓
+ob sync-setup --config-dir /data/{userId}/.ob-config --vault "My Vault"
+    ↓
+Write users.json atomically (tmp file + rename)
+    ↓
+fs.watch fires in Fastify process (within ~1s)
+    ↓
+UserRegistry.load() rebuilds in-memory map
+    ↓
+New VaultIndexer started for new user
+New PQueue created for new user
+```
 
-The service should remain functional even when external providers are unavailable:
+### Key Data Flows
 
-- **Qdrant down:** File ops still work. Search returns error. Health endpoint reports degraded.
-- **Embedding API down:** File ops still work. New indexing queued for retry. Existing vectors still searchable.
-- **Reranker API down:** Fall back to RRF-only ranking (no cross-encoder). Log warning.
+1. **Auth → Request context:** Every authenticated request resolves apiKey → UserRecord in-memory. No DB lookup, no I/O. O(1) hash map.
 
-## Anti-Patterns to Avoid
+2. **Registry hot-reload → indexer lifecycle:** UserRegistry emits an EventEmitter event on change. The indexer plugin listens and starts/stops VaultIndexers. No restart required.
 
-### Anti-Pattern 1: Storing Full Content in Qdrant Payloads
-**What:** Putting entire note content into Qdrant point payloads for "convenience."
-**Why bad:** Bloats Qdrant storage, slows queries, creates a second source of truth that can drift from disk. Qdrant payloads are for metadata and short previews, not full documents.
-**Instead:** Store content_preview (first 200 chars) in payload. Fetch full content from disk when needed.
+3. **Qdrant tenant isolation:** Single collection `cognivault`. All upserts include `user_id` payload. All searches include `{ key: 'user_id', match: userId }` filter. The `user_id` payload index must be created at collection setup.
 
-### Anti-Pattern 2: Synchronous Embedding in Write Path
-**What:** Embedding chunks before returning the write response to the agent.
-**Why bad:** OpenAI embedding calls take 100-500ms per batch. Agent write latency balloons from <50ms to >500ms. If the embedding API is down, writes fail entirely.
-**Instead:** Write to disk, return immediately, let FS Poller trigger async indexing.
+4. **Per-user SQLite:** Each user's `indexed_files` table is in their own DB file. No schema changes needed — existing `indexed_files` table works per-user as-is.
 
-### Anti-Pattern 3: Global HNSW Without Tenant Filtering
-**What:** Building a single HNSW graph without per-tenant optimization, then applying vault_id filter post-search.
-**Why bad:** Post-filtering can miss relevant results because ANN search returns approximate top-K before filtering. Pre-filtering with `is_tenant: true` builds per-tenant sub-indexes.
-**Instead:** Configure vault_id payload index with `is_tenant: true` for pre-filtered ANN search.
+---
 
-### Anti-Pattern 4: One Collection Per Vault
-**What:** Creating a separate Qdrant collection for each vault.
-**Why bad:** Each collection has its own HNSW graph, optimizer threads, WAL. At 2-5 vaults this is manageable but wasteful. At 10+ vaults it becomes a resource drain.
-**Instead:** Single collection with payload-based tenant isolation.
+## New vs Modified Components (Explicit)
 
-### Anti-Pattern 5: Monolithic Request Handler
-**What:** Putting search logic, reranking, context assembly, and formatting in a single route handler.
-**Why bad:** Untestable, impossible to reuse search logic across endpoints, difficult to add new search strategies.
-**Instead:** Compose pipeline stages as independent modules with clear interfaces.
+### Purely New (build from scratch)
 
-## Scalability Considerations
+| Component | File | Notes |
+|-----------|------|-------|
+| UserRegistry class | `src/lib/user-registry.ts` | In-memory map, `load()`, `lookup()`, EventEmitter for changes |
+| Registry Fastify plugin | `src/plugins/registry.ts` | Wraps UserRegistry, adds `fs.watch`, decorates `fastify.registry` |
+| SyncManager | `src/lib/sync-manager.ts` | spawn/kill/restart obsidian-headless child processes |
+| CLI entry point | `src/cli/index.ts` | Commander.js `program`, registered in `package.json` bin |
+| `add-user` command | `src/cli/commands/add-user.ts` | Runs `ob login`, `ob sync-setup`, writes users.json |
+| `remove-user` command | `src/cli/commands/remove-user.ts` | Removes from users.json, kills sync process |
+| `list-users` command | `src/cli/commands/list-users.ts` | Table output of registry |
+| `docker-start` command | `src/cli/commands/docker-start.ts` | Spawns all sync processes, then starts Fastify |
+| Registry file schema | `src/cli/registry-file.ts` | Zod schema for users.json, read/write with atomic rename |
 
-| Concern | At 500 notes | At 5,000 notes | At 50,000 notes |
-|---------|-------------|----------------|-----------------|
-| **Qdrant vectors** | ~5K points (10 chunks/note avg) | ~50K points | ~500K points, consider HNSW tuning |
-| **Full reindex time** | ~2 min (OpenAI embeddings) | ~20 min | ~3 hours, must be resumable |
-| **SQLite FTS5** | Instant queries | Instant queries | May need WAL mode tuning |
-| **Poll interval** | 5-10 seconds | 5-10 seconds | 15-30 seconds to reduce I/O |
-| **Memory** | ~100MB | ~200MB | ~500MB+, consider streaming chunks |
-| **Embedding costs** | ~$0.05 full reindex | ~$0.50 full reindex | ~$5.00, incremental-only critical |
+### Modified (existing files that need changes)
 
-CogniVault's target range (500-5000 notes) is comfortably within single-process, single-Qdrant-node capacity. The architecture does not need to plan for distributed systems.
+| Component | File | What Changes |
+|-----------|------|-------------|
+| Config | `src/config.ts` | Remove: `COGNIVAULT_API_KEY`, `VAULT_PATH`, `OPENAI_API_KEY` (required). Add: `USERS_FILE` (path to users.json), keep `COGNIVAULT_DATA_DIR`. |
+| Auth plugin | `src/plugins/auth.ts` | Replace `@fastify/bearer-auth` key set with `fastify.registry.lookup()`. Attach `request.user`. Drop `@fastify/bearer-auth` dep. |
+| Vault plugin | `src/plugins/vault.ts` | Remove single VaultManager decoration. Export `createVaultManager(vaultPath)` factory used per-request in routes. |
+| Embedder plugin | `src/plugins/embedding.ts` | Remove single provider decoration. Export `createEmbedder(openaiKey)` factory, cached per-userId in a Map on the plugin. |
+| Indexer plugin | `src/plugins/indexer.ts` | Replace single `fastify.indexer` with `fastify.indexers: Map<userId, VaultIndexer>`. Start all on `onReady`. |
+| Pipeline plugin | `src/plugins/pipeline.ts` | Replace single queue/listener with per-user queues. Each queue uses per-user embedder from registry. |
+| DB plugin | `src/plugins/db.ts` | Replace single `index.db` with `{userId}/index.db` per user. `fastify.dbs: Map<userId, BetterSQLite3Database>`. |
+| Qdrant plugin | `src/plugins/qdrant.ts` | Add `user_id` keyword payload index at collection setup (idempotent). |
+| Metrics plugin | `src/plugins/metrics.ts` | Wire `user_id` label from `request.user.userId` in counters/histograms already defined with label names. |
+| Search service | `src/features/search/service.ts` | Accept `userId` parameter, add to Qdrant `must` filter. |
+| Context routes | `src/features/context/routes.ts` | Pass `request.user.userId` to search service. |
+| Admin routes | `src/features/admin/routes.ts` | Reindex operations scoped to `request.user` (vault path + DB). |
+| Dockerfile | `Dockerfile` | Change base from `linuxserver/obsidian` to `node:22-slim`. Add `obsidian-headless` npm install. |
+| docker-compose.yml | `docker-compose.yml` | Rewrite: single CogniVault container + Qdrant + Prometheus + Grafana. Remove per-user container model. |
+| .env.example | `.env.example` | Remove per-user API key env vars. Add `USERS_FILE`. |
 
-## Suggested Build Order
+### Unchanged (explicitly out of scope for v2.0)
 
-The dependency graph dictates a bottom-up build order:
+- Chunking logic (`src/lib/chunker.ts`, `src/lib/pdf-chunker.ts`, etc.)
+- VaultManager class itself (`src/lib/vault.ts`) — just the plugin wrapper changes
+- Retrieval logic in search/context services (only userId filter added)
+- Qdrant collection schema (adding user_id index is additive, non-breaking)
+- TOON plugin, Swagger plugin, error handler, health routes
+- Feature route schemas (TypeBox schemas unchanged)
+- Grafana dashboards (user_id label was already designed in)
 
-### Phase 1: Foundation (no external dependencies except filesystem)
-1. **Vault Manager** -- multi-vault config, path resolution, traversal protection
-2. **File Ops Module** -- CRUD operations on disk
-3. **API Layer skeleton** -- Fastify setup, routing, auth middleware, health endpoints
+---
 
-*Rationale:* These components have zero external dependencies and are testable in isolation. File ops are the most basic capability agents need.
+## Integration Points
 
-### Phase 2: Index State + Change Detection
-4. **SQLite index state** -- schema, migrations, hash storage
-5. **FS Poller** -- periodic scanning, content hashing, change event emission
+### External Services
 
-*Rationale:* Change detection requires index state tracking. Both are prerequisites for the indexing pipeline.
+| Service | Integration Pattern | Notes |
+|---------|---------------------|-------|
+| obsidian-headless (`ob`) | Child process via `node:child_process.spawn` | CLI spawns per-user; `ob sync --continuous` runs indefinitely. Requires `obsidian-headless` npm package installed globally or in node_modules. Credentials stored in `--config-dir`. |
+| Qdrant | Single QdrantClient (unchanged) | All queries add `user_id` filter. Collection setup adds `user_id` keyword index on first run. |
+| OpenAI API | Per-user `OpenAIEmbeddingProvider` instances | Constructed from `request.user.openaiKey`. Cached per userId in a Map on the embedder plugin to avoid construction overhead. |
+| SQLite | Per-user `better-sqlite3` database | Path: `COGNIVAULT_DATA_DIR/{userId}/index.db`. Existing schema works unchanged. |
 
-### Phase 3: Indexing Pipeline
-6. **Markdown-aware chunker** -- heading-based splitting, hierarchy preservation
-7. **Multi-format parsers** -- PDF, Canvas, CSV, etc.
-8. **Embedding Provider abstraction** -- OpenAI implementation first
-9. **Qdrant integration** -- collection setup, upsert, delete, payload indexes
-10. **Indexing Pipeline orchestrator** -- ties chunking + embedding + Qdrant together
+### Internal Boundaries
 
-*Rationale:* Each sub-component can be built and tested independently. The orchestrator composes them. This is the most complex phase.
+| Boundary | Communication | Notes |
+|----------|---------------|-------|
+| CLI ↔ API server | File system (`users.json`) | CLI writes; server reads via `fs.watch`. No IPC. CLI does not call the API. |
+| Auth plugin ↔ UserRegistry | Direct method call | `fastify.registry.lookup(token)` — O(1), synchronous, no async. |
+| Indexer plugin ↔ UserRegistry | EventEmitter | Registry emits `'user-added'` / `'user-removed'` events. Indexer plugin subscribes to start/stop individual pollers. |
+| Pipeline plugin ↔ VaultIndexer | Node EventEmitter `'changes'` event | Unchanged from v1.0. Per-user pipeline subscribes to per-user indexer. |
+| Route handlers ↔ UserRecord | `request.user` | Set by auth plugin, read by vault/embedder/search. Type-augmented via `declare module 'fastify'`. |
+| SyncManager ↔ obsidian-headless | `stdin`/`stdout`/`stderr` pipes + exit events | Log stdout/stderr per-user. Restart on non-zero exit with exponential backoff. |
 
-### Phase 4: Retrieval
-11. **Semantic search** -- query embedding + Qdrant ANN with filters
-12. **Lexical search** -- FTS5 integration, BM25 scoring
-13. **RRF Fusion** -- merge ranked lists
-14. **Reranker integration** -- Cohere/BGE cross-encoder
-15. **Search API endpoint** -- wire retrieval pipeline to HTTP
+---
 
-*Rationale:* Retrieval depends on having indexed data. Semantic search is simplest, then add lexical, then fuse, then rerank -- each layer improves precision.
+## Scaling Considerations
 
-### Phase 5: Context Assembly + Polish
-16. **Context Pack Assembler** -- token budgeting, section extraction, structured output
-17. **TOON content negotiation** -- serialize/deserialize TOON format
-18. **Observability** -- OpenTelemetry tracing, Prometheus metrics, structured logging
+| Scale | Architecture Adjustments |
+|-------|--------------------------|
+| 1-5 users | Current design — single process, all in-memory, single node:22-slim container. No changes needed. |
+| 6-20 users | Monitor memory (5MB index state per user at 5K notes). If event loop lag increases, move indexing to worker threads. SQLite per-user is still fine. |
+| 20+ users | Per-user SQLite becomes many open file handles. Pool them or switch to single multi-tenant SQLite with `user_id` column. This is a schema migration, not an architecture change. |
 
-*Rationale:* Context packs depend on retrieval working. TOON is a serialization concern that can be added late. Observability is cross-cutting and best added once the core works.
+**First bottleneck at scale:** Memory from per-user VaultIndexer instances (file state maps). At 10 users × 5000 notes × ~200 bytes state, that is ~10MB — well within container limits. Not a real concern for the target user count.
 
-## Technology Notes
+**Second bottleneck:** OpenAI API rate limits. Each user has their own API key, so rate limits are per-user. This design naturally sidesteps the shared-key rate limit problem.
 
-### Framework: Fastify over Express
-Fastify provides schema-based validation, built-in serialization hooks (useful for TOON negotiation), and significantly better performance. Its plugin system maps well to CogniVault's modular architecture.
+---
 
-### Concurrency Model
-Node.js single-threaded event loop is sufficient for 1-3 concurrent agents. CPU-intensive work (chunking, hashing) should use worker threads only if profiling reveals bottlenecks. Embedding and reranking are I/O-bound (API calls), not CPU-bound.
+## Anti-Patterns
 
-### SQLite Access
-Use `better-sqlite3` for synchronous access (simpler code, no callback hell) with WAL mode enabled for concurrent reads during writes. The index state DB is small enough that synchronous access won't block the event loop.
+### Anti-Pattern 1: Per-User Containers (Phase 16 approach, now superseded)
+
+**What people do:** Run one Docker container per user (linuxserver/obsidian + CogniVault via s6-overlay, as built in Phase 16).
+**Why it's wrong:** Resource overhead scales linearly: each container has its own Node.js process, its own Qdrant connection pool, and its own monitoring overhead. Managing 5 containers is 5x the ops burden. The s6-overlay + linuxserver/obsidian base adds 2GB+ per container for VNC support that is no longer needed.
+**Do this instead:** Single CogniVault container with registry-based multi-tenancy. obsidian-headless replaces the need for Obsidian GUI and VNC.
+
+### Anti-Pattern 2: Reading users.json on Every Request
+
+**What people do:** Open and parse `users.json` on every authenticated request for "freshness."
+**Why it's wrong:** Synchronous file I/O on every request will block the event loop and add 1-5ms to every request. At 3 concurrent agents this becomes a bottleneck.
+**Do this instead:** Load users.json once into an in-memory Map at startup. Use `fs.watch` for hot-reload. Auth is O(1) map lookup.
+
+### Anti-Pattern 3: Sharing a Single OpenAI API Key Across Users
+
+**What people do:** Use the operator's single `OPENAI_API_KEY` for all user embeddings.
+**Why it's wrong:** Rate limits are shared; heavy vault indexing for one user degrades embedding quality for others. Billing is unattributable. One compromised user can exhaust the operator's quota.
+**Do this instead:** Per-user OpenAI keys stored in the registry. Each user's indexing pipeline uses their own key.
+
+### Anti-Pattern 4: Blocking the API on obsidian-headless Sync Completion
+
+**What people do:** Wait for `ob sync` to finish before starting Fastify on first boot.
+**Why it's wrong:** Initial sync of a large vault (5000 notes) can take minutes. The API should be available immediately; the indexer will catch up asynchronously.
+**Do this instead:** Start obsidian-headless processes and Fastify concurrently. The FS poller will detect files as they sync. Search results improve gradually as indexing completes.
+
+### Anti-Pattern 5: Global `fastify.vault` and `fastify.embedder` Decorations for Multi-User
+
+**What people do:** Keep `fastify.vault` and `fastify.embedder` as single-user decorations and try to swap them per-request via plugin options.
+**Why it's wrong:** Fastify decorations are process-level singletons. Mutating them per-request creates race conditions under concurrent requests.
+**Do this instead:** Remove vault and embedder from `FastifyInstance` decoration. Construct them per-request from `request.user` context (or cache per-userId in a registry-managed Map). Pass them explicitly to service constructors.
+
+---
+
+## Build Order (Dependency-First)
+
+The dependency graph for v2.0 is:
+
+```
+UserRegistry (lib) ← no deps, pure class
+    ↓
+Registry Plugin ← depends on UserRegistry + config (USERS_FILE)
+    ↓
+Auth Plugin (modified) ← depends on Registry Plugin
+    ↓
+Config (modified) ← prerequisite for everything, modify first
+    ↓
+Per-user DB Plugin ← depends on Registry (to know all userIds)
+    ↓
+Per-user Vault Plugin ← per-request, depends on Auth (request.user)
+Per-user Embedder Plugin ← per-request, depends on Auth (request.user)
+    ↓
+Per-user Indexer Plugin ← depends on Registry, DB, Vault
+Per-user Pipeline Plugin ← depends on Indexer, Embedder, Qdrant
+    ↓
+Route modifications (search, context, admin) ← depends on Auth, Vault, Embedder
+    ↓
+CLI (add-user, remove-user, list-users, docker-start) ← depends on UserRegistry schema
+    ↓
+Dockerfile + docker-compose.yml rewrite ← depends on CLI entry point existing
+    ↓
+Integration tests (multi-tenant auth, cross-user isolation) ← depends on all above
+```
+
+**Recommended phase structure for v2.0 roadmap:**
+
+| Phase | Content | Why This Order |
+|-------|---------|----------------|
+| 1 | Config schema changes + UserRegistry class + Registry plugin | Everything else depends on the registry data model. Establish the contract first. |
+| 2 | Modified Auth plugin + request.user type augmentation | Auth is the most cross-cutting change. All features depend on `request.user` being available. |
+| 3 | Per-user DB plugin + per-user Indexer + per-user Pipeline | The indexing stack must be validated per-user before wiring to routes. |
+| 4 | Per-user Vault + Embedder per-request + Route modifications | Search and context routes are the API surface agents use. Validate tenant isolation. |
+| 5 | CLI (Commander.js) + obsidian-headless integration + SyncManager | CLI depends on the server-side registry format being finalized. Headless sync is the delivery mechanism. |
+| 6 | Dockerfile rewrite (node:22-slim) + docker-compose rewrite + integration tests | Deployment layer comes last; tests prove end-to-end isolation. |
+
+---
 
 ## Sources
 
-- [Qdrant Multitenancy Guide](https://qdrant.tech/documentation/guides/multitenancy/) -- official recommendation for payload-based tenant isolation (HIGH confidence)
-- [Qdrant Tiered Multitenancy](https://qdrant.tech/blog/qdrant-1.16.x/) -- v1.16 promotion thresholds and sharding
-- [Pinecone Chunking Strategies](https://www.pinecone.io/learn/chunking-strategies/) -- heading-based markdown chunking patterns
-- [Firecrawl Chunking Best Practices 2026](https://www.firecrawl.dev/blog/best-chunking-strategies-rag) -- section hierarchy preservation
-- [Cohere Rerank on AWS](https://aws.amazon.com/blogs/big-data/enhancing-search-relevancy-with-cohere-rerank-3-5-and-amazon-opensearch-service/) -- cross-encoder reranking architecture
-- [SBERT Retrieve & Re-Rank](https://sbert.net/examples/sentence_transformer/applications/retrieve_rerank/README.html) -- two-stage retrieval pipeline pattern
-- [Chokidar](https://github.com/paulmillr/chokidar) -- filesystem watching library for Node.js
-- [Building Production RAG Systems 2026](https://brlikhon.engineer/blog/building-production-rag-systems-in-2026-complete-architecture-guide) -- modular RAG architecture patterns
+- CogniVault v1.0 source code (read directly, March 2026) — `src/plugins/auth.ts`, `src/plugins/indexer.ts`, `src/plugins/pipeline.ts`, `src/plugins/embedding.ts`, `src/plugins/db.ts`, `src/config.ts`
+- [obsidian-headless GitHub](https://github.com/obsidianmd/obsidian-headless) — credential flags (`--email`, `--password`), `--config-dir`, `--continuous` mode (HIGH confidence, official Obsidian repo)
+- [Commander.js GitHub](https://github.com/tj/commander.js) — CLI framework for Node.js (HIGH confidence)
+- [Fastify plugin system docs](https://fastify.dev/docs/latest/Reference/Plugins/) — `fp()` dependency declarations, `fastify.decorate()` patterns (HIGH confidence)
+- Qdrant multitenancy guide — single collection with payload-based tenant isolation (already verified in v1.0 ARCHITECTURE.md, unchanged for v2.0)
+- Node.js `fs.watch` docs — hot-reload mechanism (HIGH confidence, built-in)
+- `.planning/PROJECT.md` — v2.0 milestone scope, out-of-scope decisions (per-user containers, VNC/GUI access, Caddy proxy)
+
+---
+
+*Architecture research for: CogniVault v2.0 multi-tenant*
+*Researched: 2026-03-14*
