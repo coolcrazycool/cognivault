@@ -4,7 +4,7 @@ const configSchema = z.object({
   PORT: z.coerce.number().default(3000),
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
-  VAULT_PATH: z.string().min(1, 'VAULT_PATH is required'),
+  VAULT_PATH: z.string().optional(),
   QDRANT_URL: z.string().url().default('http://localhost:6333'),
   COGNIVAULT_DATA_DIR: z.string().default('./.cognivault'),
   POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
