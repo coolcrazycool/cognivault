@@ -195,5 +195,5 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 18. Per-User Indexing and Routes | 3/3 | Complete    | 2026-03-14 | - |
 | 19. CLI and Vault Sync | 2/3 | In Progress|  | - |
 | 20. Docker and Integration Hardening | 4/4 | Complete   | 2026-03-14 | - |
-| 21. CLI-Server Event Wiring & Metric Fix | 2/2 | Complete   | 2026-03-14 | - |
+| 21. CLI-Server Event Wiring & Metric Fix | 2/2 | Complete    | 2026-03-14 | - |
 | 22. Milestone Verification Closure | 0/? | Not Started | | - |
