@@ -9,7 +9,7 @@ Requirements for multi-user deployment. Each maps to roadmap phases.
 
 ### Multi-Tenant Core
 
-- [ ] **TENANT-01**: CogniVault serves multiple users from a single process, routing each request to the correct user's vault and Qdrant tenant by API key
+- [x] **TENANT-01**: CogniVault serves multiple users from a single process, routing each request to the correct user's vault and Qdrant tenant by API key
 - [x] **TENANT-02**: User registry (users.json) is hot-reloaded via filesystem watch without restarting CogniVault
 - [x] **TENANT-03**: Registry writes are atomic (tmp + rename) to prevent corrupted state on crash
 
@@ -87,7 +87,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| TENANT-01 | Phase 16 | Pending |
+| TENANT-01 | Phase 16 | Complete |
 | TENANT-02 | Phase 15 | Complete |
 | TENANT-03 | Phase 15 | Complete |
 | DATA-01 | Phase 17 | Pending |

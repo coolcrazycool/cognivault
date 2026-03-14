@@ -38,7 +38,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 **Milestone Goal:** Transform CogniVault from a single-user service into a single-container multi-tenant platform where each user's vault is synced via obsidian-headless, all users share one CogniVault process with tenant-isolated Qdrant, and operators manage users via CLI.
 
 - [x] **Phase 15: Registry Foundation** - User registry data store with hot-reload and atomic writes (completed 2026-03-14)
-- [ ] **Phase 16: Multi-Tenant Auth** - API key resolves to user context on every request
+- [x] **Phase 16: Multi-Tenant Auth** - API key resolves to user context on every request (completed 2026-03-14)
 - [ ] **Phase 17: Data Isolation** - Per-user Qdrant filtering and separate SQLite databases
 - [ ] **Phase 18: Per-User Indexing and Routes** - Multi-tenant indexing pipeline and API route migration
 - [ ] **Phase 19: CLI and Vault Sync** - Operator CLI for user lifecycle and obsidian-headless sync management
@@ -70,10 +70,10 @@ Plans:
   2. A request with an unknown API key receives 401 Unauthorized
   3. After a user is removed from users.json and the registry reloads, that user's API key returns 401
   4. Route handlers can access request.user.userId to determine the calling tenant
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] 16-01-PLAN.md — Rewrite auth plugin with registry-backed multi-tenant auth, remove static API key, add failure counter
+- [x] 16-01-PLAN.md — Rewrite auth plugin with registry-backed multi-tenant auth, remove static API key, add failure counter
 
 ### Phase 17: Data Isolation
 **Goal**: Each user's vectors and index state are stored in isolated data structures that prevent cross-tenant access
@@ -160,7 +160,7 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 13. Search & Reindex Correctness | v1.0 | 2/2 | Complete | 2026-03-12 |
 | 14. Infrastructure Hardening & Cleanup | v1.0 | 3/3 | Complete | 2026-03-12 |
 | 15. Registry Foundation | 2/2 | Complete    | 2026-03-14 | - |
-| 16. Multi-Tenant Auth | v2.0 | 0/1 | Not started | - |
+| 16. Multi-Tenant Auth | v2.0 | 1/1 | Complete | 2026-03-14 |
 | 17. Data Isolation | v2.0 | 0/TBD | Not started | - |
 | 18. Per-User Indexing and Routes | v2.0 | 0/TBD | Not started | - |
 | 19. CLI and Vault Sync | v2.0 | 0/TBD | Not started | - |

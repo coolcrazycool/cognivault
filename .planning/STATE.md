@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
-status: completed
-stopped_at: Phase 16 context gathered
-last_updated: "2026-03-14T06:10:29.413Z"
-last_activity: 2026-03-14 — Phase 15 Plan 02 (Registry Plugin) complete
+status: in-progress
+stopped_at: Completed 16-01-PLAN.md
+last_updated: "2026-03-14T06:57:10Z"
+last_activity: 2026-03-14 — Phase 16 Plan 01 (Registry Auth) complete
 progress:
   total_phases: 6
   completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
-  percent: 10
+  total_plans: 3
+  completed_plans: 3
+  percent: 15
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-14)
 
 **Core value:** AI agents can find and retrieve the right knowledge from an Obsidian vault in under one second, with high precision across mixed Russian/English content, exact technical terms, and freeform metadata.
-**Current focus:** v2.0 Multi-User — Phase 15: Registry Foundation
+**Current focus:** v2.0 Multi-User — Phase 16: Per-User Container Stack
 
 ## Current Position
 
-Phase: 15 of 20 (Registry Foundation) — first of 6 v2.0 phases
-Plan: 02 of 2 complete (Registry Plugin)
-Status: Plan 15-02 complete
-Last activity: 2026-03-14 — Phase 15 Plan 02 (Registry Plugin) complete
+Phase: 16 of 20 (Per-User Container Stack) — second of 6 v2.0 phases
+Plan: 01 complete (Registry Auth)
+Status: Plan 16-01 complete
+Last activity: 2026-03-14 — Phase 16 Plan 01 (Registry Auth) complete
 
-Progress: [█░░░░░░░░░] 10%
+Progress: [█▌░░░░░░░░] 15%
 
 ## Performance Metrics
 
@@ -55,6 +55,10 @@ All decisions logged in PROJECT.md Key Decisions table.
 - Expose prom-client Registry on fastify.metrics.promRegistry for shared metric registration (2026-03-14)
 - Registry plugin depends on metrics plugin; registration order: metrics -> registry -> auth (2026-03-14)
 - mkdir(recursive) for data directory in registry plugin before loading users.json (2026-03-14)
+- Auth plugin depends on registry and metrics via fp() dependencies array (2026-03-14)
+- Single generic 401 response for all auth failure modes — no information leakage (2026-03-14)
+- Auth failure counter on shared promRegistry for Prometheus scraping (2026-03-14)
+- request.log enriched with userId via child logger after successful auth (2026-03-14)
 
 ### Roadmap Evolution
 
@@ -72,6 +76,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T06:10:29.410Z
-Stopped at: Phase 16 context gathered
-Resume file: .planning/phases/16-per-user-container-stack/16-CONTEXT.md
+Last session: 2026-03-14T06:57:10Z
+Stopped at: Completed 16-01-PLAN.md
+Resume file: .planning/phases/16-per-user-container-stack/16-01-SUMMARY.md
