@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
 status: in-progress
-stopped_at: Phase 20 context gathered
-last_updated: "2026-03-14T12:34:56.244Z"
+stopped_at: Completed 20-docker-and-integration-hardening-02-PLAN.md
+last_updated: "2026-03-14T13:26:19.959Z"
 last_activity: 2026-03-14 — Phase 19 Plan 02 (Sync Plugin) complete
 progress:
   total_phases: 6
   completed_phases: 4
-  total_plans: 11
-  completed_plans: 10
+  total_plans: 14
+  completed_plans: 11
   percent: 67
 ---
 
@@ -78,6 +78,8 @@ All decisions logged in PROJECT.md Key Decisions table.
 - [Phase 19]: unlinkSync for lock file cleanup instead of async unlink -- avoids async chains in setTimeout restart callbacks (2026-03-14)
 - [Phase 19]: Backoff use-then-increase pattern: use current delay for timer, multiply for next failure (2026-03-14)
 - [Phase 19]: onClose SIGKILL fire-and-forget -- not awaited to prevent blocking server shutdown (2026-03-14)
+- [Phase 20]: Use allValue='.*' in Grafana user_id variable (not empty string) so All selection uses regex match-all
+- [Phase 20]: prom-client .remove() on user-removed event to purge stale label combinations instead of .set(0)
 
 ### Roadmap Evolution
 
@@ -95,6 +97,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T12:34:56.241Z
-Stopped at: Phase 20 context gathered
-Resume file: .planning/phases/20-docker-and-integration-hardening/20-CONTEXT.md
+Last session: 2026-03-14T13:26:19.957Z
+Stopped at: Completed 20-docker-and-integration-hardening-02-PLAN.md
+Resume file: None
