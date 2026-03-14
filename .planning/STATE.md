@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
 status: in-progress
-stopped_at: Completed 19-01-PLAN.md
-last_updated: "2026-03-14T11:40:56Z"
-last_activity: 2026-03-14 — Phase 19 Plan 01 (CLI User Management) complete
+stopped_at: Completed 19-02-PLAN.md
+last_updated: "2026-03-14T11:55:29Z"
+last_activity: 2026-03-14 — Phase 19 Plan 02 (Sync Plugin) complete
 progress:
   total_phases: 6
   completed_phases: 4
   total_plans: 11
-  completed_plans: 9
-  percent: 82
+  completed_plans: 10
+  percent: 91
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-14)
 ## Current Position
 
 Phase: 19 of 20 (CLI and Vault Sync) — fifth of 6 v2.0 phases
-Plan: 01 of 03 complete (CLI User Management)
+Plan: 02 of 03 complete (Sync Plugin)
 Status: in-progress
-Last activity: 2026-03-14 — Phase 19 Plan 01 (CLI User Management) complete
+Last activity: 2026-03-14 — Phase 19 Plan 02 (Sync Plugin) complete
 
-Progress: [███░░░░░░░] 33%
+Progress: [██████░░░░] 67%
 
 ## Performance Metrics
 
@@ -75,6 +75,9 @@ All decisions logged in PROJECT.md Key Decisions table.
 - [Phase 19]: Extract CLI handler functions from Commander actions for direct testability (2026-03-14)
 - [Phase 19]: SYNC_STATUS always 'unknown' in CLI -- no server access from offline CLI (2026-03-14)
 - [Phase 19]: Use promisify(execFile) for subprocess calls to ob CLI (2026-03-14)
+- [Phase 19]: unlinkSync for lock file cleanup instead of async unlink -- avoids async chains in setTimeout restart callbacks (2026-03-14)
+- [Phase 19]: Backoff use-then-increase pattern: use current delay for timer, multiply for next failure (2026-03-14)
+- [Phase 19]: onClose SIGKILL fire-and-forget -- not awaited to prevent blocking server shutdown (2026-03-14)
 
 ### Roadmap Evolution
 
@@ -92,6 +95,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T11:40:56Z
-Stopped at: Completed 19-01-PLAN.md
-Resume file: .planning/phases/19-cli-and-vault-sync/19-01-SUMMARY.md
+Last session: 2026-03-14T11:55:29Z
+Stopped at: Completed 19-02-PLAN.md
+Resume file: .planning/phases/19-cli-and-vault-sync/19-02-SUMMARY.md
