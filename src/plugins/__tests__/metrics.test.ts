@@ -57,19 +57,19 @@ process.env.COGNIVAULT_DATA_DIR = dataDir;
 
 const { buildApp } = await import('../../app.js');
 
+let app: FastifyInstance;
+
+beforeAll(async () => {
+  app = await buildApp({ logger: false });
+  await app.ready();
+});
+
+afterAll(async () => {
+  await app.close();
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
 describe('/metrics endpoint', () => {
-  let app: FastifyInstance;
-
-  beforeAll(async () => {
-    app = await buildApp({ logger: false });
-    await app.ready();
-  });
-
-  afterAll(async () => {
-    await app.close();
-    await fs.rm(tmpDir, { recursive: true, force: true });
-  });
-
   it('returns 200 without Authorization header (no auth required)', async () => {
     const response = await app.inject({
       method: 'GET',
@@ -161,17 +161,6 @@ describe('/metrics endpoint', () => {
 });
 
 describe('metrics user_id labels', () => {
-  let app: FastifyInstance;
-
-  beforeAll(async () => {
-    app = await buildApp({ logger: false });
-    await app.ready();
-  });
-
-  afterAll(async () => {
-    await app.close();
-  });
-
   it('searchDuration records with type and user_id labels', async () => {
     const timer = app.metrics.searchDuration.startTimer({ type: 'semantic', user_id: 'alice' });
     timer();

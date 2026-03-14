@@ -3,13 +3,15 @@ import fp from 'fastify-plugin';
 import { Counter, collectDefaultMetrics, Gauge, Histogram, Registry } from 'prom-client';
 
 interface MetricsCollection {
-  searchDuration: Histogram<'type'>;
-  searchRequests: Counter<'type'>;
-  indexQueueDepth: Gauge;
-  staleVectorCleanups: Counter;
-  embeddingRequests: Counter;
-  chunksProcessed: Counter;
-  pipelineDuration: Histogram;
+  searchDuration: Histogram<'type' | 'user_id'>;
+  searchRequests: Counter<'type' | 'user_id'>;
+  indexQueueDepth: Gauge<'user_id'>;
+  staleVectorCleanups: Counter<'user_id'>;
+  embeddingRequests: Counter<'user_id'>;
+  chunksProcessed: Counter<'user_id'>;
+  pipelineDuration: Histogram<'user_id'>;
+  contextPacks: Counter<'user_id'>;
+  removeUserMetrics: (userId: string) => void;
   promRegistry: Registry;
 }
 
@@ -26,58 +28,86 @@ async function metricsPlugin(fastify: FastifyInstance): Promise<void> {
   // Collect default Node.js process metrics (CPU, memory, event loop lag, etc.)
   collectDefaultMetrics({ register });
 
-  // Search latency histogram by search type
+  // Search latency histogram by search type and user
   const searchDuration = new Histogram({
     name: 'cognivault_search_duration_seconds',
     help: 'Duration of search requests in seconds',
-    labelNames: ['type'] as const,
+    labelNames: ['type', 'user_id'] as const,
     buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5],
     registers: [register],
   });
 
-  // Search throughput counter by search type
+  // Search throughput counter by search type and user
   const searchRequests = new Counter({
     name: 'cognivault_search_requests_total',
     help: 'Total number of search requests',
-    labelNames: ['type'] as const,
+    labelNames: ['type', 'user_id'] as const,
     registers: [register],
   });
 
-  // Index queue depth gauge (active + pending tasks)
+  // Index queue depth gauge per user
   const indexQueueDepth = new Gauge({
     name: 'cognivault_index_queue_depth',
     help: 'Current number of items in the index processing queue',
+    labelNames: ['user_id'] as const,
     registers: [register],
   });
 
-  // Stale vector cleanup counter
+  // Stale vector cleanup counter per user
   const staleVectorCleanups = new Counter({
     name: 'cognivault_stale_vector_cleanups_total',
     help: 'Total number of stale vector cleanup operations',
+    labelNames: ['user_id'] as const,
     registers: [register],
   });
 
-  // Total embedding API calls counter
+  // Total embedding API calls counter per user
   const embeddingRequests = new Counter({
     name: 'cognivault_embedding_requests_total',
     help: 'Total number of embedding API calls made',
+    labelNames: ['user_id'] as const,
     registers: [register],
   });
 
-  // Total chunks processed through the indexing pipeline counter
+  // Total chunks processed through the indexing pipeline counter per user
   const chunksProcessed = new Counter({
     name: 'cognivault_chunks_processed_total',
     help: 'Total number of chunks processed through the indexing pipeline',
+    labelNames: ['user_id'] as const,
     registers: [register],
   });
 
-  // End-to-end per-file pipeline processing duration histogram
+  // End-to-end per-file pipeline processing duration histogram per user
   const pipelineDuration = new Histogram({
     name: 'cognivault_pipeline_duration_seconds',
     help: 'End-to-end duration of file processing through the indexing pipeline',
+    labelNames: ['user_id'] as const,
     buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
     registers: [register],
   });
+
+  // Context packs assembled counter per user
+  const contextPacks = new Counter({
+    name: 'cognivault_context_packs_total',
+    help: 'Total context packs assembled',
+    labelNames: ['user_id'] as const,
+    registers: [register],
+  });
+
+  // Remove all metric label combinations for a specific user
+  function removeUserMetrics(userId: string): void {
+    const searchTypes = ['semantic', 'hybrid', 'lexical'];
+    for (const type of searchTypes) {
+      searchDuration.remove({ type, user_id: userId });
+      searchRequests.remove({ type, user_id: userId });
+    }
+    indexQueueDepth.remove({ user_id: userId });
+    staleVectorCleanups.remove({ user_id: userId });
+    embeddingRequests.remove({ user_id: userId });
+    chunksProcessed.remove({ user_id: userId });
+    pipelineDuration.remove({ user_id: userId });
+    contextPacks.remove({ user_id: userId });
+  }
 
   // Decorate fastify with the metrics collection
   fastify.decorate('metrics', {
@@ -88,6 +118,8 @@ async function metricsPlugin(fastify: FastifyInstance): Promise<void> {
     embeddingRequests,
     chunksProcessed,
     pipelineDuration,
+    contextPacks,
+    removeUserMetrics,
     promRegistry: register,
   });
 

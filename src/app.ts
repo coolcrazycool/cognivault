@@ -103,10 +103,10 @@ export async function buildApp(opts?: BuildAppOptions): Promise<FastifyInstance>
   // TOON content negotiation plugin (after auth, before infrastructure)
   await app.register(toonPlugin);
 
-  // Infrastructure plugins (order: vault, embedding, qdrant must come before db)
+  // Infrastructure plugins (order: vault, qdrant before db; embedding depends on registry)
   await app.register(vaultPlugin);
-  await app.register(embeddingPlugin);
   await app.register(qdrantPlugin);
+  await app.register(embeddingPlugin);
   await app.register(dbPlugin);
   // TODO Phase 18: Re-enable indexer and pipeline with per-user context
   // await app.register(indexerPlugin);

@@ -1,12 +1,9 @@
-import fp from 'fastify-plugin';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { EmbeddingProvider } from '../../lib/embedding.js';
 import { TenantQdrantClient } from '../../lib/tenant-qdrant-client.js';
 
 // Set required env vars before any imports that trigger config parsing
 beforeAll(() => {
   process.env.VAULT_PATH = '/tmp/test-vault';
-  process.env.OPENAI_API_KEY = 'test-openai-key';
   process.env.QDRANT_URL = 'http://localhost:6333';
 });
 
@@ -25,21 +22,6 @@ vi.mock('@qdrant/js-client-rest', () => {
   return { QdrantClient: MockQdrantClient };
 });
 
-// Create a fake embedder plugin that satisfies the 'embedder' dependency
-const fakeEmbedder: EmbeddingProvider = {
-  dimensions: 1536,
-  embed: vi.fn().mockResolvedValue([]),
-};
-
-function createEmbedderPlugin() {
-  return fp(
-    async (fastify) => {
-      fastify.decorate('embedder', fakeEmbedder);
-    },
-    { name: 'embedder' },
-  );
-}
-
 describe('qdrantPlugin', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -55,7 +37,6 @@ describe('qdrantPlugin', () => {
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
     await app.register(qdrantPlugin);
     await app.ready();
 
@@ -76,7 +57,6 @@ describe('qdrantPlugin', () => {
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
     await app.register(qdrantPlugin);
     await app.ready();
 
@@ -94,7 +74,6 @@ describe('qdrantPlugin', () => {
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
     await app.register(qdrantPlugin);
     await app.ready();
 
@@ -122,7 +101,6 @@ describe('qdrantPlugin', () => {
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
     await app.register(qdrantPlugin);
     await app.ready();
 
@@ -147,7 +125,6 @@ describe('qdrantPlugin', () => {
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
     await app.register(qdrantPlugin);
     await app.ready();
 
@@ -169,7 +146,6 @@ describe('qdrantPlugin', () => {
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
     await app.register(qdrantPlugin);
     await app.ready();
 
@@ -194,7 +170,6 @@ describe('qdrantPlugin', () => {
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
     await app.register(qdrantPlugin);
     await app.ready();
 
@@ -214,7 +189,6 @@ describe('qdrantPlugin', () => {
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
     await app.register(qdrantPlugin);
     await app.ready();
 
@@ -241,7 +215,6 @@ describe('qdrantPlugin', () => {
     const { default: qdrantPlugin } = await import('../qdrant.js');
 
     const app = Fastify({ logger: false });
-    await app.register(createEmbedderPlugin());
     await app.register(qdrantPlugin);
     await app.ready();
 

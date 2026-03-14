@@ -2,6 +2,7 @@ import { QdrantClient } from '@qdrant/js-client-rest';
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import { config } from '../config.js';
+import { DIMENSION_MAP } from '../lib/embedding.js';
 import { TenantQdrantClient } from '../lib/tenant-qdrant-client.js';
 
 declare module 'fastify' {
@@ -25,6 +26,13 @@ const PAYLOAD_INDEXES: Array<{ field: string; type: 'keyword' | 'integer' }> = [
 ];
 
 async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
+  const dimensions = DIMENSION_MAP[config.EMBEDDING_MODEL];
+  if (dimensions === undefined) {
+    throw new Error(
+      `Unknown embedding model: "${config.EMBEDDING_MODEL}". Known models: ${Object.keys(DIMENSION_MAP).join(', ')}`,
+    );
+  }
+
   const client = new QdrantClient({ url: config.QDRANT_URL });
 
   // Check if collection exists; create if not (idempotent restarts)
@@ -34,7 +42,7 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
   if (!exists) {
     await client.createCollection(COLLECTION_NAME, {
       vectors: {
-        size: fastify.embedder.dimensions,
+        size: dimensions,
         distance: 'Cosine',
       },
     });
@@ -95,4 +103,4 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
   });
 }
 
-export default fp(qdrantPlugin, { name: 'qdrant', dependencies: ['embedder'] });
+export default fp(qdrantPlugin, { name: 'qdrant', dependencies: [] });
