@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock child_process before importing the module under test
 vi.mock('node:child_process', () => ({
@@ -23,8 +23,6 @@ vi.mock('../../lib/user-registry.js', () => {
   MockUserRegistry.generateApiKey = vi.fn().mockReturnValue('cv-test-api-key-123');
   return { UserRegistry: MockUserRegistry };
 });
-
-import { UserRegistry } from '../../lib/user-registry.js';
 
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';

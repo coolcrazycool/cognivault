@@ -1,5 +1,5 @@
 import { execFile as execFileCb } from 'node:child_process';
-import { readFile, mkdir } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { Command } from 'commander';
@@ -23,8 +23,7 @@ export async function handleAddUser(name: string, options: AddUserOptions): Prom
   await execFileAsync('ob', ['login', '--email', obsidianEmail, '--password', obsidianPassword]);
 
   // Step 2: Read auth token
-  const configHome =
-    process.env['XDG_CONFIG_HOME'] || path.join(process.env['HOME'] || '', '.config');
+  const configHome = process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || '', '.config');
   const tokenPath = path.join(configHome, 'obsidian-headless', 'auth_token');
   const token = await readFile(tokenPath, 'utf-8');
 
@@ -67,7 +66,7 @@ export function registerAddUser(program: Command): void {
     .requiredOption('--obsidian-password <password>', 'Obsidian account password')
     .requiredOption('--vault <vault>', 'Obsidian vault name')
     .requiredOption('--openai-key <key>', 'OpenAI API key')
-    .option('--data-dir <path>', 'Data directory', process.env['COGNIVAULT_DATA_DIR'] || './data')
+    .option('--data-dir <path>', 'Data directory', process.env.COGNIVAULT_DATA_DIR || './data')
     .action(async (name: string, opts: AddUserOptions) => {
       try {
         await handleAddUser(name, opts);
