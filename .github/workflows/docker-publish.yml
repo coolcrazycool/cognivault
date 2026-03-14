@@ -14,9 +14,36 @@ permissions:
   packages: write
 
 jobs:
+  test:
+    name: Lint, typecheck, and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint and typecheck
+        run: pnpm check
+
+      - name: Run tests
+        run: pnpm test
+
   build-and-push:
     name: Build and push Docker image to GHCR
     runs-on: ubuntu-latest
+    needs: test
 
     steps:
       - name: Checkout repository
