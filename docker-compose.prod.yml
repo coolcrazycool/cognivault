@@ -1,14 +1,9 @@
-# Production docker-compose for CogniVault.
-# Deploys from the pre-built image on GitHub Container Registry (GHCR).
-# No source checkout required — pull and run on any server:
-#   docker compose -f docker-compose.prod.yml up -d
-
 services:
   cognivault:
     image: ghcr.io/coolcrazycool/cognivault:latest
     restart: unless-stopped
     ports:
-      - "${PORT:-3000}:3000"
+      - "${COGNIVAULT_PORT:-3030}:3000"
     environment:
       - QDRANT_URL=http://qdrant:6333
       - LOG_LEVEL=${LOG_LEVEL:-info}
