@@ -38,7 +38,7 @@ jobs:
         run: pnpm check
 
       - name: Run tests
-        run: pnpm test
+        run: touch .env && pnpm test
 
   build-and-push:
     name: Build and push Docker image to GHCR
