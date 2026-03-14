@@ -115,12 +115,12 @@ Plans:
   3. `cognivault-ctl list-users` displays all users with their sync status and vault path
   4. Each user's vault sync runs as a supervised child process that auto-restarts with exponential backoff on failure
   5. Stale .obsidian/.sync.lock files are cleaned up before every sync process start
-**Plans**: TBD
+**Plans:** 3 plans
 
 Plans:
-- [ ] 19-01: TBD
-- [ ] 19-02: TBD
-- [ ] 19-03: TBD
+- [ ] 19-01-PLAN.md — CLI entrypoint with Commander.js, add-user/remove-user/list-users commands
+- [ ] 19-02-PLAN.md — Sync plugin with child process supervision, backoff, and metrics
+- [ ] 19-03-PLAN.md — App.ts integration and human verification checkpoint
 
 ### Phase 20: Docker and Integration Hardening
 **Goal**: CogniVault runs as a production-ready multi-tenant container with verified tenant isolation and per-user observability dashboards
@@ -164,5 +164,5 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 16. Multi-Tenant Auth | v2.0 | Complete    | 2026-03-14 | 2026-03-14 |
 | 17. Data Isolation | 2/2 | Complete    | 2026-03-14 | - |
 | 18. Per-User Indexing and Routes | 3/3 | Complete    | 2026-03-14 | - |
-| 19. CLI and Vault Sync | v2.0 | 0/TBD | Not started | - |
+| 19. CLI and Vault Sync | v2.0 | 0/3 | Not started | - |
 | 20. Docker and Integration Hardening | v2.0 | 0/TBD | Not started | - |
