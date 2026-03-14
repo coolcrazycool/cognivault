@@ -5,7 +5,7 @@ milestone_name: null
 status: between_milestones
 stopped_at: v2.0 milestone archived
 last_updated: "2026-03-14"
-last_activity: 2026-03-14 — v2.0 Multi-User milestone archived
+last_activity: 2026-03-14 - Completed quick task 1: Add CI workflow for Docker image build and publish to GHCR
 progress:
   total_phases: 0
   completed_phases: 0
@@ -52,6 +52,12 @@ None.
 ### Blockers/Concerns
 
 None — previous obsidian-headless concerns resolved during v2.0.
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 1 | Add CI workflow for Docker image build and publish to GHCR | 2026-03-14 | 5a7ecfc | [1-add-ci-workflow-for-docker-image-build-a](./quick/1-add-ci-workflow-for-docker-image-build-a/) |
 
 ## Session Continuity
 
