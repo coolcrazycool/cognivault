@@ -1,7 +1,32 @@
 node_modules
 dist
+*.tsbuildinfo
+
+# Environment
 .env
+.env.local
+.env.*.local
+
+# Logs
 *.log
+
+# OS
 .DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# Test
 coverage
+
+# Runtime data
 __vault
+*.sqlite
+*.sqlite-journal
+
+# Planning (internal)
+.planning/

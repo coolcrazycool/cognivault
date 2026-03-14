@@ -15,9 +15,23 @@
     "check": "biome check src/ && tsc --noEmit",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "obsidian",
+    "knowledge-base",
+    "ai-agents",
+    "vector-search",
+    "qdrant",
+    "fastify",
+    "semantic-search",
+    "rag",
+    "embeddings",
+    "vault"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coolcrazycool/cognivault.git"
+  },
   "bin": {
     "cognivault-ctl": "dist/cli/index.js"
   },
