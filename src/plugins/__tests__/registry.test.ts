@@ -59,7 +59,6 @@ const testUsers: UserRecord[] = [
 // Write users.json before importing app (config parsed at import time)
 await fs.writeFile(path.join(dataDir, 'users.json'), JSON.stringify(testUsers, null, 2));
 
-process.env.COGNIVAULT_API_KEY = 'test-api-key-registry';
 process.env.VAULT_PATH = vaultRoot;
 process.env.OPENAI_API_KEY = 'test-openai-key-registry';
 process.env.COGNIVAULT_DATA_DIR = dataDir;

@@ -38,10 +38,23 @@ const vaultRoot = path.join(tmpDir, 'vault');
 await fs.mkdir(vaultRoot, { recursive: true });
 
 // Set env vars before any module imports that trigger config parsing
-process.env.COGNIVAULT_API_KEY = 'test-api-key-logging';
+const dataDir = path.join(tmpDir, 'data-logging');
+await fs.mkdir(dataDir, { recursive: true });
+await fs.writeFile(
+  path.join(dataDir, 'users.json'),
+  JSON.stringify([
+    {
+      userId: 'test-user',
+      apiKey: 'cv-test-key-001',
+      vaultPath: vaultRoot,
+      openaiKey: 'test-openai-key-logging',
+      obsidian: { email: 'test@test.com', password: 'secret', vault: 'test-vault' },
+    },
+  ]),
+);
 process.env.VAULT_PATH = vaultRoot;
 process.env.OPENAI_API_KEY = 'test-openai-key-logging';
-process.env.COGNIVAULT_DATA_DIR = path.join(tmpDir, 'data-logging');
+process.env.COGNIVAULT_DATA_DIR = dataDir;
 
 const { buildApp } = await import('../../app.js');
 

@@ -42,7 +42,6 @@ await fs.mkdir(vaultRoot, { recursive: true });
 await fs.writeFile(path.join(vaultRoot, 'test-note.md'), '# Test Note\n\nHello world', 'utf-8');
 
 // Set env vars before any module imports that trigger config parsing
-process.env.COGNIVAULT_API_KEY = 'test-api-key';
 process.env.VAULT_PATH = vaultRoot;
 process.env.COGNIVAULT_DATA_DIR = dataDir;
 process.env.OPENAI_API_KEY = 'test-openai-key';

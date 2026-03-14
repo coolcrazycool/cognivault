@@ -167,9 +167,9 @@ describe('UserRegistry', () => {
       const registry = new UserRegistry({ filePath });
       await registry.load();
 
-      await expect(
-        registry.addUser(makeUser({ apiKey: 'cv-different' })),
-      ).rejects.toThrow(/duplicate/i);
+      await expect(registry.addUser(makeUser({ apiKey: 'cv-different' }))).rejects.toThrow(
+        /duplicate/i,
+      );
     });
 
     it('removeUser removes from lookups and writes to disk', async () => {

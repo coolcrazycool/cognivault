@@ -41,7 +41,11 @@ interface RegistryEvents {
 
 interface UserRegistryOptions {
   filePath: string;
-  logger?: { info: (...args: unknown[]) => void; warn: (...args: unknown[]) => void; error: (...args: unknown[]) => void };
+  logger?: {
+    info: (...args: unknown[]) => void;
+    warn: (...args: unknown[]) => void;
+    error: (...args: unknown[]) => void;
+  };
   onReload?: (status: 'success' | 'rejected') => void;
   onUserCountChange?: (count: number) => void;
 }
@@ -268,10 +272,7 @@ export class UserRegistry extends EventEmitter<RegistryEvents> {
     this.onUserCountChangeCb?.(this.getUserCount());
   }
 
-  private diffUsers(
-    oldMap: Map<string, UserRecord>,
-    newMap: Map<string, UserRecord>,
-  ): void {
+  private diffUsers(oldMap: Map<string, UserRecord>, newMap: Map<string, UserRecord>): void {
     // Find added and updated
     for (const [userId, newUser] of newMap) {
       const oldUser = oldMap.get(userId);

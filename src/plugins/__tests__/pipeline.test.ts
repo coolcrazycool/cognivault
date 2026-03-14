@@ -42,7 +42,6 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 // Set required env vars before any imports that trigger config parsing
 beforeAll(() => {
-  process.env.COGNIVAULT_API_KEY = 'test-api-key';
   process.env.VAULT_PATH = '/tmp/test-vault';
   process.env.OPENAI_API_KEY = 'test-openai-key';
   process.env.QDRANT_URL = 'http://localhost:6333';

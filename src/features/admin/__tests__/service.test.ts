@@ -3,7 +3,6 @@ import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Set env vars before any module imports that trigger config parsing
-process.env.COGNIVAULT_API_KEY = 'test-admin-key';
 process.env.VAULT_PATH = '/tmp/test-vault';
 
 // ── Mocks ──

@@ -1,8 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { Registry as PromRegistry } from 'prom-client';
+
 // Set env vars before any module imports that trigger config parsing
-process.env.COGNIVAULT_API_KEY = 'test-api-key';
 process.env.VAULT_PATH = '/tmp/test-vault-swagger';
 process.env.COGNIVAULT_DATA_DIR = '/tmp/test-cognivault-swagger';
 process.env.OPENAI_API_KEY = 'test-openai-key';
@@ -28,6 +29,29 @@ async function buildTestApp(): Promise<FastifyInstance> {
   const { default: fp } = await import('fastify-plugin');
 
   const app = Fastify({ logger: false });
+
+  // Mock metrics plugin (named, for auth dependency resolution)
+  await app.register(
+    fp(
+      async (f) => {
+        const promRegistry = new PromRegistry();
+        f.decorate('metrics', { promRegistry } as unknown as FastifyInstance['metrics']);
+      },
+      { name: 'metrics' },
+    ),
+  );
+
+  // Mock registry plugin (named, for auth dependency resolution)
+  await app.register(
+    fp(
+      async (f) => {
+        f.decorate('registry', {
+          getUserByApiKey: () => undefined,
+        } as unknown as FastifyInstance['registry']);
+      },
+      { name: 'registry' },
+    ),
+  );
 
   // Register error handler
   const { default: errorHandler } = await import('../../plugins/error-handler.js');

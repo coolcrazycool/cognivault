@@ -1,8 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { Registry as PromRegistry } from 'prom-client';
+
 // Set env vars before any module imports that trigger config parsing
-process.env.COGNIVAULT_API_KEY = 'test-search-key';
 process.env.VAULT_PATH = '/tmp/test-vault';
 process.env.OPENAI_API_KEY = 'test-openai-key';
 
@@ -87,12 +88,45 @@ async function buildTestApp(): Promise<FastifyInstance> {
   app.decorate('qdrant', mockQdrant as any);
   // biome-ignore lint/suspicious/noExplicitAny: test mock — intentionally partial EmbeddingProvider
   app.decorate('embedder', mockEmbedder as any);
-  app.decorate('metrics', {
-    searchDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
-    searchRequests: { inc: vi.fn() },
-    indexQueueDepth: { set: vi.fn() },
-    staleVectorCleanups: { inc: vi.fn() },
-  } as unknown as FastifyInstance['metrics']);
+  const { default: fp } = await import('fastify-plugin');
+
+  // Mock metrics plugin (named, for auth dependency resolution)
+  await app.register(
+    fp(
+      async (f) => {
+        const promRegistry = new PromRegistry();
+        f.decorate('metrics', {
+          promRegistry,
+          searchDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
+          searchRequests: { inc: vi.fn() },
+          indexQueueDepth: { set: vi.fn() },
+          staleVectorCleanups: { inc: vi.fn() },
+        } as unknown as FastifyInstance['metrics']);
+      },
+      { name: 'metrics' },
+    ),
+  );
+
+  // Mock registry plugin (named, for auth dependency resolution)
+  await app.register(
+    fp(
+      async (f) => {
+        f.decorate('registry', {
+          getUserByApiKey: (key: string) =>
+            key === 'cv-test-search-key'
+              ? {
+                  userId: 'test-user',
+                  apiKey: 'cv-test-search-key',
+                  vaultPath: '/tmp/test-vault',
+                  openaiKey: 'test-openai-key',
+                  obsidian: { email: 'test@test.com', password: 'secret', vault: 'v' },
+                }
+              : undefined,
+        } as unknown as FastifyInstance['registry']);
+      },
+      { name: 'registry' },
+    ),
+  );
 
   // Register error handler (converts validation errors to proper 400 responses)
   const { default: errorHandler } = await import('../../../plugins/error-handler.js');
@@ -136,7 +170,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test query' },
       });
 
@@ -165,7 +199,7 @@ describe('search routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'embedding test' },
       });
 
@@ -183,7 +217,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', limit: 5 },
       });
 
@@ -198,7 +232,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: '' },
       });
 
@@ -220,7 +254,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test' },
       });
 
@@ -236,7 +270,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', limit: 7 },
       });
 
@@ -284,7 +318,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', filters: { folder: 'Projects/' } },
       });
 
@@ -300,7 +334,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test query' },
       });
 
@@ -317,7 +351,7 @@ describe('search routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'hybrid test' },
       });
 
@@ -329,7 +363,7 @@ describe('search routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'hybrid test', limit: 5 },
       });
 
@@ -344,7 +378,7 @@ describe('search routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'hybrid test', limit: 5 },
       });
 
@@ -392,7 +426,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'shared', limit: 10 },
       });
 
@@ -412,7 +446,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test' },
       });
 
@@ -427,7 +461,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test' },
       });
 
@@ -440,7 +474,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test' },
       });
 
@@ -456,7 +490,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: '' },
       });
 
@@ -478,7 +512,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', limit: 6 },
       });
 
@@ -556,7 +590,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', filters: { folder: 'Projects/' } },
       });
 
@@ -575,7 +609,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/lexical',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'ingestion' },
       });
 
@@ -593,7 +627,7 @@ describe('search routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/lexical',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'ingestion' },
       });
 
@@ -617,7 +651,7 @@ describe('search routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/lexical',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', filters: { tags: ['project-a'] } },
       });
 
@@ -668,7 +702,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/lexical',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', filters: { folder: 'Projects/' } },
       });
 
@@ -682,7 +716,7 @@ describe('search routes', () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/lexical',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', filters: { type: 'meeting-note' } },
       });
 
@@ -711,7 +745,7 @@ describe('search routes', () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/lexical',
-        headers: { authorization: 'Bearer test-search-key', 'content-type': 'application/json' },
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
         payload: { query: 'test', limit: 3 },
       });
 

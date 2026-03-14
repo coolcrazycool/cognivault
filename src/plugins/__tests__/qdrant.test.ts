@@ -4,7 +4,6 @@ import type { EmbeddingProvider } from '../../lib/embedding.js';
 
 // Set required env vars before any imports that trigger config parsing
 beforeAll(() => {
-  process.env.COGNIVAULT_API_KEY = 'test-api-key';
   process.env.VAULT_PATH = '/tmp/test-vault';
   process.env.OPENAI_API_KEY = 'test-openai-key';
   process.env.QDRANT_URL = 'http://localhost:6333';
