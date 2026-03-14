@@ -40,8 +40,8 @@ Requirements for multi-user deployment. Each maps to roadmap phases.
 
 ### Container Infrastructure
 
-- [ ] **INFRA-01**: Single Dockerfile based on node:22-slim with tini as PID 1 and obsidian-headless installed globally
-- [ ] **INFRA-02**: Docker Compose defines one CogniVault service + Qdrant + Prometheus + Grafana
+- [x] **INFRA-01**: Single Dockerfile based on node:22-slim with tini as PID 1 and obsidian-headless installed globally
+- [x] **INFRA-02**: Docker Compose defines one CogniVault service + Qdrant + Prometheus + Grafana
 - [ ] **INFRA-03**: End-to-end integration test verifies two users cannot access each other's data
 
 ## Future Requirements
@@ -103,8 +103,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OBS-01 | Phase 18 | Complete |
 | OBS-02 | Phase 20 | Complete |
 | OBS-03 | Phase 20 | Complete |
-| INFRA-01 | Phase 20 | Pending |
-| INFRA-02 | Phase 20 | Pending |
+| INFRA-01 | Phase 20 | Complete |
+| INFRA-02 | Phase 20 | Complete |
 | INFRA-03 | Phase 20 | Pending |
 
 **Coverage:**
