@@ -1,19 +1,32 @@
-import bearerAuth from '@fastify/bearer-auth';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
-import { config } from '../config.js';
+import { Counter } from 'prom-client';
+import type { UserRecord } from '../lib/user-registry.js';
+
+declare module 'fastify' {
+  interface FastifyRequest {
+    user?: UserRecord;
+  }
+}
+
+function extractBearerToken(request: FastifyRequest): string | undefined {
+  const header = request.headers.authorization;
+  if (!header || !header.startsWith('Bearer ')) {
+    return undefined;
+  }
+  return header.slice(7);
+}
+
+const UNAUTHORIZED_RESPONSE = {
+  error: { code: 'UNAUTHORIZED', message: 'Invalid or missing API key' },
+} as const;
 
 async function authPlugin(fastify: FastifyInstance): Promise<void> {
-  await fastify.register(bearerAuth, {
-    keys: new Set([config.COGNIVAULT_API_KEY]),
-    addHook: false,
+  const authFailures = new Counter({
+    name: 'cognivault_auth_failures_total',
+    help: 'Total number of authentication failures',
+    registers: [fastify.metrics.promRegistry],
   });
-
-  type VerifyFn = (
-    request: FastifyRequest,
-    reply: FastifyReply,
-    done: (err?: Error) => void,
-  ) => void;
 
   fastify.addHook('onRequest', async (request, reply) => {
     // Skip auth for routes that opt out (e.g., health/readiness)
@@ -26,19 +39,21 @@ async function authPlugin(fastify: FastifyInstance): Promise<void> {
       return;
     }
 
-    const verify = (fastify as unknown as { verifyBearerAuth: VerifyFn }).verifyBearerAuth;
-    await new Promise<void>((resolve, reject) => {
-      verify(request, reply, (err?: Error) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve();
-        }
-      });
-    });
+    const token = extractBearerToken(request);
+    if (!token) {
+      authFailures.inc();
+      return reply.status(401).send(UNAUTHORIZED_RESPONSE);
+    }
+
+    const user = fastify.registry.getUserByApiKey(token);
+    if (!user) {
+      authFailures.inc();
+      return reply.status(401).send(UNAUTHORIZED_RESPONSE);
+    }
+
+    request.user = user;
+    request.log = request.log.child({ userId: user.userId });
   });
 }
 
-export default fp(authPlugin, {
-  name: 'auth',
-});
+export default fp(authPlugin, { name: 'auth', dependencies: ['registry', 'metrics'] });
