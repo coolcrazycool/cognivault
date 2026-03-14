@@ -173,14 +173,14 @@ describe.skipIf(skip)('tenant isolation', () => {
     expect(body.results.length).toBe(0);
   });
 
-  // ── Test 2: User B gets 404 for a note path that only exists in User A's vault ─
+  // ── Test 2: Cross-user path-filtered search returns empty results ────────
 
-  it("User B gets 404 when searching for User A's specific content by note path filter", async () => {
-    // User B searches with an explicit path filter for User A's note.
-    // Because path filters are applied on top of the user_id filter,
-    // Qdrant returns no results — the route returns 200 with empty results.
-    // For file-level 404, vault routes require VAULT_PATH (v1 mode).
-    // In v2.0 search-based access, zero results = inaccessible note.
+  it("User B path-filtered search for User A content returns zero results", async () => {
+    // v2.0 multi-tenant architecture: vault routes (GET /api/vault/notes/:path)
+    // require VAULT_PATH (v1.0 single-user mode). In v2.0, all data access goes
+    // through search endpoints where TenantQdrantClient enforces user_id filtering.
+    // Zero results on path-filtered search = content is inaccessible to this user.
+    // This satisfies INFRA-03: "two users cannot access each other's data."
     const resp = await app.inject({
       method: 'POST',
       url: '/api/vault/search/semantic',
