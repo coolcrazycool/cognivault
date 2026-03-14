@@ -37,7 +37,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 
 **Milestone Goal:** Transform CogniVault from a single-user service into a single-container multi-tenant platform where each user's vault is synced via obsidian-headless, all users share one CogniVault process with tenant-isolated Qdrant, and operators manage users via CLI.
 
-- [ ] **Phase 15: Registry Foundation** - User registry data store with hot-reload and atomic writes
+- [x] **Phase 15: Registry Foundation** - User registry data store with hot-reload and atomic writes (completed 2026-03-14)
 - [ ] **Phase 16: Multi-Tenant Auth** - API key resolves to user context on every request
 - [ ] **Phase 17: Data Isolation** - Per-user Qdrant filtering and separate SQLite databases
 - [ ] **Phase 18: Per-User Indexing and Routes** - Multi-tenant indexing pipeline and API route migration
@@ -55,7 +55,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
   2. Editing users.json on disk causes the server to pick up the new configuration within seconds without restart
   3. A crash or kill during users.json write never leaves a corrupted registry file (atomic tmp+rename)
   4. A malformed users.json edit is rejected and the server continues operating with the last valid registry
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 - [ ] 15-01-PLAN.md — Standalone UserRegistry class with TDD (load, lookup, hot-reload, atomic writes, events)
@@ -159,7 +159,7 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 12. Prometheus Metrics Dashboard | v1.0 | 3/3 | Complete | 2026-03-12 |
 | 13. Search & Reindex Correctness | v1.0 | 2/2 | Complete | 2026-03-12 |
 | 14. Infrastructure Hardening & Cleanup | v1.0 | 3/3 | Complete | 2026-03-12 |
-| 15. Registry Foundation | 1/2 | In Progress|  | - |
+| 15. Registry Foundation | 2/2 | Complete   | 2026-03-14 | - |
 | 16. Multi-Tenant Auth | v2.0 | 0/TBD | Not started | - |
 | 17. Data Isolation | v2.0 | 0/TBD | Not started | - |
 | 18. Per-User Indexing and Routes | v2.0 | 0/TBD | Not started | - |

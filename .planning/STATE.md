@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
 status: executing
-stopped_at: Completed 15-01-PLAN.md
-last_updated: "2026-03-14T05:51:34Z"
-last_activity: 2026-03-14 — Phase 15 Plan 01 (UserRegistry) complete
+stopped_at: Completed 15-02-PLAN.md
+last_updated: "2026-03-14T05:57:00Z"
+last_activity: 2026-03-14 — Phase 15 Plan 02 (Registry Plugin) complete
 progress:
   total_phases: 6
   completed_phases: 0
-  total_plans: 1
-  completed_plans: 1
-  percent: 5
+  total_plans: 2
+  completed_plans: 2
+  percent: 10
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-14)
 ## Current Position
 
 Phase: 15 of 20 (Registry Foundation) — first of 6 v2.0 phases
-Plan: 01 of 1 complete (UserRegistry)
-Status: Plan 15-01 complete
-Last activity: 2026-03-14 — Phase 15 Plan 01 (UserRegistry) complete
+Plan: 02 of 2 complete (Registry Plugin)
+Status: Plan 15-02 complete
+Last activity: 2026-03-14 — Phase 15 Plan 02 (Registry Plugin) complete
 
-Progress: [█░░░░░░░░░] 5%
+Progress: [█░░░░░░░░░] 10%
 
 ## Performance Metrics
 
@@ -52,6 +52,9 @@ All decisions logged in PROJECT.md Key Decisions table.
 - fs.watch on parent directory for atomic rename-over detection (2026-03-14)
 - SHA-256 content hash for reload skip optimization (2026-03-14)
 - Deep-freeze returned records for immutability (2026-03-14)
+- Expose prom-client Registry on fastify.metrics.promRegistry for shared metric registration (2026-03-14)
+- Registry plugin depends on metrics plugin; registration order: metrics -> registry -> auth (2026-03-14)
+- mkdir(recursive) for data directory in registry plugin before loading users.json (2026-03-14)
 
 ### Roadmap Evolution
 
@@ -69,6 +72,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T05:51:34Z
-Stopped at: Completed 15-01-PLAN.md
-Resume file: .planning/phases/15-registry-foundation/15-01-SUMMARY.md
+Last session: 2026-03-14T05:57:00Z
+Stopped at: Completed 15-02-PLAN.md
+Resume file: .planning/phases/15-registry-foundation/15-02-SUMMARY.md
