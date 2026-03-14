@@ -55,11 +55,11 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
   2. Editing users.json on disk causes the server to pick up the new configuration within seconds without restart
   3. A crash or kill during users.json write never leaves a corrupted registry file (atomic tmp+rename)
   4. A malformed users.json edit is rejected and the server continues operating with the last valid registry
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] 15-01: TBD
-- [ ] 15-02: TBD
+- [ ] 15-01-PLAN.md — Standalone UserRegistry class with TDD (load, lookup, hot-reload, atomic writes, events)
+- [ ] 15-02-PLAN.md — Fastify plugin wrapper, Prometheus metrics, Pino redaction, app.ts integration
 
 ### Phase 16: Multi-Tenant Auth
 **Goal**: Every API request is authenticated against the registry and carries a resolved user context
@@ -159,7 +159,7 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 12. Prometheus Metrics Dashboard | v1.0 | 3/3 | Complete | 2026-03-12 |
 | 13. Search & Reindex Correctness | v1.0 | 2/2 | Complete | 2026-03-12 |
 | 14. Infrastructure Hardening & Cleanup | v1.0 | 3/3 | Complete | 2026-03-12 |
-| 15. Registry Foundation | v2.0 | 0/TBD | Not started | - |
+| 15. Registry Foundation | v2.0 | 0/2 | Not started | - |
 | 16. Multi-Tenant Auth | v2.0 | 0/TBD | Not started | - |
 | 17. Data Isolation | v2.0 | 0/TBD | Not started | - |
 | 18. Per-User Indexing and Routes | v2.0 | 0/TBD | Not started | - |
