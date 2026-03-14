@@ -128,6 +128,7 @@ async function buildTestApp(): Promise<FastifyInstance> {
           promRegistry,
           searchDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
           searchRequests: { inc: vi.fn() },
+          contextPacks: { inc: vi.fn() },
           indexQueueDepth: { set: vi.fn() },
           staleVectorCleanups: { inc: vi.fn() },
         } as unknown as FastifyInstance['metrics']);

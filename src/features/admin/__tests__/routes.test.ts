@@ -63,10 +63,17 @@ async function buildTestApp(): Promise<FastifyInstance> {
 
   const app = Fastify({ logger: false });
 
-  // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial VaultIndexer
-  app.decorate('indexer', mockIndexer as any);
-  // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial PQueue
-  app.decorate('pipelineQueue', mockPipelineQueue as any);
+  // Mock per-user indexers Map (keyed by userId)
+  const indexersMap = new Map();
+  indexersMap.set('test-admin', {
+    // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial VaultIndexer
+    indexer: mockIndexer as any,
+    // biome-ignore lint/suspicious/noExplicitAny: test mock -- intentionally partial PQueue
+    queue: mockPipelineQueue as any,
+    vault: {} as any,
+  });
+  app.decorate('indexers', indexersMap);
+  app.decorate('processFileChanges', vi.fn());
 
   const { default: fp } = await import('fastify-plugin');
 
