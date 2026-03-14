@@ -132,12 +132,12 @@ Plans:
   3. An end-to-end integration test proves two users cannot access each other's data through any API endpoint
   4. Grafana dashboards support filtering all panels by a user_id template variable
   5. Per-user sync process health is visible as a gauge metric in Prometheus
-**Plans**: TBD
+**Plans:** 3 plans
 
 Plans:
-- [ ] 20-01: TBD
-- [ ] 20-02: TBD
-- [ ] 20-03: TBD
+- [ ] 20-01-PLAN.md — Dockerfile rewrite (tini + obsidian-headless) and docker-compose v2.0 cleanup
+- [ ] 20-02-PLAN.md — Grafana dashboard user_id filtering and sync health panels
+- [ ] 20-03-PLAN.md — Tenant isolation integration test and Docker smoke test
 
 ## Progress
 
@@ -165,4 +165,4 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 17. Data Isolation | 2/2 | Complete    | 2026-03-14 | - |
 | 18. Per-User Indexing and Routes | 3/3 | Complete    | 2026-03-14 | - |
 | 19. CLI and Vault Sync | 2/3 | In Progress|  | - |
-| 20. Docker and Integration Hardening | v2.0 | 0/TBD | Not started | - |
+| 20. Docker and Integration Hardening | v2.0 | 0/3 | Not started | - |
