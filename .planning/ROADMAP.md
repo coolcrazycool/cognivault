@@ -70,10 +70,10 @@ Plans:
   2. A request with an unknown API key receives 401 Unauthorized
   3. After a user is removed from users.json and the registry reloads, that user's API key returns 401
   4. Route handlers can access request.user.userId to determine the calling tenant
-**Plans**: TBD
+**Plans:** 1 plan
 
 Plans:
-- [ ] 16-01: TBD
+- [ ] 16-01-PLAN.md — Rewrite auth plugin with registry-backed multi-tenant auth, remove static API key, add failure counter
 
 ### Phase 17: Data Isolation
 **Goal**: Each user's vectors and index state are stored in isolated data structures that prevent cross-tenant access
@@ -160,7 +160,7 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 13. Search & Reindex Correctness | v1.0 | 2/2 | Complete | 2026-03-12 |
 | 14. Infrastructure Hardening & Cleanup | v1.0 | 3/3 | Complete | 2026-03-12 |
 | 15. Registry Foundation | 2/2 | Complete    | 2026-03-14 | - |
-| 16. Multi-Tenant Auth | v2.0 | 0/TBD | Not started | - |
+| 16. Multi-Tenant Auth | v2.0 | 0/1 | Not started | - |
 | 17. Data Isolation | v2.0 | 0/TBD | Not started | - |
 | 18. Per-User Indexing and Routes | v2.0 | 0/TBD | Not started | - |
 | 19. CLI and Vault Sync | v2.0 | 0/TBD | Not started | - |
