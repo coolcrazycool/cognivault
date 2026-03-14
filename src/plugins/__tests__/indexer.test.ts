@@ -2,7 +2,6 @@ import * as fs from 'node:fs/promises';
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { FileChangeEvent } from '../../lib/indexer.js';
 
 // ── Mocks ──
 

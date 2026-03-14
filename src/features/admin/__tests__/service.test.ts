@@ -7,6 +7,8 @@ process.env.VAULT_PATH = '/tmp/test-vault';
 
 // ── Mocks ──
 
+const TEST_USER_ID = 'test-user-1';
+
 const mockIsIndexing = vi.fn().mockReturnValue(false);
 const mockStop = vi.fn();
 const mockStart = vi.fn();
@@ -44,6 +46,7 @@ const mockUserDb = {
 };
 
 const mockOnIdle = vi.fn().mockResolvedValue(undefined);
+const mockQueueClear = vi.fn();
 
 const mockUserQdrantDelete = vi.fn().mockResolvedValue(undefined);
 const mockUserQdrant = {
@@ -54,9 +57,19 @@ const mockUserQdrant = {
   setPayload: vi.fn(),
 };
 
-const mockFastify = {
+const mockProcessFileChanges = vi.fn();
+
+// Build indexers Map with test user entry
+const indexersMap = new Map();
+indexersMap.set(TEST_USER_ID, {
   indexer: mockIndexer,
-  pipelineQueue: { onIdle: mockOnIdle },
+  queue: { onIdle: mockOnIdle, clear: mockQueueClear, size: 0, pending: 0 },
+  vault: { vaultRootPath: '/tmp/test-vault', readContent: vi.fn() },
+});
+
+const mockFastify = {
+  indexers: indexersMap,
+  processFileChanges: mockProcessFileChanges,
 } as unknown as FastifyInstance;
 
 describe('ReindexService', () => {
@@ -84,6 +97,7 @@ describe('ReindexService', () => {
         undefined,
         mockUserDb as never,
         mockUserQdrant as never,
+        TEST_USER_ID,
       );
 
       expect(job.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
@@ -100,13 +114,13 @@ describe('ReindexService', () => {
       const service = new ReindexService(mockFastify);
 
       await expect(
-        service.createJob('full', undefined, mockUserDb as never, mockUserQdrant as never),
+        service.createJob('full', undefined, mockUserDb as never, mockUserQdrant as never, TEST_USER_ID),
       ).rejects.toThrow();
     });
 
     it('calls indexer.restart() for full reindex', async () => {
       const service = new ReindexService(mockFastify);
-      await service.createJob('full', undefined, mockUserDb as never, mockUserQdrant as never);
+      await service.createJob('full', undefined, mockUserDb as never, mockUserQdrant as never, TEST_USER_ID);
 
       expect(mockRestart).toHaveBeenCalledOnce();
     });
@@ -118,6 +132,7 @@ describe('ReindexService', () => {
         'notes/foo.md',
         mockUserDb as never,
         mockUserQdrant as never,
+        TEST_USER_ID,
       );
 
       expect(job.scope).toBe('path');
@@ -131,15 +146,16 @@ describe('ReindexService', () => {
         'projects/',
         mockUserDb as never,
         mockUserQdrant as never,
+        TEST_USER_ID,
       );
 
       expect(job.scope).toBe('folder');
       expect(job.status).toBe('completed');
     });
 
-    it('full reindex calls pipelineQueue.onIdle() before marking completed', async () => {
+    it('full reindex calls queue.onIdle() before marking completed', async () => {
       const service = new ReindexService(mockFastify);
-      await service.createJob('full', undefined, mockUserDb as never, mockUserQdrant as never);
+      await service.createJob('full', undefined, mockUserDb as never, mockUserQdrant as never, TEST_USER_ID);
 
       // Find the scanComplete handler registered via mockOn
       const scanCompleteCall = mockOn.mock.calls.find((call) => call[0] === 'scanComplete');
@@ -158,7 +174,7 @@ describe('ReindexService', () => {
 
     it('full reindex uses .on() (not .once()) for scanComplete listener', async () => {
       const service = new ReindexService(mockFastify);
-      await service.createJob('full', undefined, mockUserDb as never, mockUserQdrant as never);
+      await service.createJob('full', undefined, mockUserDb as never, mockUserQdrant as never, TEST_USER_ID);
 
       // .on() should have been called for scanComplete
       const onCalls = mockOn.mock.calls.filter((call) => call[0] === 'scanComplete');
@@ -182,6 +198,7 @@ describe('ReindexService', () => {
         undefined,
         mockUserDb as never,
         mockUserQdrant as never,
+        TEST_USER_ID,
       );
 
       // Find and invoke the scanComplete handler
@@ -207,21 +224,21 @@ describe('ReindexService', () => {
   });
 
   describe('createPathJob', () => {
-    it('path reindex emits real contentHash from DB when file exists', async () => {
+    it('path reindex uses processFileChanges with real contentHash from DB', async () => {
       mockDbGet.mockReturnValue({ contentHash: 'abc123', path: 'notes/foo.md' });
 
       const service = new ReindexService(mockFastify);
-      await service.createJob('path', 'notes/foo.md', mockUserDb as never, mockUserQdrant as never);
+      await service.createJob('path', 'notes/foo.md', mockUserDb as never, mockUserQdrant as never, TEST_USER_ID);
 
-      // The emit should have been called with the real contentHash
-      expect(mockEmit).toHaveBeenCalledOnce();
-      const emitArgs = mockEmit.mock.calls[0]!;
-      const events = emitArgs[1] as Array<{ path: string; type: string; contentHash: string }>;
+      expect(mockProcessFileChanges).toHaveBeenCalledOnce();
+      const callArgs = mockProcessFileChanges.mock.calls[0]!;
+      expect(callArgs[0]).toBe(TEST_USER_ID);
+      const events = callArgs[1] as Array<{ path: string; type: string; contentHash: string }>;
       expect(events).toHaveLength(1);
       expect(events[0]!.contentHash).toBe('abc123');
     });
 
-    it('path reindex emits empty contentHash when file not found in DB', async () => {
+    it('path reindex uses empty contentHash when file not found in DB', async () => {
       mockDbGet.mockReturnValue(undefined);
 
       const service = new ReindexService(mockFastify);
@@ -230,11 +247,12 @@ describe('ReindexService', () => {
         'notes/missing.md',
         mockUserDb as never,
         mockUserQdrant as never,
+        TEST_USER_ID,
       );
 
-      expect(mockEmit).toHaveBeenCalledOnce();
-      const emitArgs = mockEmit.mock.calls[0]!;
-      const events = emitArgs[1] as Array<{ path: string; type: string; contentHash: string }>;
+      expect(mockProcessFileChanges).toHaveBeenCalledOnce();
+      const callArgs = mockProcessFileChanges.mock.calls[0]!;
+      const events = callArgs[1] as Array<{ path: string; type: string; contentHash: string }>;
       expect(events).toHaveLength(1);
       expect(events[0]!.contentHash).toBe('');
     });
@@ -248,6 +266,7 @@ describe('ReindexService', () => {
         undefined,
         mockUserDb as never,
         mockUserQdrant as never,
+        TEST_USER_ID,
       );
       const found = service.getJob(created.id);
 

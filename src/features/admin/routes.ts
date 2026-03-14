@@ -27,6 +27,7 @@ export async function adminRoutes(fastify: FastifyInstance): Promise<void> {
           target,
           request.getUserDb(),
           request.getUserQdrant(),
+          request.user!.userId,
         );
 
         return reply.status(202).send({
