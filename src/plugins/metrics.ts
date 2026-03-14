@@ -10,6 +10,7 @@ interface MetricsCollection {
   embeddingRequests: Counter;
   chunksProcessed: Counter;
   pipelineDuration: Histogram;
+  promRegistry: Registry;
 }
 
 declare module 'fastify' {
@@ -87,6 +88,7 @@ async function metricsPlugin(fastify: FastifyInstance): Promise<void> {
     embeddingRequests,
     chunksProcessed,
     pipelineDuration,
+    promRegistry: register,
   });
 
   // Register /metrics route — skips auth (Prometheus scraping does not send auth headers)

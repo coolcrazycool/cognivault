@@ -14,6 +14,7 @@ import errorHandler from './plugins/error-handler.js';
 import indexerPlugin from './plugins/indexer.js';
 import metricsPlugin from './plugins/metrics.js';
 import pipelinePlugin from './plugins/pipeline.js';
+import registryPlugin from './plugins/registry.js';
 import qdrantPlugin from './plugins/qdrant.js';
 import swaggerPlugin from './plugins/swagger.js';
 import toonPlugin from './plugins/toon.js';
@@ -55,7 +56,12 @@ function buildLoggerOptions(logger: boolean | object | undefined): boolean | obj
   }
 
   const enrichedOptions = {
-    redact: ['req.headers.authorization'],
+    redact: [
+      'req.headers.authorization',
+      '*.openaiKey',
+      '*.obsidian.password',
+      '*.obsidian.token',
+    ],
     serializers: {
       req: serializeRequest,
     },
@@ -88,8 +94,10 @@ export async function buildApp(opts?: BuildAppOptions): Promise<FastifyInstance>
     reply.header('X-Request-ID', request.id);
   });
 
-  // Plugins (order matters: error handler first, then auth)
+  // Plugins (order matters: error handler first, then metrics, registry, auth)
   await app.register(errorHandler);
+  await app.register(metricsPlugin);
+  await app.register(registryPlugin);
   await app.register(authPlugin);
 
   // Swagger must be registered after auth but before feature routes to capture schemas
@@ -97,9 +105,6 @@ export async function buildApp(opts?: BuildAppOptions): Promise<FastifyInstance>
 
   // TOON content negotiation plugin (after auth, before infrastructure)
   await app.register(toonPlugin);
-
-  // Metrics plugin (after toon, before infrastructure — no infrastructure dependencies)
-  await app.register(metricsPlugin);
 
   // Plugins
   await app.register(vaultPlugin);
