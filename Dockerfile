@@ -15,6 +15,10 @@ ENV COREPACK_INTEGRITY_KEYS=""
 RUN corepack enable
 WORKDIR /app
 ENV NODE_ENV=production
+RUN apt-get update && apt-get install -y --no-install-recommends tini build-essential python3 \
+    && npm install -g obsidian-headless \
+    && apt-get purge -y build-essential python3 && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --prod
 COPY --from=build /app/dist ./dist
@@ -22,4 +26,5 @@ COPY drizzle ./drizzle
 RUN mkdir -p /data && chown node:node /data
 USER node
 EXPOSE 3000
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "dist/server.js"]
