@@ -145,6 +145,7 @@ export class UserRegistry extends EventEmitter<RegistryEvents> {
 
     await this.atomicWrite(Array.from(this.byUserId.values()));
     this.onUserCountChangeCb?.(this.getUserCount());
+    this.emit('user-added', deepFreeze({ ...validated, obsidian: { ...validated.obsidian } }));
   }
 
   async removeUser(userId: string): Promise<void> {
@@ -156,6 +157,7 @@ export class UserRegistry extends EventEmitter<RegistryEvents> {
 
     await this.atomicWrite(Array.from(this.byUserId.values()));
     this.onUserCountChangeCb?.(this.getUserCount());
+    this.emit('user-removed', deepFreeze({ ...user, obsidian: { ...user.obsidian } }));
   }
 
   // ── Hot-Reload ──

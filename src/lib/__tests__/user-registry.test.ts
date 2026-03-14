@@ -368,6 +368,92 @@ describe('UserRegistry', () => {
     });
   });
 
+  // ── Event Emission ──
+
+  describe('event emission', () => {
+    it('addUser() emits user-added with frozen record', async () => {
+      await fs.writeFile(filePath, '[]');
+      const registry = new UserRegistry({ filePath });
+      await registry.load();
+
+      const spy = vi.fn();
+      registry.on('user-added', spy);
+
+      await registry.addUser(makeUser());
+
+      expect(spy).toHaveBeenCalledOnce();
+      const firstCall = spy.mock.calls[0];
+      expect(firstCall).toBeDefined();
+      const emittedUser = firstCall![0] as UserRecord;
+      expect(emittedUser.userId).toBe('alice');
+      expect(emittedUser.vaultPath).toBe('/vaults/alice');
+      expect(Object.isFrozen(emittedUser)).toBe(true);
+    });
+
+    it('removeUser() emits user-removed with frozen record', async () => {
+      await fs.writeFile(filePath, JSON.stringify([makeUser()]));
+      const registry = new UserRegistry({ filePath });
+      await registry.load();
+
+      const spy = vi.fn();
+      registry.on('user-removed', spy);
+
+      await registry.removeUser('alice');
+
+      expect(spy).toHaveBeenCalledOnce();
+      const firstCall = spy.mock.calls[0];
+      expect(firstCall).toBeDefined();
+      const emittedUser = firstCall![0] as UserRecord;
+      expect(emittedUser.userId).toBe('alice');
+      expect(Object.isFrozen(emittedUser)).toBe(true);
+    });
+
+    it('addUser() does not emit on duplicate userId', async () => {
+      await fs.writeFile(filePath, JSON.stringify([makeUser()]));
+      const registry = new UserRegistry({ filePath });
+      await registry.load();
+
+      const spy = vi.fn();
+      registry.on('user-added', spy);
+
+      await expect(registry.addUser(makeUser({ apiKey: 'cv-differentkey' }))).rejects.toThrow(
+        /duplicate/i,
+      );
+
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('removeUser() does not emit for unknown userId', async () => {
+      await fs.writeFile(filePath, '[]');
+      const registry = new UserRegistry({ filePath });
+      await registry.load();
+
+      const spy = vi.fn();
+      registry.on('user-removed', spy);
+
+      await registry.removeUser('nonexistent');
+
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('emitted records are frozen (user and obsidian)', async () => {
+      await fs.writeFile(filePath, '[]');
+      const registry = new UserRegistry({ filePath });
+      await registry.load();
+
+      let capturedUser: UserRecord | null = null;
+      registry.on('user-added', (user) => {
+        capturedUser = user;
+      });
+
+      await registry.addUser(makeUser());
+
+      expect(capturedUser).not.toBeNull();
+      expect(Object.isFrozen(capturedUser!)).toBe(true);
+      expect(Object.isFrozen(capturedUser!.obsidian)).toBe(true);
+    });
+  });
+
   // ── Static Utility ──
 
   describe('generateApiKey', () => {
