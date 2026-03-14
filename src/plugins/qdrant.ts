@@ -2,10 +2,12 @@ import { QdrantClient } from '@qdrant/js-client-rest';
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import { config } from '../config.js';
+import { TenantQdrantClient } from '../lib/tenant-qdrant-client.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
-    qdrant: QdrantClient;
+    createTenantQdrant: (userId: string) => TenantQdrantClient;
+    purgeUserVectors: (userId: string) => Promise<void>;
   }
 }
 
@@ -62,7 +64,35 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
     }
   }
 
-  fastify.decorate('qdrant', client);
+  // Create user_id keyword index — idempotent (safe on restart)
+  try {
+    await client.createPayloadIndex(COLLECTION_NAME, {
+      field_name: 'user_id',
+      field_schema: 'keyword',
+    });
+  } catch {
+    // Index already exists — safe to ignore
+  }
+
+  // Purge legacy vectors without user_id payload
+  await client.delete(COLLECTION_NAME, {
+    filter: {
+      must: [{ is_empty: { key: 'user_id' } }],
+    },
+  });
+  fastify.log.info('Purged legacy vectors without user_id');
+
+  // Expose factory for tenant-scoped Qdrant clients — raw client stays internal
+  fastify.decorate('createTenantQdrant', (userId: string) => {
+    return new TenantQdrantClient(client, userId);
+  });
+
+  // Expose purge function for user removal cleanup
+  fastify.decorate('purgeUserVectors', async (userId: string) => {
+    await client.delete(COLLECTION_NAME, {
+      filter: { must: [{ key: 'user_id', match: { value: userId } }] },
+    });
+  });
 }
 
 export default fp(qdrantPlugin, { name: 'qdrant', dependencies: ['embedder'] });

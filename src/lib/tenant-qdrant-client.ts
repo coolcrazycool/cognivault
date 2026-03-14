@@ -1,16 +1,11 @@
 import type { QdrantClient } from '@qdrant/js-client-rest';
 import { COLLECTION_NAME } from '../plugins/qdrant.js';
 
-interface FilterCondition {
-  key?: string;
-  match?: { value?: string | number; any?: string[]; text?: string };
-  is_empty?: { key: string };
-  [key: string]: unknown;
-}
+/* eslint-disable @typescript-eslint/no-explicit-any -- Qdrant client types are complex; we use `any` at the boundary for filter pass-through */
 
 interface QdrantFilter {
-  must?: FilterCondition[];
-  should?: FilterCondition[];
+  must?: unknown[];
+  should?: unknown[];
 }
 
 interface SearchParams {
@@ -53,19 +48,23 @@ export class TenantQdrantClient {
     this.userId = userId;
   }
 
-  private get userFilter(): FilterCondition {
+  private get userFilter(): { key: string; match: { value: string } } {
     return { key: 'user_id', match: { value: this.userId } };
   }
 
-  private mergeMust(existing?: FilterCondition[]): FilterCondition[] {
+  private mergeMust(existing?: unknown[]): unknown[] {
     return [...(existing ?? []), this.userFilter];
+  }
+
+  private buildFilter(base: QdrantFilter | undefined): Record<string, unknown> {
+    return { ...base, must: this.mergeMust(base?.must) } as Record<string, unknown>;
   }
 
   async search(params: SearchParams): Promise<unknown> {
     const { filter, ...rest } = params;
     return this.client.search(COLLECTION_NAME, {
       ...rest,
-      filter: { ...filter, must: this.mergeMust(filter?.must) },
+      filter: this.buildFilter(filter),
     });
   }
 
@@ -73,7 +72,7 @@ export class TenantQdrantClient {
     const { filter, ...rest } = params;
     return this.client.scroll(COLLECTION_NAME, {
       ...rest,
-      filter: { ...filter, must: this.mergeMust(filter?.must) },
+      filter: this.buildFilter(filter),
     });
   }
 
@@ -88,7 +87,7 @@ export class TenantQdrantClient {
   async delete(params: DeleteParams): Promise<unknown> {
     const { filter } = params;
     return this.client.delete(COLLECTION_NAME, {
-      filter: { ...filter, must: this.mergeMust(filter.must) },
+      filter: this.buildFilter(filter),
     });
   }
 
@@ -96,7 +95,7 @@ export class TenantQdrantClient {
     const { filter, ...rest } = params;
     return this.client.setPayload(COLLECTION_NAME, {
       ...rest,
-      filter: { ...filter, must: this.mergeMust(filter.must) },
+      filter: this.buildFilter(filter),
     });
   }
 }
