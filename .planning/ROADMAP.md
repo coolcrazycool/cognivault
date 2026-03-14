@@ -3,7 +3,7 @@
 ## Milestones
 
 - ✅ **v1.0 MVP** — Phases 1-14 (shipped 2026-03-13)
-- 🚧 **v2.0 Multi-User** — Phases 15-22 (in progress)
+- ✅ **v2.0 Multi-User** — Phases 15-22 (shipped 2026-03-14)
 
 ## Phases
 
@@ -33,7 +33,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 
 </details>
 
-### 🚧 v2.0 Multi-User (Phases 15-22)
+### ✅ v2.0 Multi-User (Phases 15-22) — SHIPPED 2026-03-14
 
 **Milestone Goal:** Transform CogniVault from a single-user service into a single-container multi-tenant platform where each user's vault is synced via obsidian-headless, all users share one CogniVault process with tenant-isolated Qdrant, and operators manage users via CLI.
 
@@ -41,10 +41,10 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 - [x] **Phase 16: Multi-Tenant Auth** - API key resolves to user context on every request (completed 2026-03-14)
 - [x] **Phase 17: Data Isolation** - Per-user Qdrant filtering and separate SQLite databases (completed 2026-03-14)
 - [x] **Phase 18: Per-User Indexing and Routes** - Multi-tenant indexing pipeline and API route migration (completed 2026-03-14)
-- [ ] **Phase 19: CLI and Vault Sync** - Operator CLI for user lifecycle and obsidian-headless sync management
+- [x] **Phase 19: CLI and Vault Sync** - Operator CLI for user lifecycle and obsidian-headless sync management (completed 2026-03-14)
 - [x] **Phase 20: Docker and Integration Hardening** - Container rewrite with tini, end-to-end isolation tests, multi-tenant observability dashboards (completed 2026-03-14)
 - [x] **Phase 21: CLI-Server Event Wiring & Metric Fix** - Fix CLI→server event propagation, indexer vault path race, commit OBS-03 metric fix *(Gap Closure)* (completed 2026-03-14)
-- [ ] **Phase 22: Milestone Verification Closure** - Create Phase 19 VERIFICATION.md, update Phase 20 VERIFICATION.md, close all audit gaps *(Gap Closure)*
+- [x] **Phase 22: Milestone Verification Closure** - Create Phase 19 VERIFICATION.md, update Phase 20 VERIFICATION.md, close all audit gaps *(Gap Closure)* (completed 2026-03-14)
 
 ## Phase Details
 
@@ -117,12 +117,12 @@ Plans:
   3. `cognivault-ctl list-users` displays all users with their sync status and vault path
   4. Each user's vault sync runs as a supervised child process that auto-restarts with exponential backoff on failure
   5. Stale .obsidian/.sync.lock files are cleaned up before every sync process start
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
-- [ ] 19-01-PLAN.md — CLI entrypoint with Commander.js, add-user/remove-user/list-users commands
-- [ ] 19-02-PLAN.md — Sync plugin with child process supervision, backoff, and metrics
-- [ ] 19-03-PLAN.md — App.ts integration and human verification checkpoint
+- [x] 19-01-PLAN.md — CLI entrypoint with Commander.js, add-user/remove-user/list-users commands
+- [x] 19-02-PLAN.md — Sync plugin with child process supervision, backoff, and metrics
+- [x] 19-03-PLAN.md — App.ts integration and human verification checkpoint
 
 ### Phase 20: Docker and Integration Hardening
 **Goal**: CogniVault runs as a production-ready multi-tenant container with verified tenant isolation and per-user observability dashboards
@@ -166,11 +166,11 @@ Plans:
   1. Phase 19 has a VERIFICATION.md that verifies all 8 CLI/SYNC requirements against the codebase
   2. Phase 20 VERIFICATION.md reflects OBS-03 as resolved
   3. All 19 v2.0 requirements show "satisfied" in a 3-source cross-reference
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
-- [ ] 22-01-PLAN.md — Commit working tree, write Phase 19 VERIFICATION.md, update Phase 20 VERIFICATION.md
-- [ ] 22-02-PLAN.md — Close milestone audit, update REQUIREMENTS.md, mark milestone complete
+- [x] 22-01-PLAN.md — Commit working tree, write Phase 19 VERIFICATION.md, update Phase 20 VERIFICATION.md
+- [x] 22-02-PLAN.md — Close milestone audit, update REQUIREMENTS.md, mark milestone complete
 
 ## Progress
 
@@ -197,7 +197,7 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 16. Multi-Tenant Auth | v2.0 | Complete    | 2026-03-14 | 2026-03-14 |
 | 17. Data Isolation | 2/2 | Complete    | 2026-03-14 | - |
 | 18. Per-User Indexing and Routes | 3/3 | Complete    | 2026-03-14 | - |
-| 19. CLI and Vault Sync | 2/3 | In Progress|  | - |
+| 19. CLI and Vault Sync | 3/3 | Complete | 2026-03-14 | - |
 | 20. Docker and Integration Hardening | 4/4 | Complete   | 2026-03-14 | - |
 | 21. CLI-Server Event Wiring & Metric Fix | 2/2 | Complete    | 2026-03-14 | - |
-| 22. Milestone Verification Closure | 1/2 | In Progress|  | - |
+| 22. Milestone Verification Closure | 2/2 | Complete | 2026-03-14 | - |
