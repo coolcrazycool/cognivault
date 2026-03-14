@@ -87,31 +87,31 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| TENANT-01 | — | Pending |
-| TENANT-02 | — | Pending |
-| TENANT-03 | — | Pending |
-| DATA-01 | — | Pending |
-| DATA-02 | — | Pending |
-| SYNC-01 | — | Pending |
-| SYNC-02 | — | Pending |
-| SYNC-03 | — | Pending |
-| SYNC-04 | — | Pending |
-| CLI-01 | — | Pending |
-| CLI-02 | — | Pending |
-| CLI-03 | — | Pending |
-| CLI-04 | — | Pending |
-| OBS-01 | — | Pending |
-| OBS-02 | — | Pending |
-| OBS-03 | — | Pending |
-| INFRA-01 | — | Pending |
-| INFRA-02 | — | Pending |
-| INFRA-03 | — | Pending |
+| TENANT-01 | Phase 16 | Pending |
+| TENANT-02 | Phase 15 | Pending |
+| TENANT-03 | Phase 15 | Pending |
+| DATA-01 | Phase 17 | Pending |
+| DATA-02 | Phase 17 | Pending |
+| SYNC-01 | Phase 19 | Pending |
+| SYNC-02 | Phase 19 | Pending |
+| SYNC-03 | Phase 19 | Pending |
+| SYNC-04 | Phase 19 | Pending |
+| CLI-01 | Phase 19 | Pending |
+| CLI-02 | Phase 19 | Pending |
+| CLI-03 | Phase 19 | Pending |
+| CLI-04 | Phase 19 | Pending |
+| OBS-01 | Phase 18 | Pending |
+| OBS-02 | Phase 20 | Pending |
+| OBS-03 | Phase 20 | Pending |
+| INFRA-01 | Phase 20 | Pending |
+| INFRA-02 | Phase 20 | Pending |
+| INFRA-03 | Phase 20 | Pending |
 
 **Coverage:**
 - v2.0 requirements: 19 total
-- Mapped to phases: 0
-- Unmapped: 19
+- Mapped to phases: 19
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-14*
-*Last updated: 2026-03-14 after initial definition*
+*Last updated: 2026-03-14 — traceability updated with phase mappings*
