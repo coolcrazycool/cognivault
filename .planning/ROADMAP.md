@@ -40,7 +40,7 @@ Full details: `.planning/milestones/v1.0-ROADMAP.md`
 - [x] **Phase 15: Registry Foundation** - User registry data store with hot-reload and atomic writes (completed 2026-03-14)
 - [x] **Phase 16: Multi-Tenant Auth** - API key resolves to user context on every request (completed 2026-03-14)
 - [x] **Phase 17: Data Isolation** - Per-user Qdrant filtering and separate SQLite databases (completed 2026-03-14)
-- [ ] **Phase 18: Per-User Indexing and Routes** - Multi-tenant indexing pipeline and API route migration
+- [x] **Phase 18: Per-User Indexing and Routes** - Multi-tenant indexing pipeline and API route migration (completed 2026-03-14)
 - [ ] **Phase 19: CLI and Vault Sync** - Operator CLI for user lifecycle and obsidian-headless sync management
 - [ ] **Phase 20: Docker and Integration Hardening** - Container rewrite with tini, end-to-end isolation tests, multi-tenant observability dashboards
 
@@ -98,7 +98,7 @@ Plans:
   2. Search, context pack, and admin routes return only data belonging to the authenticated user
   3. Prometheus metrics carry a user_id label on every counter/histogram increment
   4. Adding or removing a user in the registry starts or stops that user's indexer without affecting other users
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 - [ ] 18-01-PLAN.md — Metrics user_id labels, per-user embedding Map, qdrant decoupling, DB accessor, config update
@@ -163,6 +163,6 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 15. Registry Foundation | 2/2 | Complete    | 2026-03-14 | - |
 | 16. Multi-Tenant Auth | v2.0 | Complete    | 2026-03-14 | 2026-03-14 |
 | 17. Data Isolation | 2/2 | Complete    | 2026-03-14 | - |
-| 18. Per-User Indexing and Routes | 2/3 | In Progress|  | - |
+| 18. Per-User Indexing and Routes | 3/3 | Complete   | 2026-03-14 | - |
 | 19. CLI and Vault Sync | v2.0 | 0/TBD | Not started | - |
 | 20. Docker and Integration Hardening | v2.0 | 0/TBD | Not started | - |

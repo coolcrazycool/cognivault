@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
 status: executing
-stopped_at: Completed 18-02-PLAN.md
-last_updated: "2026-03-14T10:09:13Z"
-last_activity: 2026-03-14 — Phase 18 Plan 02 (Indexer & Pipeline Rewrite) complete
+stopped_at: Completed 18-03-PLAN.md
+last_updated: "2026-03-14T10:18:21Z"
+last_activity: 2026-03-14 — Phase 18 Plan 03 (Route Migration & Plugin Re-enablement) complete
 progress:
   total_phases: 6
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 8
-  completed_plans: 7
-  percent: 88
+  completed_plans: 8
+  percent: 100
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-03-14)
 ## Current Position
 
 Phase: 18 of 20 (Per-User Indexing and Routes) — fourth of 6 v2.0 phases
-Plan: 02 of 03 complete (Indexer & Pipeline Rewrite)
-Status: Phase 18 in progress
-Last activity: 2026-03-14 — Phase 18 Plan 02 (Indexer & Pipeline Rewrite) complete
+Plan: 03 of 03 complete (Route Migration & Plugin Re-enablement)
+Status: Phase 18 complete
+Last activity: 2026-03-14 — Phase 18 Plan 03 (Route Migration & Plugin Re-enablement) complete
 
-Progress: [█████████░] 88%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -70,6 +70,8 @@ All decisions logged in PROJECT.md Key Decisions table.
 - [Phase 18]: Pipeline does NOT depend on indexer; reversed dep via processFileChanges (2026-03-14)
 - [Phase 18]: Queue depth gauge update in finally block (PQueue events lack userId) (2026-03-14)
 - [Phase 18]: Admin reindex uses processFileChanges instead of indexer.emit for path/folder (2026-03-14)
+- [Phase 18]: Pipeline registered before indexer in app.ts (indexer fp() deps include 'pipeline') (2026-03-14)
+- [Phase 18]: Health readiness endpoint iterates per-user indexers Map for indexing status (2026-03-14)
 
 ### Roadmap Evolution
 
@@ -87,6 +89,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T10:09:13Z
-Stopped at: Completed 18-02-PLAN.md
+Last session: 2026-03-14T10:18:21Z
+Stopped at: Completed 18-03-PLAN.md
 Resume file: None
