@@ -153,7 +153,8 @@ async function syncPlugin(fastify: FastifyInstance): Promise<void> {
       }, KILL_TIMEOUT);
     }
 
-    syncRunning.labels({ user_id: user.userId }).set(0);
+    syncRunning.remove({ user_id: user.userId });
+    syncFailures.remove({ user_id: user.userId });
     syncs.delete(user.userId);
   });
 
