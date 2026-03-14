@@ -151,7 +151,7 @@ Plans:
   1. `UserRegistry.addUser()` and `removeUser()` emit `user-added`/`user-removed` events directly, not only via fs.watch hot-reload
   2. The indexer handles vault paths that don't exist yet at `user-added` time without silently dropping the user
   3. OBS-03 sync metric `.remove()` change is committed to HEAD (not just in working tree)
-**Plans:** 2 plans
+**Plans:** 1/2 plans executed
 
 Plans:
 - [ ] 21-01-PLAN.md — Direct event emission in UserRegistry.addUser()/removeUser() + mark OBS-03 complete
@@ -195,5 +195,5 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 18. Per-User Indexing and Routes | 3/3 | Complete    | 2026-03-14 | - |
 | 19. CLI and Vault Sync | 2/3 | In Progress|  | - |
 | 20. Docker and Integration Hardening | 4/4 | Complete   | 2026-03-14 | - |
-| 21. CLI-Server Event Wiring & Metric Fix | 0/2 | Not Started | | - |
+| 21. CLI-Server Event Wiring & Metric Fix | 1/2 | In Progress|  | - |
 | 22. Milestone Verification Closure | 0/? | Not Started | | - |

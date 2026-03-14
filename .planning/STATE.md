@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
 status: in-progress
-stopped_at: Completed 20-docker-and-integration-hardening-04-PLAN.md
-last_updated: "2026-03-14T14:04:30.743Z"
+stopped_at: Completed 21-cli-server-event-wiring-01-PLAN.md
+last_updated: "2026-03-14T16:37:36.305Z"
 last_activity: 2026-03-14 — Phase 19 Plan 02 (Sync Plugin) complete
 progress:
-  total_phases: 6
+  total_phases: 8
   completed_phases: 5
-  total_plans: 15
-  completed_plans: 14
+  total_plans: 17
+  completed_plans: 15
   percent: 67
 ---
 
@@ -86,6 +86,7 @@ All decisions logged in PROJECT.md Key Decisions table.
 - [Phase 20-docker-and-integration-hardening]: Dockerfile HEALTHCHECK uses Node.js fetch API — avoids adding curl to production image; interval=5s start-period=10s
 - [Phase 20-docker-and-integration-hardening]: Process-level Node.js metrics intentionally exempt from user_id filtering — plan truth was overspecified
 - [Phase 20-docker-and-integration-hardening]: v2.0 isolation proven via search-based empty results (200+empty), not 404 vault path reads — INFRA-03 satisfied
+- [Phase 21-cli-server-event-wiring]: Emit 'user-added'/'user-removed' directly in addUser()/removeUser() after atomicWrite — any registry instance fires events reliably without fs.watch
 
 ### Roadmap Evolution
 
@@ -103,6 +104,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T14:04:30.741Z
-Stopped at: Completed 20-docker-and-integration-hardening-04-PLAN.md
+Last session: 2026-03-14T16:37:36.303Z
+Stopped at: Completed 21-cli-server-event-wiring-01-PLAN.md
 Resume file: None
