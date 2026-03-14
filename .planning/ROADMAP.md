@@ -98,11 +98,12 @@ Plans:
   2. Search, context pack, and admin routes return only data belonging to the authenticated user
   3. Prometheus metrics carry a user_id label on every counter/histogram increment
   4. Adding or removing a user in the registry starts or stops that user's indexer without affecting other users
-**Plans**: TBD
+**Plans:** 3 plans
 
 Plans:
-- [ ] 18-01: TBD
-- [ ] 18-02: TBD
+- [ ] 18-01-PLAN.md — Metrics user_id labels, per-user embedding Map, qdrant decoupling, DB accessor, config update
+- [ ] 18-02-PLAN.md — Per-user indexer manager and multi-tenant pipeline rewrite
+- [ ] 18-03-PLAN.md — Route migration to per-user embedder/metrics, re-enable indexer/pipeline in app.ts
 
 ### Phase 19: CLI and Vault Sync
 **Goal**: Operators manage users via CLI commands and each user's vault stays continuously synced via obsidian-headless
@@ -162,6 +163,6 @@ Phases execute in numeric order: 15 -> 16 -> 17 -> 18 -> 19 -> 20
 | 15. Registry Foundation | 2/2 | Complete    | 2026-03-14 | - |
 | 16. Multi-Tenant Auth | v2.0 | Complete    | 2026-03-14 | 2026-03-14 |
 | 17. Data Isolation | 2/2 | Complete    | 2026-03-14 | - |
-| 18. Per-User Indexing and Routes | v2.0 | 0/TBD | Not started | - |
+| 18. Per-User Indexing and Routes | v2.0 | 0/3 | Not started | - |
 | 19. CLI and Vault Sync | v2.0 | 0/TBD | Not started | - |
 | 20. Docker and Integration Hardening | v2.0 | 0/TBD | Not started | - |
