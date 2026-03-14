@@ -37,19 +37,28 @@ AI agents can find and retrieve the right knowledge from an Obsidian vault in un
 
 ### Active
 
-- [ ] Cross-encoder reranking (Cohere/BGE) for top-K precision (RET-04, deferred from v1.0)
-- [ ] Multi-vault support with isolation between vaults
-- [ ] Embedding model version tracking and upgrade path
-- [ ] Read-only vs write/admin role separation in auth
+- [ ] Single-container multi-tenant: one CogniVault process serves all users via API key → user_id registry
+- [ ] Per-user vault sync via obsidian-headless (`ob sync --continuous`)
+- [ ] CLI user lifecycle management (`add-user`, `remove-user`, `list-users`) with Obsidian credentials
+- [ ] Per-user OpenAI API keys for embeddings
+- [ ] Multi-tenant observability: metrics with user_id labels, Prometheus + Grafana per-user filtering
+
+### Deferred
+
+- Cross-encoder reranking (Cohere/BGE) for top-K precision (RET-04, deferred from v1.0)
+- Embedding model version tracking and upgrade path
+- Read-only vs write/admin role separation in auth
 
 ### Out of Scope
 
 - Wikilink/backlink graph navigation — agents use retrieval, not graph traversal
 - Real-time WebSocket push — agents poll or use request/response
 - Obsidian plugin — this is a standalone server-side service
-- Multi-user authentication — local agents only, API key sufficient
 - UI/dashboard — admin via REST endpoints and Grafana
 - Aggressive query caching — Qdrant is fast enough at this scale
+- Per-user containers — architectural pivot to single-container multi-tenant (simpler, lower resource usage)
+- VNC/GUI access to Obsidian — headless sync only, no browser-based editing
+- Caddy reverse proxy — single container, single port
 
 ## Context
 
@@ -93,5 +102,16 @@ AI agents can find and retrieve the right knowledge from an Obsidian vault in un
 | pdfjs-dist for PDF extraction | Mature, no native deps | ✓ Good — works in Docker |
 | Heading-aware chunking | Preserves section context | ✓ Good — high retrieval quality |
 
+## Current Milestone: v2.0 Multi-User
+
+**Goal:** Transform CogniVault from a single-user service into a single-container multi-tenant platform where each user's vault is synced via obsidian-headless, all users share one CogniVault process with tenant-isolated Qdrant, and operators manage users via CLI.
+
+**Target features:**
+- Single-container multi-tenant architecture (API key → user_id registry, per-request routing)
+- Per-user vault sync via obsidian-headless (`ob sync --continuous`)
+- CLI for user lifecycle (`add-user` with Obsidian creds + OpenAI key, `remove-user`, `list-users`)
+- Per-user OpenAI API keys for embeddings
+- Multi-tenant observability (user_id labels, Prometheus + Grafana per-user filtering)
+
 ---
-*Last updated: 2026-03-13 after v1.0 milestone*
+*Last updated: 2026-03-14 after v2.0 milestone start*

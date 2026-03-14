@@ -1,33 +1,34 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: MVP
-status: complete
-stopped_at: Milestone v1.0 shipped
-last_updated: "2026-03-13"
-last_activity: 2026-03-13 — v1.0 MVP milestone completed
+milestone: v2.0
+milestone_name: Multi-User
+status: active
+stopped_at: Defining requirements
+last_updated: "2026-03-14"
+last_activity: 2026-03-14 — Milestone v2.0 started
 progress:
-  total_phases: 14
-  completed_phases: 14
-  total_plans: 37
-  completed_plans: 37
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-13)
+See: .planning/PROJECT.md (updated 2026-03-14)
 
 **Core value:** AI agents can find and retrieve the right knowledge from an Obsidian vault in under one second, with high precision across mixed Russian/English content, exact technical terms, and freeform metadata.
-**Current focus:** v1.0 shipped — planning next milestone
+**Current focus:** v2.0 Multi-User — Defining requirements
 
 ## Current Position
 
-Milestone: v1.0 MVP — SHIPPED 2026-03-13
-Status: Complete
-All 14 phases, 37 plans executed and verified.
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-03-14 — Milestone v2.0 started
 
 ## Accumulated Context
 
@@ -37,9 +38,8 @@ All decisions logged in PROJECT.md Key Decisions table.
 
 ### Roadmap Evolution
 
-- Phase 12 added mid-milestone: Prometheus metrics dashboard
-- Phase 13 added: Search & reindex correctness (audit gap closure)
-- Phase 14 added: Infrastructure hardening & cleanup (audit gap closure)
+- v1.0: 14 phases, 37 plans — shipped 2026-03-13
+- v2.0: architectural pivot from per-user containers to single-container multi-tenant (decided 2026-03-14)
 
 ### Pending Todos
 
@@ -47,9 +47,9 @@ None.
 
 ### Blockers/Concerns
 
-None.
+- obsidian-headless is beta (v0.0.3+, Feb 2026) — verify current version and auth flow before planning
 
 ## Session Continuity
 
-Last session: 2026-03-13
-Stopped at: Milestone v1.0 shipped
+Last session: 2026-03-14
+Stopped at: Defining requirements
