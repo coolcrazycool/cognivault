@@ -1,3 +1,4 @@
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
@@ -26,6 +27,9 @@ async function registryPlugin(fastify: FastifyInstance): Promise<void> {
   });
 
   const filePath = join(config.COGNIVAULT_DATA_DIR, 'users.json');
+
+  // Ensure data directory exists before loading users.json
+  await mkdir(config.COGNIVAULT_DATA_DIR, { recursive: true });
 
   const registry = new UserRegistry({
     filePath,

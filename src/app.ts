@@ -14,8 +14,8 @@ import errorHandler from './plugins/error-handler.js';
 import indexerPlugin from './plugins/indexer.js';
 import metricsPlugin from './plugins/metrics.js';
 import pipelinePlugin from './plugins/pipeline.js';
-import registryPlugin from './plugins/registry.js';
 import qdrantPlugin from './plugins/qdrant.js';
+import registryPlugin from './plugins/registry.js';
 import swaggerPlugin from './plugins/swagger.js';
 import toonPlugin from './plugins/toon.js';
 import vaultPlugin from './plugins/vault.js';
@@ -56,12 +56,7 @@ function buildLoggerOptions(logger: boolean | object | undefined): boolean | obj
   }
 
   const enrichedOptions = {
-    redact: [
-      'req.headers.authorization',
-      '*.openaiKey',
-      '*.obsidian.password',
-      '*.obsidian.token',
-    ],
+    redact: ['req.headers.authorization', '*.openaiKey', '*.obsidian.password', '*.obsidian.token'],
     serializers: {
       req: serializeRequest,
     },
