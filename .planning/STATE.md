@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Multi-User
 status: completed
-stopped_at: Completed 16-01-PLAN.md
-last_updated: "2026-03-14T07:06:54.678Z"
+stopped_at: Phase 17 context gathered
+last_updated: "2026-03-14T07:41:49.519Z"
 last_activity: 2026-03-14 — Phase 16 Plan 01 (Registry Auth) complete
 progress:
   total_phases: 6
@@ -76,6 +76,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-14T06:57:10Z
-Stopped at: Completed 16-01-PLAN.md
-Resume file: .planning/phases/16-per-user-container-stack/16-01-SUMMARY.md
+Last session: 2026-03-14T07:41:49.516Z
+Stopped at: Phase 17 context gathered
+Resume file: .planning/phases/17-data-isolation/17-CONTEXT.md
