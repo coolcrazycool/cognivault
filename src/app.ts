@@ -17,6 +17,7 @@ import pipelinePlugin from './plugins/pipeline.js';
 import qdrantPlugin from './plugins/qdrant.js';
 import registryPlugin from './plugins/registry.js';
 import swaggerPlugin from './plugins/swagger.js';
+import syncPlugin from './plugins/sync.js';
 import toonPlugin from './plugins/toon.js';
 import vaultPlugin from './plugins/vault.js';
 
@@ -108,6 +109,7 @@ export async function buildApp(opts?: BuildAppOptions): Promise<FastifyInstance>
   await app.register(dbPlugin);
   await app.register(pipelinePlugin);
   await app.register(indexerPlugin);
+  await app.register(syncPlugin);
 
   // Feature routes
   await app.register(healthRoutes);
