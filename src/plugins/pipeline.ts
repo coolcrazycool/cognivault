@@ -132,7 +132,16 @@ async function processMarkdown(
     return;
   }
 
-  const parsed = matter(rawContent);
+  let parsed: matter.GrayMatterFile<string>;
+  try {
+    parsed = matter(rawContent);
+  } catch {
+    fastify.log.warn(
+      { path: event.path, userId },
+      'Invalid frontmatter — indexing without metadata',
+    );
+    parsed = { content: rawContent, data: {} } as matter.GrayMatterFile<string>;
+  }
   const title = path.basename(event.path, '.md');
   const chunks = chunkMarkdown(parsed.content, { title });
 
@@ -213,11 +222,7 @@ async function processImage(
   const indexerEntry = fastify.indexers.get(userId);
   if (!indexerEntry) return;
 
-  const mdFiles = db
-    .select()
-    .from(indexedFiles)
-    .where(eq(indexedFiles.fileType, 'md'))
-    .all();
+  const mdFiles = db.select().from(indexedFiles).where(eq(indexedFiles.fileType, 'md')).all();
 
   const imageName = path.basename(event.path);
   const markdownContents: Array<{ path: string; content: string }> = [];
@@ -370,6 +375,11 @@ async function pipelinePlugin(fastify: FastifyInstance): Promise<void> {
 
     const { queue } = indexerEntry;
 
+    // Ensure gauge resets to 0 when queue drains
+    void queue.onIdle().then(() => {
+      fastify.metrics.indexQueueDepth.set({ user_id: userId }, 0);
+    });
+
     for (const event of events) {
       void queue.add(async () => {
         try {
@@ -391,19 +401,15 @@ async function pipelinePlugin(fastify: FastifyInstance): Promise<void> {
             'Pipeline processing failed — will retry on next poll',
           );
         } finally {
-          // Update queue depth gauge per user
-          fastify.metrics.indexQueueDepth.set(
-            { user_id: userId },
-            queue.size + queue.pending,
-          );
+          // Update queue depth gauge per user (use setImmediate so pending count is accurate)
+          setImmediate(() => {
+            fastify.metrics.indexQueueDepth.set({ user_id: userId }, queue.size + queue.pending);
+          });
         }
       });
 
       // Update queue depth gauge after adding to queue
-      fastify.metrics.indexQueueDepth.set(
-        { user_id: userId },
-        queue.size + queue.pending,
-      );
+      fastify.metrics.indexQueueDepth.set({ user_id: userId }, queue.size + queue.pending);
     }
   }
 
