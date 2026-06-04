@@ -2,7 +2,7 @@ import * as crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type { FastifyBaseLogger } from 'fastify';
 import pLimit from 'p-limit';
@@ -242,12 +242,15 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
           )
           .onConflictDoUpdate({
             target: indexedFiles.path,
+            // Use the incoming row's values (excluded.*), NOT the existing column
+            // (which would be a no-op self-assignment that never updates the hash →
+            // every poll would re-detect the file as changed and re-embed forever).
             set: {
-              contentHash: indexedFiles.contentHash,
-              mtime: indexedFiles.mtime,
-              size: indexedFiles.size,
-              indexedAt: indexedFiles.indexedAt,
-              fileType: indexedFiles.fileType,
+              contentHash: sql`excluded.content_hash`,
+              mtime: sql`excluded.mtime`,
+              size: sql`excluded.size`,
+              indexedAt: sql`excluded.indexed_at`,
+              fileType: sql`excluded.file_type`,
             },
           })
           .run();
@@ -488,12 +491,15 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
         })
         .onConflictDoUpdate({
           target: indexedFiles.path,
+          // Use the incoming row's values (excluded.*), NOT the existing column —
+          // self-assignment never persists the new hash, so the poll keeps seeing the
+          // file as "updated" and re-embeds it on every cycle (the embedding-cost leak).
           set: {
-            contentHash: indexedFiles.contentHash,
-            mtime: indexedFiles.mtime,
-            size: indexedFiles.size,
-            indexedAt: indexedFiles.indexedAt,
-            fileType: indexedFiles.fileType,
+            contentHash: sql`excluded.content_hash`,
+            mtime: sql`excluded.mtime`,
+            size: sql`excluded.size`,
+            indexedAt: sql`excluded.indexed_at`,
+            fileType: sql`excluded.file_type`,
           },
         })
         .run();
