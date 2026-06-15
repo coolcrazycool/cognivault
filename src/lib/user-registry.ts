@@ -21,8 +21,12 @@ export const userRecordSchema = z.object({
     .regex(/^[a-z0-9-]+$/, 'userId must be lowercase alphanumeric with hyphens'),
   apiKey: z.string().regex(/^cv-/, 'apiKey must start with cv-'),
   vaultPath: z.string().min(1),
-  openaiKey: z.string().min(1),
-  obsidian: obsidianSchema,
+  // Only needed for the OpenAI embedding provider. Omitted for folder-only users
+  // on a GigaChat (or other system-wide) provider.
+  openaiKey: z.string().min(1).optional(),
+  // Omitted for "local folder" users who edit files directly instead of syncing
+  // from Obsidian. When absent, no `ob sync` process is started for the user.
+  obsidian: obsidianSchema.optional(),
 });
 
 const usersFileSchema = z.array(userRecordSchema);
@@ -52,9 +56,16 @@ interface UserRegistryOptions {
 
 // ── Helpers ──
 
-function deepFreeze(record: UserRecord): UserRecord {
-  Object.freeze(record.obsidian);
-  return Object.freeze(record);
+/** Deep-clone a stored record and freeze it, preserving an absent `obsidian`. */
+function cloneAndFreeze(record: UserRecord): UserRecord {
+  const copy: UserRecord = {
+    ...record,
+    obsidian: record.obsidian ? { ...record.obsidian } : undefined,
+  };
+  if (copy.obsidian) {
+    Object.freeze(copy.obsidian);
+  }
+  return Object.freeze(copy);
 }
 
 function computeHash(content: string): string {
@@ -110,18 +121,16 @@ export class UserRegistry extends EventEmitter<RegistryEvents> {
 
   getUserByApiKey(key: string): UserRecord | undefined {
     const user = this.byApiKey.get(key);
-    return user ? deepFreeze({ ...user, obsidian: { ...user.obsidian } }) : undefined;
+    return user ? cloneAndFreeze(user) : undefined;
   }
 
   getUserById(userId: string): UserRecord | undefined {
     const user = this.byUserId.get(userId);
-    return user ? deepFreeze({ ...user, obsidian: { ...user.obsidian } }) : undefined;
+    return user ? cloneAndFreeze(user) : undefined;
   }
 
   getAllUsers(): UserRecord[] {
-    return Array.from(this.byUserId.values()).map((u) =>
-      deepFreeze({ ...u, obsidian: { ...u.obsidian } }),
-    );
+    return Array.from(this.byUserId.values()).map((u) => cloneAndFreeze(u));
   }
 
   getUserCount(): number {
@@ -145,7 +154,7 @@ export class UserRegistry extends EventEmitter<RegistryEvents> {
 
     await this.atomicWrite(Array.from(this.byUserId.values()));
     this.onUserCountChangeCb?.(this.getUserCount());
-    this.emit('user-added', deepFreeze({ ...validated, obsidian: { ...validated.obsidian } }));
+    this.emit('user-added', cloneAndFreeze(validated));
   }
 
   async removeUser(userId: string): Promise<void> {
@@ -157,7 +166,7 @@ export class UserRegistry extends EventEmitter<RegistryEvents> {
 
     await this.atomicWrite(Array.from(this.byUserId.values()));
     this.onUserCountChangeCb?.(this.getUserCount());
-    this.emit('user-removed', deepFreeze({ ...user, obsidian: { ...user.obsidian } }));
+    this.emit('user-removed', cloneAndFreeze(user));
   }
 
   // ── Hot-Reload ──
@@ -279,20 +288,16 @@ export class UserRegistry extends EventEmitter<RegistryEvents> {
     for (const [userId, newUser] of newMap) {
       const oldUser = oldMap.get(userId);
       if (!oldUser) {
-        this.emit('user-added', deepFreeze({ ...newUser, obsidian: { ...newUser.obsidian } }));
+        this.emit('user-added', cloneAndFreeze(newUser));
       } else if (JSON.stringify(oldUser) !== JSON.stringify(newUser)) {
-        this.emit(
-          'user-updated',
-          deepFreeze({ ...newUser, obsidian: { ...newUser.obsidian } }),
-          deepFreeze({ ...oldUser, obsidian: { ...oldUser.obsidian } }),
-        );
+        this.emit('user-updated', cloneAndFreeze(newUser), cloneAndFreeze(oldUser));
       }
     }
 
     // Find removed
     for (const [userId, oldUser] of oldMap) {
       if (!newMap.has(userId)) {
-        this.emit('user-removed', deepFreeze({ ...oldUser, obsidian: { ...oldUser.obsidian } }));
+        this.emit('user-removed', cloneAndFreeze(oldUser));
       }
     }
   }

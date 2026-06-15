@@ -1,5 +1,6 @@
 import { getEncoding } from 'js-tiktoken';
 import OpenAI from 'openai';
+import type { Config } from '../config.js';
 
 export const DIMENSION_MAP: Record<string, number> = {
   'text-embedding-3-small': 1536,
@@ -11,6 +12,31 @@ const MAX_EMBEDDING_TOKENS = 8191;
 export interface EmbeddingProvider {
   embed(texts: string[]): Promise<number[][]>;
   readonly dimensions: number;
+}
+
+/**
+ * Resolve the vector dimension for the active provider. OpenAI models map to a
+ * known size; GigaChat (custom model) requires an explicit EMBEDDING_DIMENSIONS.
+ * Used by both the embedding plugin and the Qdrant collection setup so the
+ * collection size and provider always agree.
+ */
+export function resolveDimensions(
+  cfg: Pick<Config, 'EMBEDDING_PROVIDER' | 'EMBEDDING_MODEL' | 'EMBEDDING_DIMENSIONS'>,
+): number {
+  if (cfg.EMBEDDING_PROVIDER === 'gigachat') {
+    if (cfg.EMBEDDING_DIMENSIONS === undefined) {
+      throw new Error('EMBEDDING_DIMENSIONS is required when EMBEDDING_PROVIDER=gigachat');
+    }
+    return cfg.EMBEDDING_DIMENSIONS;
+  }
+
+  const dimensions = DIMENSION_MAP[cfg.EMBEDDING_MODEL];
+  if (dimensions === undefined) {
+    throw new Error(
+      `Unknown embedding model: "${cfg.EMBEDDING_MODEL}". Known models: ${Object.keys(DIMENSION_MAP).join(', ')}`,
+    );
+  }
+  return dimensions;
 }
 
 interface OpenAIEmbeddingProviderOptions {

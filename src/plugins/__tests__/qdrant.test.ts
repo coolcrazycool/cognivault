@@ -8,6 +8,7 @@ beforeAll(() => {
 });
 
 const mockGetCollections = vi.fn();
+const mockGetCollection = vi.fn();
 const mockCreateCollection = vi.fn();
 const mockCreatePayloadIndex = vi.fn();
 const mockDelete = vi.fn();
@@ -15,6 +16,7 @@ const mockDelete = vi.fn();
 vi.mock('@qdrant/js-client-rest', () => {
   class MockQdrantClient {
     getCollections = mockGetCollections;
+    getCollection = mockGetCollection;
     createCollection = mockCreateCollection;
     createPayloadIndex = mockCreatePayloadIndex;
     delete = mockDelete;
@@ -26,6 +28,10 @@ describe('qdrantPlugin', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockDelete.mockResolvedValue({});
+    // Existing-collection probe defaults to a matching vector size (openai 1536)
+    mockGetCollection.mockResolvedValue({
+      config: { params: { vectors: { size: 1536, distance: 'Cosine' } } },
+    });
   });
 
   it('creates collection when it does not exist', async () => {

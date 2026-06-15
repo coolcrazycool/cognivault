@@ -17,7 +17,51 @@ vi.mock('openai', () => {
   };
 });
 
-const { DIMENSION_MAP, OpenAIEmbeddingProvider } = await import('../embedding.js');
+const { DIMENSION_MAP, OpenAIEmbeddingProvider, resolveDimensions } = await import(
+  '../embedding.js'
+);
+
+describe('resolveDimensions', () => {
+  it('derives the dimension from the model for the openai provider', () => {
+    expect(
+      resolveDimensions({
+        EMBEDDING_PROVIDER: 'openai',
+        EMBEDDING_MODEL: 'text-embedding-3-small',
+        EMBEDDING_DIMENSIONS: undefined,
+      }),
+    ).toBe(1536);
+  });
+
+  it('throws on an unknown openai model', () => {
+    expect(() =>
+      resolveDimensions({
+        EMBEDDING_PROVIDER: 'openai',
+        EMBEDDING_MODEL: 'nope',
+        EMBEDDING_DIMENSIONS: undefined,
+      }),
+    ).toThrow(/unknown.*model/i);
+  });
+
+  it('uses the explicit dimension for the gigachat provider', () => {
+    expect(
+      resolveDimensions({
+        EMBEDDING_PROVIDER: 'gigachat',
+        EMBEDDING_MODEL: 'EmbeddingsGigaR',
+        EMBEDDING_DIMENSIONS: 2560,
+      }),
+    ).toBe(2560);
+  });
+
+  it('throws when gigachat is selected without an explicit dimension', () => {
+    expect(() =>
+      resolveDimensions({
+        EMBEDDING_PROVIDER: 'gigachat',
+        EMBEDDING_MODEL: 'EmbeddingsGigaR',
+        EMBEDDING_DIMENSIONS: undefined,
+      }),
+    ).toThrow(/EMBEDDING_DIMENSIONS/);
+  });
+});
 
 describe('DIMENSION_MAP', () => {
   it('has text-embedding-3-small with dimension 1536', () => {

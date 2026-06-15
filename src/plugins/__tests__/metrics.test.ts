@@ -19,6 +19,9 @@ vi.mock('openai', () => {
 vi.mock('@qdrant/js-client-rest', () => {
   class MockQdrantClient {
     getCollections = vi.fn().mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+    getCollection = vi.fn().mockResolvedValue({
+      config: { params: { vectors: { size: 1536, distance: 'Cosine' } } },
+    });
     createCollection = vi.fn().mockResolvedValue({});
     createPayloadIndex = vi.fn().mockResolvedValue({});
     upsert = vi.fn().mockResolvedValue({});

@@ -1,0 +1,40 @@
+[Unit]
+Description=CogniVault knowledge access API
+Documentation=https://github.com/coolcrazycool/cognivault
+After=network-online.target qdrant.service
+Wants=network-online.target
+# Local Qdrant under systemd — drop this line if QDRANT_URL points at a remote instance.
+Requires=qdrant.service
+
+[Service]
+Type=simple
+User=cognivault
+Group=cognivault
+WorkingDirectory=/opt/cognivault
+
+# PATH must contain `node` AND `ob` (obsidian-headless) — the app spawns `ob sync`
+# per user. With NodeSource both live in /usr/bin; adjust if you use nvm.
+Environment=NODE_ENV=production
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/opt/cognivault/.env
+
+ExecStart=/usr/bin/node dist/server.js
+
+# server.ts handles SIGTERM for a graceful shutdown.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=5
+
+# --- Hardening (optional) ---------------------------------------------------
+# NOTE: `ob` reads its auth token from the user's config home
+# (~/.config/obsidian-headless/auth_token). If you enable ProtectHome you MUST
+# expose that directory via ReadWritePaths, or vault sync will break.
+NoNewPrivileges=true
+PrivateTmp=true
+# ProtectSystem=full
+# ProtectHome=true
+# ReadWritePaths=/opt/cognivault/.cognivault
+
+[Install]
+WantedBy=multi-user.target

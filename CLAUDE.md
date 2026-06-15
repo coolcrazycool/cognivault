@@ -85,7 +85,48 @@ PORT=3000                  # HTTP port (default: 3000)
 HOST=0.0.0.0              # Bind address (default: 0.0.0.0)
 LOG_LEVEL=info             # Pino log level (default: info)
 QDRANT_URL=http://localhost:6333  # Qdrant connection URL
+
+# Embedding provider
+EMBEDDING_PROVIDER=openai  # openai | gigachat (default: openai)
+
+# GigaChat (when EMBEDDING_PROVIDER=gigachat) — mTLS, system-wide certificate
+GIGACHAT_BASE_URL=https://gigachat-ift.sberdevices.delta.sbrf.ru/v1
+GIGACHAT_MODEL=EmbeddingsGigaR
+EMBEDDING_DIMENSIONS=      # required for gigachat: vector size of the model
+GIGACHAT_CERT_PATH=        # required: client certificate (PEM)
+GIGACHAT_KEY_PATH=         # required: client private key (PEM)
+GIGACHAT_KEY_PASSPHRASE=   # optional: private key passphrase
+GIGACHAT_CA_PATH=          # optional: CA bundle for server verification
+GIGACHAT_VERIFY_SSL=true   # set false only as a temporary escape hatch
 ```
+
+## Vault Sources
+
+A user's `vaultPath` is watched by the filesystem poller (`src/lib/indexer.ts`),
+**independently of Obsidian sync** — anything in the folder gets indexed regardless of
+how it got there.
+
+- **Obsidian-synced vault:** `cognivault-ctl add-user …` runs `ob login`/`ob sync-setup`
+  and stores an `obsidian` config; the sync plugin spawns `ob sync --continuous`.
+- **Plain local folder:** `cognivault-ctl add-local-user --id <id> --vault-path <dir>
+  [--openai-key <key>]` registers a user with **no** `obsidian` config. No `ob` process
+  is started — you edit files in the folder directly and the poller indexes them.
+  `obsidian` and `openaiKey` are optional on the user record (`openaiKey` is only needed
+  for the OpenAI embedding provider). Folder-only mode needs no `obsidian-headless`.
+
+## Embedding Providers
+
+- **Selection:** `EMBEDDING_PROVIDER` chooses `openai` (default) or `gigachat`.
+- **GigaChat:** OpenAI-compatible `/v1/embeddings` reached over **mTLS** — the PEM
+  client certificate *is* the auth (no bearer token). Implemented in
+  `src/lib/gigachat-embedding.ts` via `node:https` (no extra deps). The cert is a
+  **system-wide** credential, so one shared embedder serves all users (per-user
+  OpenAI keys do not apply).
+- **Vector size:** OpenAI models derive size from `DIMENSION_MAP`; GigaChat needs an
+  explicit `EMBEDDING_DIMENSIONS`. `resolveDimensions()` (`src/lib/embedding.ts`) is
+  the single source used by both the embedder and the Qdrant collection.
+- **Switching providers** with a different dimension requires a **fresh Qdrant
+  collection + re-index** — startup fails fast with a clear error on size mismatch.
 
 ## Key Decisions
 

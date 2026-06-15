@@ -48,6 +48,9 @@ async function syncPlugin(fastify: FastifyInstance): Promise<void> {
   // ── Inner functions ──
 
   function spawnSync(user: UserRecord): void {
+    // Folder-only users have no Obsidian config and are never synced.
+    if (!user.obsidian) return;
+
     const entry = syncs.get(user.userId);
     if (!entry || entry.stopping) return;
 
@@ -60,6 +63,17 @@ async function syncPlugin(fastify: FastifyInstance): Promise<void> {
     entry.process = cp;
     entry.startTime = Date.now();
     syncRunning.labels({ user_id: user.userId }).set(1);
+
+    // Spawn failures (e.g. `ob` not installed) emit 'error' and no 'exit' — handle
+    // them so an unhandled error event cannot crash the whole server.
+    cp.on('error', (err) => {
+      syncRunning.labels({ user_id: user.userId }).set(0);
+      syncFailures.labels({ user_id: user.userId }).inc();
+      fastify.log.error(
+        { userId: user.userId, err },
+        'Failed to spawn `ob` (is obsidian-headless installed and on PATH?)',
+      );
+    });
 
     // Pipe stdout/stderr to Fastify logger
     cp.stdout?.on('data', (data: Buffer) => {
@@ -117,6 +131,15 @@ async function syncPlugin(fastify: FastifyInstance): Promise<void> {
   // ── Registry event handlers ──
 
   fastify.registry.on('user-added', (user) => {
+    // Skip sync entirely for folder-only users (no Obsidian config).
+    if (!user.obsidian) {
+      fastify.log.info(
+        { userId: user.userId },
+        'No Obsidian config — skipping sync (folder-only user)',
+      );
+      return;
+    }
+
     const entry: SyncEntry = {
       process: null,
       backoffDelay: BASE_DELAY,

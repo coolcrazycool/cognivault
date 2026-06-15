@@ -166,6 +166,25 @@ describe('sync plugin', () => {
     });
   });
 
+  describe('folder-only users (no obsidian)', () => {
+    it('does not spawn ob sync for a user without an obsidian config', async () => {
+      const app = await buildTestApp();
+      await app.ready();
+
+      const localUser = {
+        userId: 'local-1',
+        apiKey: 'cv-local-1',
+        vaultPath: '/tmp/folder',
+      } as unknown as MockUser;
+      await emitUserAdded(app, localUser);
+
+      expect(spawnCallArgs.length).toBe(0);
+      expect(mockUnlink).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
   describe('user-added: lock cleanup', () => {
     it('deletes .obsidian/.sync.lock before spawning', async () => {
       const app = await buildTestApp();

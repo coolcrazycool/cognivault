@@ -454,6 +454,50 @@ describe('UserRegistry', () => {
     });
   });
 
+  // ── Folder-only users (no Obsidian) ──
+
+  describe('folder-only users', () => {
+    function makeLocalUser(overrides: Partial<UserRecord> = {}): UserRecord {
+      return {
+        userId: 'local',
+        apiKey: 'cv-localkey',
+        vaultPath: '/folders/local',
+        ...overrides,
+      };
+    }
+
+    it('accepts and round-trips a record without an obsidian field', async () => {
+      await fs.writeFile(filePath, JSON.stringify([makeLocalUser()]));
+
+      const registry = new UserRegistry({ filePath });
+      await registry.load();
+
+      const found = registry.getUserById('local');
+      expect(found).toBeDefined();
+      expect(found?.vaultPath).toBe('/folders/local');
+      // Absent obsidian must stay absent — not coerced into an empty object.
+      expect(found?.obsidian).toBeUndefined();
+      expect(found?.openaiKey).toBeUndefined();
+    });
+
+    it('addUser persists a folder-only record and emits it with obsidian undefined', async () => {
+      const registry = new UserRegistry({ filePath });
+      await registry.load();
+
+      const captured = new Promise<UserRecord>((resolve) => {
+        registry.on('user-added', (u) => resolve(u));
+      });
+      await registry.addUser(makeLocalUser());
+
+      const emitted = await captured;
+      expect(emitted.obsidian).toBeUndefined();
+      expect(Object.isFrozen(emitted)).toBe(true);
+
+      const onDisk = JSON.parse(await fs.readFile(filePath, 'utf-8')) as UserRecord[];
+      expect(onDisk[0]?.obsidian).toBeUndefined();
+    });
+  });
+
   // ── Static Utility ──
 
   describe('generateApiKey', () => {

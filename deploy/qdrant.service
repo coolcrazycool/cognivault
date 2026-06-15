@@ -1,0 +1,31 @@
+[Unit]
+Description=Qdrant vector database
+Documentation=https://qdrant.tech/documentation/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qdrant
+Group=qdrant
+WorkingDirectory=/opt/qdrant
+
+# Storage + snapshots live here (must be writable by the qdrant user).
+Environment=QDRANT__STORAGE__STORAGE_PATH=/var/lib/qdrant/storage
+Environment=QDRANT__STORAGE__SNAPSHOTS_PATH=/var/lib/qdrant/snapshots
+# Bind to localhost only — CogniVault talks to it over the loopback.
+Environment=QDRANT__SERVICE__HOST=127.0.0.1
+Environment=QDRANT__SERVICE__HTTP_PORT=6333
+
+ExecStart=/opt/qdrant/qdrant
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/qdrant
+
+[Install]
+WantedBy=multi-user.target

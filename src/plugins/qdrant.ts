@@ -2,7 +2,7 @@ import { QdrantClient } from '@qdrant/js-client-rest';
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import { config } from '../config.js';
-import { DIMENSION_MAP } from '../lib/embedding.js';
+import { resolveDimensions } from '../lib/embedding.js';
 import { TenantQdrantClient } from '../lib/tenant-qdrant-client.js';
 
 declare module 'fastify' {
@@ -26,18 +26,28 @@ const PAYLOAD_INDEXES: Array<{ field: string; type: 'keyword' | 'integer' }> = [
 ];
 
 async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
-  const dimensions = DIMENSION_MAP[config.EMBEDDING_MODEL];
-  if (dimensions === undefined) {
-    throw new Error(
-      `Unknown embedding model: "${config.EMBEDDING_MODEL}". Known models: ${Object.keys(DIMENSION_MAP).join(', ')}`,
-    );
-  }
+  const dimensions = resolveDimensions(config);
 
   const client = new QdrantClient({ url: config.QDRANT_URL });
 
   // Check if collection exists; create if not (idempotent restarts)
   const { collections } = await client.getCollections();
   const exists = collections.some((c) => c.name === COLLECTION_NAME);
+
+  if (exists) {
+    // Vector size is fixed at creation; switching embedding providers/models with
+    // a different dimension requires a fresh collection and re-index.
+    const info = await client.getCollection(COLLECTION_NAME);
+    const vectors = info.config?.params?.vectors;
+    const existingSize = typeof vectors === 'object' && vectors ? vectors.size : undefined;
+    if (typeof existingSize === 'number' && existingSize !== dimensions) {
+      throw new Error(
+        `Qdrant collection "${COLLECTION_NAME}" has vector size ${existingSize}, but the ` +
+          `active embedding provider produces ${dimensions}. Recreate the collection and ` +
+          're-index after changing EMBEDDING_PROVIDER/model.',
+      );
+    }
+  }
 
   if (!exists) {
     await client.createCollection(COLLECTION_NAME, {
