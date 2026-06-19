@@ -12,10 +12,11 @@ const MAX_RETRIES = 3;
 const REQUEST_TIMEOUT_MS = 30_000;
 // GigaChat rejects oversized request bodies with HTTP 413 ("Request size exceeded").
 // Callers (the indexer) embed all chunks of a file in one call, so we split that into
-// sub-requests bounded by both a body-byte budget and an item count. Conservative on
-// purpose — internal gateways cap smaller than the public API.
-const MAX_REQUEST_BYTES = 120_000;
-const MAX_BATCH_ITEMS = 64;
+// sub-requests bounded by both a body-byte budget and an item count. Defaults are
+// conservative — internal gateways cap smaller than the public API — and overridable
+// per deployment via GIGACHAT_MAX_REQUEST_BYTES / GIGACHAT_MAX_BATCH_ITEMS.
+const DEFAULT_MAX_REQUEST_BYTES = 120_000;
+const DEFAULT_MAX_BATCH_ITEMS = 64;
 
 interface GigaChatEmbeddingItem {
   embedding: number[];
@@ -38,6 +39,10 @@ export interface GigaChatEmbeddingProviderOptions {
   keyPassphrase?: string;
   caPath?: string;
   verifySsl: boolean;
+  /** Max UTF-8 body bytes per embeddings request (default 120_000). */
+  maxRequestBytes?: number;
+  /** Max input items per embeddings request (default 64). */
+  maxBatchItems?: number;
   /** Override the HTTP transport (used in tests). */
   transport?: GigaChatTransport;
 }
@@ -52,12 +57,16 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
   private readonly _dimensions: number;
   private readonly endpoint: string;
   private readonly transport: GigaChatTransport;
+  private readonly maxRequestBytes: number;
+  private readonly maxBatchItems: number;
 
   constructor(opts: GigaChatEmbeddingProviderOptions) {
     this.model = opts.model;
     this._dimensions = opts.dimensions;
     this.endpoint = `${opts.baseUrl.replace(/\/+$/, '')}/embeddings`;
     this.transport = opts.transport ?? createHttpsTransport(opts);
+    this.maxRequestBytes = opts.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
+    this.maxBatchItems = opts.maxBatchItems ?? DEFAULT_MAX_BATCH_ITEMS;
   }
 
   get dimensions(): number {
@@ -103,7 +112,10 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
     let bytes = 0;
     for (const text of texts) {
       const size = Buffer.byteLength(text, 'utf8');
-      if (batch.length > 0 && (bytes + size > MAX_REQUEST_BYTES || batch.length >= MAX_BATCH_ITEMS)) {
+      if (
+        batch.length > 0 &&
+        (bytes + size > this.maxRequestBytes || batch.length >= this.maxBatchItems)
+      ) {
         yield batch;
         batch = [];
         bytes = 0;

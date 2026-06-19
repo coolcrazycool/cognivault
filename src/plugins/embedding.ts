@@ -33,6 +33,8 @@ async function embeddingPlugin(fastify: FastifyInstance): Promise<void> {
       keyPassphrase: config.GIGACHAT_KEY_PASSPHRASE,
       caPath: config.GIGACHAT_CA_PATH,
       verifySsl: config.GIGACHAT_VERIFY_SSL,
+      maxRequestBytes: config.GIGACHAT_MAX_REQUEST_BYTES,
+      maxBatchItems: config.GIGACHAT_MAX_BATCH_ITEMS,
     });
   }
 

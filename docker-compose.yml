@@ -11,6 +11,9 @@ services:
       # GigaChat: temporary escape hatch — skip server-cert verification until the
       # internal Sber CA bundle is mounted via GIGACHAT_CA_PATH. Insecure; for testing.
       - GIGACHAT_VERIFY_SSL=${GIGACHAT_VERIFY_SSL:-true}
+      # Lower these if GigaChat still returns 413 (internal gateway body-size cap).
+      - GIGACHAT_MAX_REQUEST_BYTES=${GIGACHAT_MAX_REQUEST_BYTES:-120000}
+      - GIGACHAT_MAX_BATCH_ITEMS=${GIGACHAT_MAX_BATCH_ITEMS:-64}
     volumes:
       - cognivault_data:/data
       - ${VAULT_PATH:-./notes}:/vault

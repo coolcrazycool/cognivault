@@ -38,6 +38,11 @@ const configSchema = z
       .enum(['true', 'false'])
       .default('true')
       .transform((v) => v === 'true'),
+    // GigaChat rejects oversized request bodies with HTTP 413. The embedder splits
+    // a file's chunks into sub-requests bounded by these. Tune down if 413 persists
+    // (the internal gateway may cap smaller than the public API).
+    GIGACHAT_MAX_REQUEST_BYTES: z.coerce.number().int().positive().default(120_000),
+    GIGACHAT_MAX_BATCH_ITEMS: z.coerce.number().int().positive().default(64),
 
     OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
   })
