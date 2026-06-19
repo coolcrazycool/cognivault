@@ -3,11 +3,12 @@ import { Agent, request } from 'node:https';
 import { getEncoding } from 'js-tiktoken';
 import type { EmbeddingProvider } from './embedding.js';
 
-// cl100k is an OpenAI tokenizer and only an approximation for GigaChat. It tends
-// to overestimate token counts for Cyrillic text, so truncating against it is
-// conservative (we cut earlier rather than later). The cap stays well under the
-// EmbeddingsGigaR input limit.
-const MAX_EMBEDDING_TOKENS = 4096;
+// GigaChat embeddings cap the input at 4096 tokens PER text, counted by GigaChat's
+// own tokenizer. We truncate with cl100k (OpenAI's), which UNDERcounts Russian text
+// vs GigaChat by ~20% — observed 4096 cl100k tokens ≈ 4982 GigaChat tokens — so
+// truncating at 4096 still 413s. Cap well below 4096 cl100k tokens to leave headroom
+// for that mismatch; any oversized chunk otherwise 413s on its own. Tune per deployment.
+const DEFAULT_MAX_EMBEDDING_TOKENS = 3_000;
 const MAX_RETRIES = 3;
 const REQUEST_TIMEOUT_MS = 30_000;
 // GigaChat rejects oversized request bodies with HTTP 413 ("Request size exceeded").
@@ -17,6 +18,10 @@ const REQUEST_TIMEOUT_MS = 30_000;
 // per deployment via GIGACHAT_MAX_REQUEST_BYTES / GIGACHAT_MAX_BATCH_ITEMS.
 const DEFAULT_MAX_REQUEST_BYTES = 120_000;
 const DEFAULT_MAX_BATCH_ITEMS = 64;
+// GigaChat also caps the total tokens across all inputs in one request (not just
+// body bytes), so a batch of many small chunks can still 413. Bound the summed
+// token count per request as well. Conservative default; tune per deployment.
+const DEFAULT_MAX_REQUEST_TOKENS = 2_048;
 
 interface GigaChatEmbeddingItem {
   embedding: number[];
@@ -43,6 +48,10 @@ export interface GigaChatEmbeddingProviderOptions {
   maxRequestBytes?: number;
   /** Max input items per embeddings request (default 64). */
   maxBatchItems?: number;
+  /** Max summed tokens across all inputs per embeddings request (default 2048). */
+  maxRequestTokens?: number;
+  /** Max cl100k tokens per single text before truncation (default 3000). */
+  maxEmbeddingTokens?: number;
   /** Override the HTTP transport (used in tests). */
   transport?: GigaChatTransport;
 }
@@ -59,6 +68,8 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
   private readonly transport: GigaChatTransport;
   private readonly maxRequestBytes: number;
   private readonly maxBatchItems: number;
+  private readonly maxRequestTokens: number;
+  private readonly maxEmbeddingTokens: number;
 
   constructor(opts: GigaChatEmbeddingProviderOptions) {
     this.model = opts.model;
@@ -67,6 +78,8 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
     this.transport = opts.transport ?? createHttpsTransport(opts);
     this.maxRequestBytes = opts.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES;
     this.maxBatchItems = opts.maxBatchItems ?? DEFAULT_MAX_BATCH_ITEMS;
+    this.maxRequestTokens = opts.maxRequestTokens ?? DEFAULT_MAX_REQUEST_TOKENS;
+    this.maxEmbeddingTokens = opts.maxEmbeddingTokens ?? DEFAULT_MAX_EMBEDDING_TOKENS;
   }
 
   get dimensions(): number {
@@ -79,17 +92,21 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
     }
 
     const enc = getEncoding('cl100k_base');
-    const truncated = texts.map((text) => {
+    const sized = texts.map((text) => {
       const tokens = enc.encode(text);
-      if (tokens.length <= MAX_EMBEDDING_TOKENS) {
-        return text;
-      }
-      return enc.decode(tokens.slice(0, MAX_EMBEDDING_TOKENS));
+      const capped =
+        tokens.length <= this.maxEmbeddingTokens ? tokens : tokens.slice(0, this.maxEmbeddingTokens);
+      const finalText = tokens.length <= this.maxEmbeddingTokens ? text : enc.decode(capped);
+      return {
+        text: finalText,
+        bytes: Buffer.byteLength(finalText, 'utf8'),
+        tokens: capped.length,
+      };
     });
 
     const embeddings: number[][] = [];
-    for (const batch of this.batchByRequestSize(truncated)) {
-      const body = JSON.stringify({ model: this.model, input: batch });
+    for (const batch of this.batchByRequestSize(sized)) {
+      const body = JSON.stringify({ model: this.model, input: batch.map((item) => item.text) });
       const response = await this.post(body);
       const ordered = response.data
         .slice()
@@ -102,26 +119,31 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
   }
 
   /**
-   * Splits texts into sub-batches that stay under GigaChat's request-size limit.
-   * Bounded by MAX_REQUEST_BYTES (UTF-8 body bytes) and MAX_BATCH_ITEMS. A single
-   * text larger than the budget is sent on its own — per-text token truncation
-   * already caps its size.
+   * Splits sized texts into sub-batches that stay under GigaChat's request limits:
+   * body bytes (maxRequestBytes), summed input tokens (maxRequestTokens), and item
+   * count (maxBatchItems). A single text larger than a budget is sent on its own —
+   * per-text token truncation already caps its size.
    */
-  private *batchByRequestSize(texts: string[]): Generator<string[]> {
-    let batch: string[] = [];
+  private *batchByRequestSize(
+    items: Array<{ text: string; bytes: number; tokens: number }>,
+  ): Generator<Array<{ text: string; bytes: number; tokens: number }>> {
+    let batch: Array<{ text: string; bytes: number; tokens: number }> = [];
     let bytes = 0;
-    for (const text of texts) {
-      const size = Buffer.byteLength(text, 'utf8');
-      if (
-        batch.length > 0 &&
-        (bytes + size > this.maxRequestBytes || batch.length >= this.maxBatchItems)
-      ) {
+    let tokens = 0;
+    for (const item of items) {
+      const exceeds =
+        bytes + item.bytes > this.maxRequestBytes ||
+        tokens + item.tokens > this.maxRequestTokens ||
+        batch.length >= this.maxBatchItems;
+      if (batch.length > 0 && exceeds) {
         yield batch;
         batch = [];
         bytes = 0;
+        tokens = 0;
       }
-      batch.push(text);
-      bytes += size;
+      batch.push(item);
+      bytes += item.bytes;
+      tokens += item.tokens;
     }
     if (batch.length > 0) {
       yield batch;

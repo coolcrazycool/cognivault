@@ -123,6 +123,43 @@ describe('GigaChatEmbeddingProvider', () => {
     expect(result).toHaveLength(40);
   });
 
+  it('truncates a text above maxEmbeddingTokens before sending', async () => {
+    let sent: string[] = [];
+    const transport = vi.fn().mockImplementation((_url: string, body: string) => {
+      sent = (JSON.parse(body) as { input: string[] }).input;
+      return Promise.resolve({ data: sent.map((_t, index) => ({ index, embedding: [index] })) });
+    });
+    const provider = new GigaChatEmbeddingProvider({
+      ...baseOpts,
+      maxEmbeddingTokens: 10,
+      transport,
+    });
+
+    const long = Array.from({ length: 500 }, (_v, i) => `word${i}`).join(' ');
+    await provider.embed([long]);
+
+    expect(sent[0]).toBeDefined();
+    // Truncated to ~10 tokens, far shorter than the 500-word original.
+    expect((sent[0] as string).length).toBeLessThan(long.length / 10);
+  });
+
+  it('leaves a text under maxEmbeddingTokens unchanged', async () => {
+    let sent: string[] = [];
+    const transport = vi.fn().mockImplementation((_url: string, body: string) => {
+      sent = (JSON.parse(body) as { input: string[] }).input;
+      return Promise.resolve({ data: [{ index: 0, embedding: [1] }] });
+    });
+    const provider = new GigaChatEmbeddingProvider({
+      ...baseOpts,
+      maxEmbeddingTokens: 3000,
+      transport,
+    });
+
+    await provider.embed(['short text']);
+
+    expect(sent[0]).toBe('short text');
+  });
+
   it('throws the last error after exhausting retries', async () => {
     const transport = vi.fn().mockRejectedValue(new Error('GigaChat embeddings 503: down'));
     const provider = new GigaChatEmbeddingProvider({ ...baseOpts, transport });

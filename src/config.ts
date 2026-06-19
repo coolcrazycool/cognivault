@@ -43,6 +43,11 @@ const configSchema = z
     // (the internal gateway may cap smaller than the public API).
     GIGACHAT_MAX_REQUEST_BYTES: z.coerce.number().int().positive().default(120_000),
     GIGACHAT_MAX_BATCH_ITEMS: z.coerce.number().int().positive().default(64),
+    // GigaChat also caps total tokens summed across all inputs in one request.
+    GIGACHAT_MAX_REQUEST_TOKENS: z.coerce.number().int().positive().default(2_048),
+    // Per-text truncation (cl100k tokens). Kept below GigaChat's 4096-token-per-input
+    // limit because cl100k undercounts Russian vs GigaChat's tokenizer by ~20%.
+    GIGACHAT_MAX_EMBEDDING_TOKENS: z.coerce.number().int().positive().default(3_000),
 
     OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
   })

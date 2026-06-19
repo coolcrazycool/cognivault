@@ -14,6 +14,9 @@ services:
       # Lower these if GigaChat still returns 413 (internal gateway body-size cap).
       - GIGACHAT_MAX_REQUEST_BYTES=${GIGACHAT_MAX_REQUEST_BYTES:-120000}
       - GIGACHAT_MAX_BATCH_ITEMS=${GIGACHAT_MAX_BATCH_ITEMS:-64}
+      # Per-text token cap — must stay below GigaChat's 4096/input (cl100k undercounts
+      # Russian by ~20%). Lower this if you still see "Tokens limit exceeded".
+      - GIGACHAT_MAX_EMBEDDING_TOKENS=${GIGACHAT_MAX_EMBEDDING_TOKENS:-3000}
     volumes:
       - cognivault_data:/data
       - ${VAULT_PATH:-./notes}:/vault

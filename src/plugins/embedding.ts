@@ -35,6 +35,8 @@ async function embeddingPlugin(fastify: FastifyInstance): Promise<void> {
       verifySsl: config.GIGACHAT_VERIFY_SSL,
       maxRequestBytes: config.GIGACHAT_MAX_REQUEST_BYTES,
       maxBatchItems: config.GIGACHAT_MAX_BATCH_ITEMS,
+      maxRequestTokens: config.GIGACHAT_MAX_REQUEST_TOKENS,
+      maxEmbeddingTokens: config.GIGACHAT_MAX_EMBEDDING_TOKENS,
     });
   }
 
