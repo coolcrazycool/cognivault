@@ -17,6 +17,10 @@ services:
       # Per-text token cap — must stay below GigaChat's 4096/input (cl100k undercounts
       # Russian by ~20%). Lower this if you still see "Tokens limit exceeded".
       - GIGACHAT_MAX_EMBEDDING_TOKENS=${GIGACHAT_MAX_EMBEDDING_TOKENS:-3000}
+      # Retry/backoff on 429 rate limiting (and 5xx). Raise the base delay if GigaChat
+      # keeps returning "too many requests" during bulk reindex.
+      - GIGACHAT_MAX_RETRIES=${GIGACHAT_MAX_RETRIES:-5}
+      - GIGACHAT_RETRY_BASE_DELAY_MS=${GIGACHAT_RETRY_BASE_DELAY_MS:-1000}
     volumes:
       - cognivault_data:/data
       - ${VAULT_PATH:-./notes}:/vault

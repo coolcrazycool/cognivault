@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { GigaChatEmbeddingProvider } from '../gigachat-embedding.js';
+import { GigaChatEmbeddingProvider, GigaChatHttpError } from '../gigachat-embedding.js';
 
 const baseOpts = {
   baseUrl: 'https://gigachat-ift.sberdevices.delta.sbrf.ru/v1',
@@ -8,6 +8,8 @@ const baseOpts = {
   certPath: '/dev/null/cert.pem',
   keyPath: '/dev/null/key.pem',
   verifySsl: true,
+  // Keep retries instant in tests.
+  retryBaseDelayMs: 0,
 };
 
 describe('GigaChatEmbeddingProvider', () => {
@@ -162,9 +164,36 @@ describe('GigaChatEmbeddingProvider', () => {
 
   it('throws the last error after exhausting retries', async () => {
     const transport = vi.fn().mockRejectedValue(new Error('GigaChat embeddings 503: down'));
-    const provider = new GigaChatEmbeddingProvider({ ...baseOpts, transport });
+    const provider = new GigaChatEmbeddingProvider({ ...baseOpts, maxRetries: 3, transport });
 
     await expect(provider.embed(['boom'])).rejects.toThrow(/503/);
     expect(transport).toHaveBeenCalledTimes(3);
+  });
+
+  it('retries 429 rate-limit errors then succeeds', async () => {
+    const transport = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new GigaChatHttpError(429, 'GigaChat embeddings 429: too many requests', 0),
+      )
+      .mockResolvedValueOnce({ data: [{ index: 0, embedding: [0.9] }] });
+    const provider = new GigaChatEmbeddingProvider({ ...baseOpts, transport });
+
+    const result = await provider.embed(['slow down']);
+
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(result).toEqual([[0.9]]);
+  });
+
+  it('does not retry non-retryable client errors (413)', async () => {
+    const transport = vi
+      .fn()
+      .mockRejectedValue(
+        new GigaChatHttpError(413, 'GigaChat embeddings 413: Tokens limit exceeded'),
+      );
+    const provider = new GigaChatEmbeddingProvider({ ...baseOpts, transport });
+
+    await expect(provider.embed(['too big'])).rejects.toThrow(/413/);
+    expect(transport).toHaveBeenCalledTimes(1);
   });
 });

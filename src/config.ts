@@ -48,6 +48,9 @@ const configSchema = z
     // Per-text truncation (cl100k tokens). Kept below GigaChat's 4096-token-per-input
     // limit because cl100k undercounts Russian vs GigaChat's tokenizer by ~20%.
     GIGACHAT_MAX_EMBEDDING_TOKENS: z.coerce.number().int().positive().default(3_000),
+    // Retry/backoff for rate limiting (429) and 5xx. Honors Retry-After when present.
+    GIGACHAT_MAX_RETRIES: z.coerce.number().int().positive().default(5),
+    GIGACHAT_RETRY_BASE_DELAY_MS: z.coerce.number().int().positive().default(1_000),
 
     OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
   })

@@ -9,7 +9,7 @@ import type { EmbeddingProvider } from './embedding.js';
 // truncating at 4096 still 413s. Cap well below 4096 cl100k tokens to leave headroom
 // for that mismatch; any oversized chunk otherwise 413s on its own. Tune per deployment.
 const DEFAULT_MAX_EMBEDDING_TOKENS = 3_000;
-const MAX_RETRIES = 3;
+const DEFAULT_MAX_RETRIES = 5;
 const REQUEST_TIMEOUT_MS = 30_000;
 // GigaChat rejects oversized request bodies with HTTP 413 ("Request size exceeded").
 // Callers (the indexer) embed all chunks of a file in one call, so we split that into
@@ -22,6 +22,51 @@ const DEFAULT_MAX_BATCH_ITEMS = 64;
 // body bytes), so a batch of many small chunks can still 413. Bound the summed
 // token count per request as well. Conservative default; tune per deployment.
 const DEFAULT_MAX_REQUEST_TOKENS = 2_048;
+const DEFAULT_RETRY_BASE_DELAY_MS = 1_000;
+
+/** HTTP error from GigaChat, carrying the status and any Retry-After hint. */
+export class GigaChatHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly retryAfterMs?: number,
+  ) {
+    super(message);
+    this.name = 'GigaChatHttpError';
+  }
+}
+
+/** 429 (rate limit) and 5xx are worth retrying; other 4xx (400/413) are not. */
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+/** Pulls a status code from a typed error, or parses it from a legacy message. */
+function statusOf(err: unknown): number | undefined {
+  if (err instanceof GigaChatHttpError) {
+    return err.status;
+  }
+  const match = err instanceof Error ? err.message.match(/embeddings (\d{3})\b/) : null;
+  return match ? Number(match[1]) : undefined;
+}
+
+function sleep(ms: number): Promise<void> {
+  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+/** Parses a Retry-After header (delta-seconds or HTTP date) into milliseconds. */
+function parseRetryAfter(header: string | string[] | undefined): number | undefined {
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value) {
+    return undefined;
+  }
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) {
+    return Math.max(0, seconds * 1000);
+  }
+  const dateMs = Date.parse(value);
+  return Number.isNaN(dateMs) ? undefined : Math.max(0, dateMs - Date.now());
+}
 
 interface GigaChatEmbeddingItem {
   embedding: number[];
@@ -52,6 +97,10 @@ export interface GigaChatEmbeddingProviderOptions {
   maxRequestTokens?: number;
   /** Max cl100k tokens per single text before truncation (default 3000). */
   maxEmbeddingTokens?: number;
+  /** Attempts per request before giving up (default 5). */
+  maxRetries?: number;
+  /** Base backoff between retries; doubles each attempt (default 1000ms). 0 in tests. */
+  retryBaseDelayMs?: number;
   /** Override the HTTP transport (used in tests). */
   transport?: GigaChatTransport;
 }
@@ -70,6 +119,8 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
   private readonly maxBatchItems: number;
   private readonly maxRequestTokens: number;
   private readonly maxEmbeddingTokens: number;
+  private readonly maxRetries: number;
+  private readonly retryBaseDelayMs: number;
 
   constructor(opts: GigaChatEmbeddingProviderOptions) {
     this.model = opts.model;
@@ -80,6 +131,8 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
     this.maxBatchItems = opts.maxBatchItems ?? DEFAULT_MAX_BATCH_ITEMS;
     this.maxRequestTokens = opts.maxRequestTokens ?? DEFAULT_MAX_REQUEST_TOKENS;
     this.maxEmbeddingTokens = opts.maxEmbeddingTokens ?? DEFAULT_MAX_EMBEDDING_TOKENS;
+    this.maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.retryBaseDelayMs = opts.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
   }
 
   get dimensions(): number {
@@ -95,7 +148,9 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
     const sized = texts.map((text) => {
       const tokens = enc.encode(text);
       const capped =
-        tokens.length <= this.maxEmbeddingTokens ? tokens : tokens.slice(0, this.maxEmbeddingTokens);
+        tokens.length <= this.maxEmbeddingTokens
+          ? tokens
+          : tokens.slice(0, this.maxEmbeddingTokens);
       const finalText = tokens.length <= this.maxEmbeddingTokens ? text : enc.decode(capped);
       return {
         text: finalText,
@@ -156,11 +211,23 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
 
   private async post(body: string): Promise<GigaChatEmbeddingResponse> {
     let lastError: unknown;
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt < this.maxRetries; attempt++) {
       try {
         return await this.transport(this.endpoint, body);
       } catch (err) {
         lastError = err;
+        const status = statusOf(err);
+        // A definitive client error (400, 413, …) won't change on retry — fail fast.
+        if (status !== undefined && !isRetryableStatus(status)) {
+          throw err;
+        }
+        if (attempt < this.maxRetries - 1) {
+          const retryAfter = err instanceof GigaChatHttpError ? err.retryAfterMs : undefined;
+          // Honor Retry-After (429); otherwise exponential backoff with jitter.
+          const backoff = this.retryBaseDelayMs * 2 ** attempt;
+          const jitter = backoff * 0.25 * Math.random();
+          await sleep(retryAfter ?? backoff + jitter);
+        }
       }
     }
     throw lastError instanceof Error
@@ -204,7 +271,14 @@ function createHttpsTransport(opts: GigaChatEmbeddingProviderOptions): GigaChatT
             const text = Buffer.concat(chunks).toString('utf8');
             const status = res.statusCode ?? 0;
             if (status < 200 || status >= 300) {
-              reject(new Error(`GigaChat embeddings ${status}: ${text.slice(0, 500)}`));
+              const retryAfterMs = parseRetryAfter(res.headers['retry-after']);
+              reject(
+                new GigaChatHttpError(
+                  status,
+                  `GigaChat embeddings ${status}: ${text.slice(0, 500)}`,
+                  retryAfterMs,
+                ),
+              );
               return;
             }
             try {
