@@ -10,6 +10,12 @@ import type { EmbeddingProvider } from './embedding.js';
 const MAX_EMBEDDING_TOKENS = 4096;
 const MAX_RETRIES = 3;
 const REQUEST_TIMEOUT_MS = 30_000;
+// GigaChat rejects oversized request bodies with HTTP 413 ("Request size exceeded").
+// Callers (the indexer) embed all chunks of a file in one call, so we split that into
+// sub-requests bounded by both a body-byte budget and an item count. Conservative on
+// purpose — internal gateways cap smaller than the public API.
+const MAX_REQUEST_BYTES = 120_000;
+const MAX_BATCH_ITEMS = 64;
 
 interface GigaChatEmbeddingItem {
   embedding: number[];
@@ -72,13 +78,42 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
       return enc.decode(tokens.slice(0, MAX_EMBEDDING_TOKENS));
     });
 
-    const body = JSON.stringify({ model: this.model, input: truncated });
-    const response = await this.post(body);
+    const embeddings: number[][] = [];
+    for (const batch of this.batchByRequestSize(truncated)) {
+      const body = JSON.stringify({ model: this.model, input: batch });
+      const response = await this.post(body);
+      const ordered = response.data
+        .slice()
+        .sort((a, b) => a.index - b.index)
+        .map((item) => item.embedding);
+      embeddings.push(...ordered);
+    }
 
-    return response.data
-      .slice()
-      .sort((a, b) => a.index - b.index)
-      .map((item) => item.embedding);
+    return embeddings;
+  }
+
+  /**
+   * Splits texts into sub-batches that stay under GigaChat's request-size limit.
+   * Bounded by MAX_REQUEST_BYTES (UTF-8 body bytes) and MAX_BATCH_ITEMS. A single
+   * text larger than the budget is sent on its own — per-text token truncation
+   * already caps its size.
+   */
+  private *batchByRequestSize(texts: string[]): Generator<string[]> {
+    let batch: string[] = [];
+    let bytes = 0;
+    for (const text of texts) {
+      const size = Buffer.byteLength(text, 'utf8');
+      if (batch.length > 0 && (bytes + size > MAX_REQUEST_BYTES || batch.length >= MAX_BATCH_ITEMS)) {
+        yield batch;
+        batch = [];
+        bytes = 0;
+      }
+      batch.push(text);
+      bytes += size;
+    }
+    if (batch.length > 0) {
+      yield batch;
+    }
   }
 
   async validate(): Promise<void> {

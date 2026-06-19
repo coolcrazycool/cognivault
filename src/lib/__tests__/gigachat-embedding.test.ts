@@ -85,6 +85,44 @@ describe('GigaChatEmbeddingProvider', () => {
     expect(result).toEqual([[0.5]]);
   });
 
+  it('splits large inputs into multiple requests under the item-count limit', async () => {
+    // Each request echoes one embedding per input item, indexed within the batch.
+    const transport = vi.fn().mockImplementation((_url: string, body: string) => {
+      const input = (JSON.parse(body) as { input: string[] }).input;
+      return Promise.resolve({
+        data: input.map((_text, index) => ({ index, embedding: [index] })),
+      });
+    });
+    const provider = new GigaChatEmbeddingProvider({ ...baseOpts, transport });
+
+    const texts = Array.from({ length: 150 }, (_v, i) => `t${i}`);
+    const result = await provider.embed(texts);
+
+    // 150 items / 64 per batch => 3 requests, and every input gets an embedding.
+    expect(transport).toHaveBeenCalledTimes(3);
+    expect(result).toHaveLength(150);
+  });
+
+  it('splits inputs that exceed the request-byte budget before hitting the item cap', async () => {
+    const transport = vi.fn().mockImplementation((_url: string, body: string) => {
+      const input = (JSON.parse(body) as { input: string[] }).input;
+      return Promise.resolve({
+        data: input.map((_text, index) => ({ index, embedding: [index] })),
+      });
+    });
+    const provider = new GigaChatEmbeddingProvider({ ...baseOpts, transport });
+
+    // 40 varied texts (< 64-item cap), each ~6KB → ~240KB total, comfortably under
+    // the per-text token cap. The 120KB byte budget must force more than one request.
+    const texts = Array.from({ length: 40 }, (_v, i) =>
+      Array.from({ length: 800 }, (_w, j) => `w${i}_${j}`).join(' '),
+    );
+    const result = await provider.embed(texts);
+
+    expect(transport.mock.calls.length).toBeGreaterThan(1);
+    expect(result).toHaveLength(40);
+  });
+
   it('throws the last error after exhausting retries', async () => {
     const transport = vi.fn().mockRejectedValue(new Error('GigaChat embeddings 503: down'));
     const provider = new GigaChatEmbeddingProvider({ ...baseOpts, transport });
