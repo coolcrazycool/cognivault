@@ -46,7 +46,7 @@ spec:
           # SberOSC docker proxy. REPLACE the tag with a CONCRETE tag (e.g. the CI
           # `sha-<gitsha>` tag) — SberOSC does NOT proxy the `latest` tag.
           # The ghcr package must be PUBLIC for SberOSC to pull it.
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:REPLACE_WITH_SHA_TAG
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-915eb9e
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
