@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import multipart from '@fastify/multipart';
 import type { TypeBoxTypeProvider } from '@fastify/type-provider-typebox';
 import type { FastifyInstance } from 'fastify';
 import Fastify from 'fastify';
@@ -101,6 +102,11 @@ export async function buildApp(opts?: BuildAppOptions): Promise<FastifyInstance>
 
   // TOON content negotiation plugin (after auth, before infrastructure)
   await app.register(toonPlugin);
+
+  // Multipart uploads (zip archive → vault). 50 MB cap, one file per request.
+  await app.register(multipart, {
+    limits: { fileSize: 50 * 1024 * 1024, files: 1 },
+  });
 
   // Infrastructure plugins (order: vault, qdrant before db; embedding depends on registry)
   await app.register(vaultPlugin);

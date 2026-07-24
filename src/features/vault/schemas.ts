@@ -19,6 +19,27 @@ export const ErrorResponseSchema = Type.Object({
 
 export type ErrorResponse = Static<typeof ErrorResponseSchema>;
 
+// ── Upload (zip archive → user vault) ──
+
+export const UploadResponseSchema = Type.Object({
+  uploaded: Type.Number(),
+  skipped: Type.Number(),
+  files: Type.Array(Type.String()),
+});
+
+export type UploadResponse = Static<typeof UploadResponseSchema>;
+
+// Body is multipart/form-data (a single zip file), so no TypeBox body schema.
+export const uploadSchema = {
+  response: {
+    200: UploadResponseSchema,
+    400: ErrorResponseSchema,
+    403: ErrorResponseSchema,
+    404: ErrorResponseSchema,
+    413: ErrorResponseSchema,
+  },
+};
+
 // ── List Files ──
 
 export const ListFilesQuerySchema = Type.Object({
