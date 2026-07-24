@@ -1,4 +1,7 @@
-fastapi==0.115.6
+fastapi==0.121.3
 uvicorn==0.34.0
 httpx==0.28.1
 python-multipart==0.0.20
+# Pin starlette to a patched release (>= 0.49.1 fixes CVE-2025-62727 / CVE-2025-54121).
+# fastapi 0.121.x allows starlette <0.51, so 0.49.3 resolves cleanly.
+starlette==0.49.3
