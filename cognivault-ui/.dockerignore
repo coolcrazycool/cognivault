@@ -1,0 +1,9 @@
+__pycache__
+*.pyc
+.venv
+venv
+DEPLOY.md
+README.md
+bootstrap.py
+run.sh
+update.sh

@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CogniVault UI</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+  <!-- ===================== HEADER ===================== -->
+  <header class="header">
+    <div class="brand">
+      <b>CogniVault</b>
+      <span>Доступ к знаниям для ИИ-агентов</span>
+    </div>
+    <div class="statusbar" id="statusbar" aria-live="polite">
+      <span class="pill" id="pill-cognivault"><span class="dot"></span><span class="pt">CogniVault</span></span>
+      <span class="pill" id="pill-cert"><span class="dot"></span><span class="pt">Сертификаты</span></span>
+      <span class="pill" id="pill-env"><span class="dot"></span><span class="pt">Окружение</span></span>
+    </div>
+    <div class="spacer"></div>
+    <div class="identity" id="identity" hidden>
+      <span class="who" id="identity-user" title="Текущий пользователь"></span>
+      <button class="iconbtn" id="logout-btn" aria-label="Выйти">Выйти</button>
+    </div>
+    <button class="iconbtn icononly" id="theme-btn" aria-label="Переключить тему" title="Тема">◐</button>
+    <button class="iconbtn" id="settings-btn" aria-label="Открыть настройки" aria-haspopup="dialog">⚙ Настройки</button>
+  </header>
+
+  <!-- ===================== BODY ===================== -->
+  <div class="body">
+    <!-- History rail -->
+    <aside class="rail" aria-label="История чатов">
+      <div class="rail-top">
+        <button class="newchat" id="newchat-btn">＋ Новый чат</button>
+      </div>
+      <div class="rail-head">
+        <span class="eyebrow">История</span>
+        <small id="history-count"></small>
+      </div>
+      <div class="chatlist" id="chatlist"></div>
+    </aside>
+
+    <!-- Chat column -->
+    <main class="chat">
+      <div class="banner" id="setup-banner" hidden>
+        <span id="setup-banner-text"></span>
+        <button type="button" id="setup-banner-btn">Открыть настройки</button>
+      </div>
+      <div class="stream" id="stream">
+        <div class="thread" id="thread"></div>
+      </div>
+      <div class="composer">
+        <div class="composer-inner">
+          <div class="compbar">
+            <div class="rag">
+              <button class="switch" id="rag-switch" role="switch" aria-checked="true" aria-label="Поиск по базе знаний"></button>
+              <div class="rag-label">
+                <b>RAG</b>
+                <span id="rag-sublabel">Поиск по базе знаний включён</span>
+              </div>
+            </div>
+          </div>
+          <div class="compos-row">
+            <textarea class="ta" id="composer-input" rows="1" placeholder="Спросите что-нибудь про внутренние регламенты…"></textarea>
+            <button class="send" id="send-btn">Отправить</button>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ===================== SETTINGS DRAWER ===================== -->
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden>
+  <div class="drawer-head">
+    <b id="drawer-title">Настройки</b>
+    <button class="iconbtn icononly" id="drawer-close" aria-label="Закрыть настройки">✕</button>
+  </div>
+  <div class="drawer-body">
+
+    <!-- §0 Сведения о сервисе (только для server-режима, read-only) -->
+    <section class="section" id="section-server-info" aria-labelledby="s-srv" hidden>
+      <span class="eyebrow" id="s-srv">Сведения о сервисе</span>
+      <div class="field">
+        <label>Модель</label>
+        <div class="ro-value" id="srv-model">—</div>
+      </div>
+      <div class="ro-line" id="srv-params"></div>
+      <small class="hint">Настройки подключения и сертификатов управляются администратором.</small>
+    </section>
+
+    <!-- §1 Подключение -->
+    <section class="section" id="section-conn" aria-labelledby="s-conn">
+      <span class="eyebrow" id="s-conn">Подключение</span>
+      <div class="field">
+        <label for="cfg-cognivault-url">Адрес CogniVault</label>
+        <input class="input" id="cfg-cognivault-url" placeholder="http://localhost:3000">
+      </div>
+      <div class="field">
+        <label for="cfg-token">Токен доступа <span class="hint">(хранится на сервере)</span></label>
+        <div class="inline">
+          <input class="input" id="cfg-token" type="password" placeholder="••••••••••••">
+          <button class="linkbtn" id="token-toggle" type="button" aria-pressed="false">Показать</button>
+        </div>
+      </div>
+      <div class="section-actions">
+        <button class="btn primary" id="save-conn">Сохранить</button>
+        <span class="saved" id="saved-conn" hidden>✓ Сохранено</span>
+      </div>
+    </section>
+
+    <!-- §2 GigaChat и сертификаты -->
+    <section class="section" id="section-cert" aria-labelledby="s-cert">
+      <span class="eyebrow" id="s-cert">GigaChat и сертификаты</span>
+      <div class="field">
+        <label for="cfg-giga-url">Адрес GigaChat</label>
+        <input class="input" id="cfg-giga-url" placeholder="https://gigachat…/v1">
+      </div>
+      <div class="field">
+        <label for="cfg-model">Модель</label>
+        <input class="input" id="cfg-model" placeholder="GigaChat-3-Ultra-preview">
+      </div>
+      <div class="field">
+        <label for="cfg-cert">Путь к клиентскому сертификату (PEM)</label>
+        <input class="input" id="cfg-cert" placeholder="/path/to/client.crt">
+      </div>
+      <div class="field">
+        <label for="cfg-key">Путь к приватному ключу (PEM)</label>
+        <input class="input" id="cfg-key" placeholder="/path/to/client.key">
+      </div>
+      <div class="field">
+        <label for="cfg-passphrase">Пароль ключа <span class="hint">(необязательно)</span></label>
+        <input class="input" id="cfg-passphrase" type="password" placeholder="необязательно">
+      </div>
+      <div class="field">
+        <label for="cfg-ca">CA-бандл сервера <span class="hint">(необязательно)</span></label>
+        <input class="input" id="cfg-ca" placeholder="/path/to/ca.pem">
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="cfg-verify-ssl">
+        <label for="cfg-verify-ssl">Проверять SSL-сертификат сервера</label>
+      </div>
+      <div class="section-actions">
+        <button class="btn primary" id="save-cert">Сохранить</button>
+        <span class="saved" id="saved-cert" hidden>✓ Сохранено</span>
+      </div>
+    </section>
+
+    <!-- §3 Загрузка файлов -->
+    <section class="section" aria-labelledby="s-upload">
+      <span class="eyebrow" id="s-upload">Загрузка файлов</span>
+      <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="Загрузить ZIP-архив">
+        Перетащите ZIP-архив сюда или нажмите, чтобы выбрать файл
+      </div>
+      <input type="file" id="file-input" accept=".zip" hidden>
+      <div class="upload-result" id="upload-result" hidden></div>
+      <details class="filelist" id="upload-filelist" hidden>
+        <summary>Список файлов</summary>
+        <ul id="upload-files"></ul>
+      </details>
+    </section>
+
+    <!-- §4 Окружение -->
+    <section class="section" id="section-env" aria-labelledby="s-env">
+      <span class="eyebrow" id="s-env">Окружение</span>
+      <div class="field">
+        <label for="cfg-pip-index">PyPI-зеркало (index-url)</label>
+        <input class="input" id="cfg-pip-index" placeholder="https://sberosc.sigma.sbrf.ru/repo/pypi/simple">
+      </div>
+      <div class="field">
+        <label for="cfg-pip-token">Токен SberOSC <span class="hint">(хранится на сервере)</span></label>
+        <div class="inline">
+          <input class="input" id="cfg-pip-token" type="password" placeholder="••••••••••••">
+          <button class="linkbtn" id="pip-token-toggle" type="button" aria-pressed="false">Показать</button>
+        </div>
+        <small class="hint">Профиль SberOSC → скопировать токен</small>
+      </div>
+      <div class="section-actions">
+        <button class="btn primary" id="save-env-mirror">Сохранить</button>
+        <span class="saved" id="saved-env-mirror" hidden>✓ Сохранено</span>
+      </div>
+      <div class="env-actions">
+        <button class="btn ghost" id="env-setup-btn">Настроить окружение</button>
+        <a class="btn ghost" id="env-export-btn" href="/api/env/export" download>Экспортировать окружение</a>
+      </div>
+      <div class="field">
+        <label for="env-import-path">Импорт окружения из пути</label>
+        <div class="inline">
+          <input class="input" id="env-import-path" placeholder="/path/to/env-export">
+          <button class="linkbtn" id="env-import-btn" type="button">Импортировать</button>
+        </div>
+      </div>
+      <div class="env-import-result" id="env-import-result" hidden></div>
+      <div class="console" id="console" aria-live="polite" aria-label="Журнал настройки окружения"></div>
+    </section>
+
+  </div>
+</aside>
+
+<!-- ===================== LOGIN MODAL (server mode) ===================== -->
+<div class="login-scrim" id="login-scrim" hidden>
+  <div class="login-modal" role="dialog" aria-modal="true" aria-labelledby="login-title">
+    <b id="login-title">Вход в CogniVault</b>
+    <p class="login-sub">Введите токен доступа, чтобы продолжить.</p>
+    <div class="field">
+      <label for="login-token">Токен доступа CogniVault</label>
+      <div class="inline">
+        <input class="input" id="login-token" type="password" placeholder="cv-…" autocomplete="off" spellcheck="false">
+        <button class="linkbtn" id="login-toggle" type="button" aria-pressed="false">Показать</button>
+      </div>
+    </div>
+    <div class="login-error" id="login-error" hidden></div>
+    <button class="btn primary" id="login-submit" type="button">Войти</button>
+  </div>
+</div>
+
+<!-- ===================== TOASTS ===================== -->
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

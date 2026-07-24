@@ -1,0 +1,163 @@
+# ВНИМАНИЕ: /data смонтирован как emptyDir — БЕЗ PVC (в namespace квота на PVC
+# и тома не биндятся, ровно как у cognivault: users.json и векторов Qdrant).
+# Это значит: история чатов (JSON под /data) НЕ переживёт перезапуск/перепланировку
+# пода — она теряется вместе с emptyDir. Для функционального теста этого достаточно;
+# для постоянства нужен PVC (поднять квоту у платформы, затем заменить том `data`
+# на persistentVolumeClaim — изменений в коде не требуется, тот же mountPath /data).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cognivault-ui-config
+data:
+  COGNIVAULT_UI_MODE: "server"
+  COGNIVAULT_BASE_URL: "http://cognivault:3000"
+  UI_PORT: "8787"
+  UI_DATA_DIR: "/data"
+  GIGACHAT_BASE_URL: "https://gigachat-ift.sberdevices.delta.sbrf.ru/v1"
+  GIGACHAT_MODEL: "GigaChat-3-Ultra-preview"
+  GIGACHAT_CERT_PATH: "/certs/client_crt.crt"
+  GIGACHAT_KEY_PATH: "/certs/client_key.key"
+  GIGACHAT_VERIFY_SSL: "false"
+  GIGACHAT_TEMPERATURE: "0.2"
+  GIGACHAT_MAX_TOKENS: "4096"
+  GIGACHAT_MODEL_CONTEXT_TOKENS: "32768"
+  RAG_MODE: "auto"
+  RAG_MAX_CONTEXT_CHARS: "24000"
+  RAG_FILE_FULL_CHARS: "6000"
+  RAG_SECTION_MAX_CHARS: "4000"
+  RAG_MAX_EXPANDED_FILES: "2"
+  RAG_LIMIT: "10"
+  RAG_SOURCE: "hybrid"
+---
+# cognivault-ui — /data на emptyDir, БЕЗ PVC (см. предупреждение вверху файла).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cognivault-ui
+  labels:
+    app.kubernetes.io/name: cognivault-ui
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cognivault-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cognivault-ui
+    spec:
+      imagePullSecrets:
+        - name: sberosc-pull
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cognivault-ui
+          # Тег = имя ветки (workflow docker-publish-ui.yml публикует `type=ref,event=branch`).
+          # Он известен заранее и не требует подстановки — вставляйте YAML как есть.
+          # Если SberOSC не проксирует плавающий тег ветки (как бывает с `latest`),
+          # замените на конкретный `sha-<short>` из логов сборки CI (тот же образ).
+          # Образ тянется через прокси SberOSC из ghcr.io/coolcrazycool/cognivault-ui
+          # (пакет ghcr должен быть PUBLIC).
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:emdash-k8s-gigachat-integration-yce22
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8787
+          envFrom:
+            - configMapRef:
+                name: cognivault-ui-config
+          env:
+            # Общий с cognivault секрет с mTLS-сертификатами GigaChat.
+            - name: GIGACHAT_KEY_PASSPHRASE
+              valueFrom:
+                secretKeyRef:
+                  name: cognivault-gigachat-certs
+                  key: key.passphrase
+                  optional: true
+          volumeMounts:
+            - name: gigachat-certs
+              mountPath: /certs
+              readOnly: true
+            - name: data
+              mountPath: /data
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: gigachat-certs
+          secret:
+            secretName: cognivault-gigachat-certs
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cognivault-ui
+  labels:
+    app.kubernetes.io/name: cognivault-ui
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: cognivault-ui
+  ports:
+    - name: http
+      port: 8787
+      targetPort: http
+---
+# Отдельный Ingress для UI. Альтернатива: этот же host можно дописать хостом в
+# существующий oasis-cognivault-ingress (тогда отдельный Ingress не нужен).
+# ВНИМАНИЕ: TLS не настроен — трафик идёт по обычному HTTP, как и у текущего
+# ingress cognivault. Флаг на будущее: добавить tls/secretName при наличии серта.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cognivault-ui
+  labels:
+    app.kubernetes.io/name: cognivault-ui
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: cognivault-ui.apps.bcayrqks.k8s.delta.sbrf.ru
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cognivault-ui
+                port:
+                  number: 8787

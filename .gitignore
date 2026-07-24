@@ -31,3 +31,9 @@ __vault
 # Planning (internal)
 .planning/
 .claude/settings.local.json
+
+# CogniVault UI (local Python tool)
+cognivault-ui/**/__pycache__/
+cognivault-ui/**/*.pyc
+cognivault-ui/.venv/
+cognivault-ui/venv/
