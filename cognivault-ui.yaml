@@ -138,26 +138,24 @@ spec:
       port: 8787
       targetPort: http
 ---
-# Отдельный Ingress для UI. Альтернатива: этот же host можно дописать хостом в
-# существующий oasis-cognivault-ingress (тогда отдельный Ingress не нужен).
-# ВНИМАНИЕ: TLS не настроен — трафик идёт по обычному HTTP, как и у текущего
-# ingress cognivault. Флаг на будущее: добавить tls/secretName при наличии серта.
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: cognivault-ui
-  labels:
-    app.kubernetes.io/name: cognivault-ui
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: cognivault-ui.apps.bcayrqks.k8s.delta.sbrf.ru
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: cognivault-ui
-                port:
-                  number: 8787
+# ВНЕШНИЙ ДОСТУП: этот манифест НАМЕРЕННО не создаёт свой Ingress.
+# Наружу выводим ТОЛЬКО UI — перенаправлением существующего oasis-cognivault-ingress
+# с cognivault:3000 на cognivault-ui:8787. REST API при этом становится внутренним
+# (ClusterIP-only): морде он доступен по http://cognivault:3000 внутри кластера,
+# снаружи — нет. Отредактируйте oasis-cognivault-ingress:
+#
+#   spec:
+#     rules:
+#       - host: cognivault.apps.bcayrqks.k8s.delta.sbrf.ru
+#         http:
+#           paths:
+#             - path: /
+#               pathType: Prefix
+#               backend:
+#                 service:
+#                   name: cognivault-ui     # было: cognivault
+#                   port:
+#                     number: 8787          # было: 3000
+#
+# ВНИМАНИЕ: TLS у текущего ingress не настроен (обычный HTTP) — cv-токены идут
+# открытым текстом; при наличии серта добавьте spec.tls[].secretName.
