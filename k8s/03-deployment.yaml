@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cognivault
+  labels:
+    app.kubernetes.io/name: cognivault
+    app.kubernetes.io/component: api
+spec:
+  # Single replica ONLY: the /data PVC is ReadWriteOnce and the SQLite index +
+  # users.json have a single writer. Do not scale >1 without moving to RWX and
+  # a shared-writer-safe design.
+  replicas: 1
+  strategy:
+    # Recreate (not RollingUpdate) so the old pod releases the RWO PVC before
+    # the new one mounts it.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cognivault
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cognivault
+        app.kubernetes.io/component: api
+      annotations:
+        # Prometheus scrape (harmless if the cluster ignores it).
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # OpenShift restricted-v2 SCC assigns a random UID in group 0 and an fsGroup
+      # that chowns the PVC — so we do NOT hardcode runAsUser. These settings keep
+      # the pod admissible under the restricted profile.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      # Needed to pull images through the SberOSC proxy (username: token).
+      imagePullSecrets:
+        - name: sberosc-pull
+      containers:
+        - name: cognivault
+          # ── IMAGE ────────────────────────────────────────────────────────
+          # Image is built on GitHub Actions (open internet, plain Dockerfile) and
+          # pushed to ghcr.io/coolcrazycool/cognivault, then pulled here THROUGH the
+          # SberOSC docker proxy. REPLACE the tag with a CONCRETE tag (e.g. the CI
+          # `sha-<gitsha>` tag) — SberOSC does NOT proxy the `latest` tag.
+          # The ghcr package must be PUBLIC for SberOSC to pull it.
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:REPLACE_WITH_SHA_TAG
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: cognivault-config
+          env:
+            # Optional: private-key passphrase, only if your key is encrypted.
+            # Remove this block if you did not put key.passphrase in the secret.
+            - name: GIGACHAT_KEY_PASSPHRASE
+              valueFrom:
+                secretKeyRef:
+                  name: cognivault-gigachat-certs
+                  key: key.passphrase
+                  optional: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: gigachat-certs
+              mountPath: /certs
+              readOnly: true
+          # Liveness AND readiness both hit /health. /ready returns 503 while
+          # VAULT_PATH is unset (multi-tenant mode), so it is NOT usable here.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            # Give the app time to reach Qdrant + run per-user migrations at boot.
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: cognivault-data
+        - name: gigachat-certs
+          secret:
+            secretName: cognivault-gigachat-certs
+            defaultMode: 0400

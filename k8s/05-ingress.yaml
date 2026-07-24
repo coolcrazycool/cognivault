@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cognivault
+  labels:
+    app.kubernetes.io/name: cognivault
+  annotations:
+    # OpenShift router: terminate TLS at the edge. Adjust to your platform's
+    # conventions if it uses a different ingress controller / Istio gateway.
+    route.openshift.io/termination: "edge"
+spec:
+  # Uncomment if your cluster requires an explicit ingress class:
+  # ingressClassName: openshift-default
+  rules:
+    # REPLACE the host with the domain assigned to your project. In OpenShift
+    # this is usually <name>-<namespace>.apps.<cluster-domain>. Ask the platform
+    # team or check an existing Route/Ingress for the apps wildcard domain.
+    - host: cognivault-ci05490208-oasis-cognivault.apps.REPLACE_ME.example.ru
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cognivault
+                port:
+                  name: http
+  # TLS is handled by the OpenShift router edge termination above. If your
+  # ingress controller needs an explicit cert secret, add a tls: block here.

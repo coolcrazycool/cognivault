@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cognivault-config
+  labels:
+    app.kubernetes.io/name: cognivault
+    app.kubernetes.io/component: api
+data:
+  # ── Server ────────────────────────────────────────────────────────────
+  PORT: "3000"
+  HOST: "0.0.0.0"
+  LOG_LEVEL: "info"
+  COGNIVAULT_DATA_DIR: "/data"
+  # NOTE: VAULT_PATH is intentionally NOT set. In multi-tenant mode each user
+  # carries its own vaultPath; setting a global VAULT_PATH would change /ready
+  # semantics. Probes therefore hit /health, not /ready (see the Deployment).
+
+  # ── Vector store (in-cluster Qdrant — see 08-qdrant.yaml) ─────────────
+  # In-cluster Qdrant Service DNS. The app connects at startup and creates the
+  # `cognivault` collection — Qdrant MUST be up first or the pod crash-loops
+  # (startupProbe gives it ~150s of retries). No API key field in the client.
+  QDRANT_URL: "http://qdrant:6333"
+
+  # ── Embeddings: GigaChat ──────────────────────────────────────────────
+  EMBEDDING_PROVIDER: "gigachat"
+  GIGACHAT_BASE_URL: "https://gigachat-ift.sberdevices.delta.sbrf.ru/v1"
+  GIGACHAT_MODEL: "EmbeddingsGigaR"
+  # Vector size of EmbeddingsGigaR (from the proven local docker-compose.override).
+  # A wrong number forces a fresh Qdrant collection + full re-index later.
+  EMBEDDING_DIMENSIONS: "2560"
+  # File paths — provided by the mounted `cognivault-gigachat-certs` secret.
+  # Filenames match the local certs (client_crt.crt / client_key.key).
+  GIGACHAT_CERT_PATH: "/certs/client_crt.crt"
+  GIGACHAT_KEY_PATH: "/certs/client_key.key"
+  # Uncomment once the internal Sber CA bundle is mounted (secret key `ca.pem`):
+  # GIGACHAT_CA_PATH: "/certs/ca.pem"
+  # Local ran with verification OFF (verify_ssl_certs=False in Giga_sigma). Keep
+  # "false" as a temporary escape hatch until the CA bundle is available, then set
+  # GIGACHAT_CA_PATH above and flip back to "true".
+  GIGACHAT_VERIFY_SSL: "false"
+
+  # ── GigaChat tuning (matches the proven local config) ─────────────────
+  GIGACHAT_MAX_REQUEST_BYTES: "120000"
+  GIGACHAT_MAX_BATCH_ITEMS: "64"
+  GIGACHAT_MAX_REQUEST_TOKENS: "2048"
+  # Local used 2048. cl100k undercounts Russian ~20% vs GigaChat; stays under the
+  # 4096/input cap. Lower further if "Tokens limit exceeded" reappears.
+  GIGACHAT_MAX_EMBEDDING_TOKENS: "2048"
+  GIGACHAT_MAX_RETRIES: "5"
+  GIGACHAT_RETRY_BASE_DELAY_MS: "1000"

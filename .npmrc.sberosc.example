@@ -1,0 +1,13 @@
+# SberOSC npm channel — template. Copy to `.npmrc`, put your token in, keep it OUT of git.
+# BASE64_STRING = base64 of the literal string "token:YOUR_TOKEN".
+#   linux/mac:  printf 'token:%s' "$SBEROSC_TOKEN" | base64 -w0
+# Get YOUR_TOKEN in SberOSC → Профиль (segment sigma: https://sberosc.sigma.sbrf.ru).
+# The FIRST line is mandatory (auth), otherwise npm returns 401.
+//sberosc.sigma.sbrf.ru/repo/npm/:_authToken=BASE64_STRING
+registry=https://sberosc.sigma.sbrf.ru/repo/npm/
+always-auth=true
+audit=false
+strict-ssl=false
+fetch-retries=5
+# node-gyp headers for the native better-sqlite3 build go through SberOSC too:
+disturl=https://token:YOUR_TOKEN@sberosc.sigma.sbrf.ru/repo/extras/nodejs/

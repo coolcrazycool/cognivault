@@ -1,0 +1,32 @@
+# ─────────────────────────────────────────────────────────────────────────
+# OPTIONAL — apply ONLY if the service mesh blocks egress by default
+# (Istio outboundTrafficPolicy = REGISTRY_ONLY). The project carries an Istio
+# revision label (istio.io/rev=synapse-control-panel), so the sidecar may deny
+# calls to hosts it doesn't know. These ServiceEntries whitelist the two
+# external dependencies: GigaChat and the external Qdrant.
+#
+# The app originates its own TLS (mTLS client cert) to GigaChat. With protocol
+# TLS the sidecar does SNI passthrough and does NOT re-terminate — so the client
+# certificate reaches GigaChat intact. Do not add a DestinationRule that
+# originates TLS for this host.
+#
+# If the mesh uses ALLOW_ANY (the Istio default), you do NOT need this file.
+#
+# NOTE: Qdrant now runs in-cluster (08-qdrant.yaml), so it needs NO ServiceEntry —
+# only GigaChat (external, in the delta segment) is whitelisted here.
+# ─────────────────────────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: gigachat-egress
+  labels:
+    app.kubernetes.io/name: cognivault
+spec:
+  hosts:
+    - gigachat-ift.sberdevices.delta.sbrf.ru
+  ports:
+    - number: 443
+      name: https
+      protocol: TLS
+  resolution: DNS
+  location: MESH_EXTERNAL

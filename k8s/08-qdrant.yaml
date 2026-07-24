@@ -1,0 +1,106 @@
+# Qdrant в кластере (StatefulSet + PVC). Образ тянется из SberOSC docker-прокси,
+# поэтому поду нужен pull-secret `sberosc-pull` (тот же, что для сборки):
+#
+#   oc create secret docker-registry sberosc-pull -n ci05490208-oasis-cognivault \
+#     --docker-server=sberosc.sigma.sbrf.ru \
+#     --docker-username=token --docker-password=<ВАШ_SBEROSC_ТОКЕН>
+#
+# Тег конкретный (v1.17.0) — SberOSC не отдаёт `latest`. Первая загрузка образа
+# запускает сканирование и может идти долго (следите за статусом в дашборде SberOSC).
+# cognivault обращается к нему по адресу http://qdrant:6333 (см. 00-configmap.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant
+  labels:
+    app.kubernetes.io/name: qdrant
+    app.kubernetes.io/component: vector-store
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: qdrant
+  ports:
+    - name: http
+      port: 6333
+      targetPort: http
+    - name: grpc
+      port: 6334
+      targetPort: grpc
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: qdrant
+  labels:
+    app.kubernetes.io/name: qdrant
+    app.kubernetes.io/component: vector-store
+spec:
+  serviceName: qdrant
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qdrant
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qdrant
+        app.kubernetes.io/component: vector-store
+    spec:
+      # Нужен для скачивания образа qdrant из SberOSC docker-прокси.
+      imagePullSecrets:
+        - name: sberosc-pull
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: qdrant
+          image: sberosc.sigma.sbrf.ru/docker.io/qdrant/qdrant:v1.17.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 6333
+            - name: grpc
+              containerPort: 6334
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 15
+          volumeMounts:
+            - name: storage
+              mountPath: /qdrant/storage
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+        labels:
+          app.kubernetes.io/name: qdrant
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi

@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Сборка образа СИЛАМИ КЛАСТЕРА через SberOSC (закрытый контур: docker.io /
+# npmjs / nodejs напрямую недоступны — только через прокси SberOSC с токеном).
+# Использует Dockerfile.sberosc. Применяется через "+" (Import YAML).
+#
+# ПЕРЕД применением создайте ДВА секрета (см. k8s/README — раздел SberOSC):
+#
+#   # 1) pull-secret для базовых образов node:22-* из SberOSC docker-прокси
+#   oc create secret docker-registry sberosc-pull \
+#     -n ci05490208-oasis-cognivault \
+#     --docker-server=sberosc.sigma.sbrf.ru \
+#     --docker-username=token --docker-password=<ВАШ_SBEROSC_ТОКЕН>
+#
+#   # 2) .npmrc с токеном для npm/pnpm/node-gyp (см. .npmrc.sberosc.example)
+#   oc create secret generic sberosc-npmrc \
+#     -n ci05490208-oasis-cognivault \
+#     --from-file=.npmrc=./.npmrc
+#
+# Затем: Builds → BuildConfigs → cognivault → Actions → Start build.
+# Образ ляжет в ImageStream cognivault:latest, публикуемый по адресу
+#   image-registry.openshift-image-registry.svc:5000/<ns>/cognivault:latest
+# — ровно то, что стоит в 03-deployment.yaml (image:).
+# ─────────────────────────────────────────────────────────────────────────
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: cognivault
+  labels:
+    app.kubernetes.io/name: cognivault
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: cognivault
+  labels:
+    app.kubernetes.io/name: cognivault
+spec:
+  source:
+    type: Git
+    git:
+      # REPLACE ref на вашу ветку с исходниками (в ней есть Dockerfile.sberosc).
+      # Если github недоступен из кластера — используйте внутреннее зеркало Git,
+      # либо бинарную сборку (см. README, путь B).
+      uri: https://github.com/coolcrazycool/cognivault.git
+      ref: feat/gigachat-integration
+    secrets:
+      # Кладёт .npmrc из секрета в корень контекста сборки (его читает Dockerfile.sberosc).
+      - secret:
+          name: sberosc-npmrc
+        destinationDir: "."
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile.sberosc
+      # Аутентификация для СКАЧИВАНИЯ базовых образов node:22-* из SberOSC.
+      pullSecret:
+        name: sberosc-pull
+      buildArgs:
+        - name: SBEROSC_URL
+          value: sberosc.sigma.sbrf.ru
+  output:
+    to:
+      kind: ImageStreamTag
+      name: cognivault:latest
+  triggers:
+    - type: ConfigChange

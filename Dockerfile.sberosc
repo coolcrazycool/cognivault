@@ -1,0 +1,63 @@
+# CogniVault image built entirely through SberOSC (closed Sber contour).
+# Prohibits any direct pull from docker.io / registry.npmjs.org / nodejs.org.
+#
+#   • Base images  → SberOSC docker proxy:  ${SBEROSC_URL}/docker.io/node:...
+#   • npm packages → SberOSC npm proxy via a token .npmrc (see below)
+#   • node-gyp headers for better-sqlite3 (native) → SberOSC nodejs proxy (disturl)
+#
+# REQUIRED: a `.npmrc` present in the build context with your SberOSC token.
+# Locally: create it next to this file. In-cluster (BuildConfig): it is mounted
+# from the `sberosc-npmrc` secret (see k8s/07-build.yaml). Example .npmrc:
+#
+#   //sberosc.sigma.sbrf.ru/repo/npm/:_authToken=<BASE64 of "token:YOUR_TOKEN">
+#   registry=https://sberosc.sigma.sbrf.ru/repo/npm/
+#   always-auth=true
+#   audit=false
+#   strict-ssl=false
+#   fetch-retries=5
+#   disturl=https://token:YOUR_TOKEN@sberosc.sigma.sbrf.ru/repo/extras/nodejs/
+#
+# The .npmrc lives only in the discarded build stage; it never reaches the final image.
+#
+# Differences from the plain Dockerfile:
+#   • node:22-bookworm (full, has gcc/python3/make) so better-sqlite3 compiles
+#     WITHOUT apt-get (apt is also blocked in the contour).
+#   • No `obsidian-headless` and no `tini`: not needed for GigaChat / local-folder
+#     users, and both would require apt. server.ts already handles SIGTERM/SIGINT.
+#     (Re-add them only if you need Obsidian-sync users.)
+
+ARG SBEROSC_URL=sberosc.sigma.sbrf.ru
+
+# ── Stage 1: build (full image → native toolchain, no apt) ────────────────
+FROM ${SBEROSC_URL}/docker.io/node:22-bookworm AS build
+ENV COREPACK_INTEGRITY_KEYS=""
+WORKDIR /app
+# Token .npmrc from the build context — used for all npm/pnpm/node-gyp fetches,
+# then removed. Present only in this stage, which is discarded.
+COPY .npmrc ./
+# pnpm via npm (reads the token .npmrc) — more reliable than corepack behind a proxy.
+RUN npm install -g pnpm@9.15.4
+COPY package.json pnpm-lock.yaml ./
+# --network-concurrency 1 avoids SberOSC's parallel-request rate limit (HTTP 403)
+# on a cold cache; raise it once packages are cached if you want a faster build.
+RUN pnpm install --frozen-lockfile --network-concurrency 1
+COPY tsconfig.json ./
+COPY src/ ./src/
+RUN pnpm run build
+# Prod-only deps (keeps the compiled better-sqlite3 *.node), then drop the token.
+RUN pnpm prune --prod && rm -f .npmrc
+
+# ── Stage 2: production (slim; native module copied from build) ────────────
+FROM ${SBEROSC_URL}/docker.io/node:22-bookworm-slim AS production
+ENV NODE_ENV=production
+WORKDIR /app
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/package.json ./package.json
+COPY drizzle ./drizzle
+RUN mkdir -p /data && chown node:node /data
+USER node
+EXPOSE 3000
+HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "dist/server.js"]
