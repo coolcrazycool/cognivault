@@ -50,32 +50,39 @@ spec:
       imagePullSecrets:
         - name: sberosc-pull
       securityContext:
+        # Restricted PodSecurity: run non-root. fsGroup makes the volume writable.
         runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: qdrant
-          image: sberosc.sigma.sbrf.ru/docker.io/qdrant/qdrant:v1.17.0
+          # v1.3.0 — единственная версия, прошедшая скан SberOSC. /readyz/livez в
+          # ней ещё нет (появились в ~1.5) → пробы по TCP-порту.
+          image: sberosc.sigma.sbrf.ru/docker.io/qdrant/qdrant:v1.3.0
           imagePullPolicy: IfNotPresent
+          env:
+            # Non-root can't create /qdrant/snapshots (root-owned) — keep it in the volume.
+            - name: QDRANT__STORAGE__SNAPSHOTS_PATH
+              value: /qdrant/storage/snapshots
           ports:
             - name: http
               containerPort: 6333
             - name: grpc
               containerPort: 6334
           startupProbe:
-            httpGet:
-              path: /readyz
+            tcpSocket:
               port: http
             failureThreshold: 30
             periodSeconds: 5
           readinessProbe:
-            httpGet:
-              path: /readyz
+            tcpSocket:
               port: http
             periodSeconds: 10
           livenessProbe:
-            httpGet:
-              path: /livez
+            tcpSocket:
               port: http
             periodSeconds: 15
           volumeMounts:

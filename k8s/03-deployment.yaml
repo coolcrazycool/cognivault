@@ -32,7 +32,12 @@ spec:
       # that chowns the PVC — so we do NOT hardcode runAsUser. These settings keep
       # the pod admissible under the restricted profile.
       securityContext:
+        # node user in the image is UID 1000; set it numerically so K8s can
+        # verify non-root (a named user fails runAsNonRoot on vanilla k8s).
         runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
       # Needed to pull images through the SberOSC proxy (username: token).
@@ -46,7 +51,7 @@ spec:
           # SberOSC docker proxy. REPLACE the tag with a CONCRETE tag (e.g. the CI
           # `sha-<gitsha>` tag) — SberOSC does NOT proxy the `latest` tag.
           # The ghcr package must be PUBLIC for SberOSC to pull it.
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-915eb9e
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-b997ed5
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
