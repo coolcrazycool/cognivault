@@ -179,6 +179,23 @@ button,input,textarea,select{font:inherit;color:inherit}
 .console .ts{color:var(--con-dim)} .console .lv-ok{color:var(--con-teal)} .console .lv-warn{color:var(--warn)} .console .lv-err{color:var(--err)}
 .env-import-result{margin-top:10px;font-size:12.5px}
 .env-import-result .backup{font-family:var(--font-mono);font-size:11.5px;color:var(--fg-muted)}
+.console .lv-dim{color:var(--con-dim)} .console .lv-teal{color:var(--con-teal)}
+
+/* Confluence source section */
+.segmented{display:inline-flex;border:1px solid var(--border);border-radius:var(--r-input);overflow:hidden;background:var(--surface-2)}
+.seg{background:transparent;border:0;padding:0 14px;height:34px;cursor:pointer;font-size:12.5px;font-weight:500;color:var(--fg-muted)}
+.seg + .seg{border-left:1px solid var(--border)}
+.seg[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg)}
+.input[readonly]{opacity:.7;cursor:not-allowed}
+.warn-hint{display:block;color:var(--warn);margin:-6px 0 12px}
+.conf-validate-result{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px}
+.conf-validate-result .pill{height:auto;min-height:28px;white-space:normal;text-align:left}
+.conf-sync-counter{margin-top:10px;font-size:12px;color:var(--fg-muted);font-variant-numeric:tabular-nums}
+#confluence-console{margin-top:12px}
+.conf-status{margin-top:12px;font-size:12px;color:var(--fg-muted)}
+.chip a.ct{display:inline-flex;align-items:center;gap:4px;text-decoration:none;color:var(--accent)}
+.chip a.ct:hover{text-decoration:underline}
+.chip a.ct .cext{font-size:11px;opacity:.75}
 
 .toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:10px;z-index:30}
 .toast{display:flex;gap:10px;align-items:flex-start;min-width:280px;max-width:380px;padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-left-width:3px;border-radius:var(--r-input);box-shadow:var(--shadow)}

@@ -49,9 +49,19 @@ class AppPaths:
     def tmp_dir(self) -> Path:
         return self.root / "tmp"
 
+    @property
+    def confluence_dir(self) -> Path:
+        return self.root / "confluence"
+
     def ensure_dirs(self) -> None:
         """Create the root plus the writable sub-directories if missing."""
-        for d in (self.root, self.certs_dir, self.history_dir, self.tmp_dir):
+        for d in (
+            self.root,
+            self.certs_dir,
+            self.history_dir,
+            self.tmp_dir,
+            self.confluence_dir,
+        ):
             d.mkdir(parents=True, exist_ok=True)
 
 

@@ -106,6 +106,41 @@ def bind_port() -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Confluence source (server-mode admin settings)
+# --------------------------------------------------------------------------- #
+#
+# In SERVER mode these admin-provided values override the per-user Confluence
+# config's connection settings (base_url / ca_path / verify_ssl); the rest of
+# the per-user config (auth_mode, login, root, sync options) still comes from
+# the user's file. In LOCAL mode the per-user config supplies everything and
+# these getters are unused.
+
+
+def confluence_enabled() -> bool:
+    return _env_bool("CONFLUENCE_ENABLED", True)
+
+
+def confluence_base_url() -> str:
+    return _env_str("CONFLUENCE_BASE_URL", "https://confluence.sberbank.ru")
+
+
+def confluence_ca_path() -> str:
+    return _env_str("CONFLUENCE_CA_PATH", "")
+
+
+def confluence_verify_ssl() -> bool:
+    return _env_bool("CONFLUENCE_VERIFY_SSL", True)
+
+
+def confluence_max_concurrency() -> int:
+    return _env_int("CONFLUENCE_MAX_CONCURRENCY", 3)
+
+
+def confluence_min_auto_interval_min() -> int:
+    return _env_int("CONFLUENCE_MIN_AUTO_INTERVAL_MIN", 30)
+
+
+# --------------------------------------------------------------------------- #
 # Server-mode config (same shape as load_config, from ENV only)
 # --------------------------------------------------------------------------- #
 

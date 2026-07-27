@@ -216,3 +216,162 @@ async def upload(
             _excerpt(resp.text),
         )
     return resp.json()
+
+
+# --------------------------------------------------------------------------- #
+# Write wrappers (create / update / delete / list / clear)
+# --------------------------------------------------------------------------- #
+#
+# These power the Confluence-source sync. Each accepts the same optional ``cv``
+# context as the read helpers and raises :class:`CogniVaultError` on an
+# *unexpected* non-2xx. Two statuses are treated as recoverable signals rather
+# than errors so the caller can self-heal POST/PUT drift:
+#
+# * ``create_note`` → ``EXISTS`` on 409 (fall back to update);
+# * ``update_note`` → ``MISSING`` on 404 (fall back to create).
+
+CREATED = "created"
+EXISTS = "exists"
+UPDATED = "updated"
+MISSING = "missing"
+DELETED = "deleted"
+
+
+def _content_body(path: str, content: str) -> bytes:
+    """Serialise a ``{path, content}`` write body as raw UTF-8 (Cyrillic-safe)."""
+    return json.dumps({"path": path, "content": content}, ensure_ascii=False).encode(
+        "utf-8"
+    )
+
+
+async def create_note(
+    path: str, content: str, cv: dict[str, Any] | None = None
+) -> str:
+    """POST ``/api/vault/content`` to create a note.
+
+    Returns :data:`CREATED` on a 2xx (typically 201); returns :data:`EXISTS` on
+    a **409** so the caller can fall back to :func:`update_note`. Any other
+    non-2xx raises :class:`CogniVaultError`.
+    """
+    base, token = _resolve_cv(cv)
+    url = f"{base}/api/vault/content"
+    headers = _auth_headers(token, {"Content-Type": "application/json; charset=utf-8"})
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(url, content=_content_body(path, content), headers=headers)
+    if resp.status_code == 409:
+        return EXISTS
+    if not (200 <= resp.status_code < 300):
+        raise CogniVaultError(
+            f"create note failed ({resp.status_code})",
+            resp.status_code,
+            _excerpt(resp.text),
+        )
+    return CREATED
+
+
+async def update_note(
+    path: str, content: str, cv: dict[str, Any] | None = None
+) -> str:
+    """PUT ``/api/vault/content`` to overwrite a note.
+
+    Returns :data:`UPDATED` on a 2xx; returns :data:`MISSING` on a **404** so the
+    caller can fall back to :func:`create_note`. Any other non-2xx raises.
+    """
+    base, token = _resolve_cv(cv)
+    url = f"{base}/api/vault/content"
+    headers = _auth_headers(token, {"Content-Type": "application/json; charset=utf-8"})
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.put(url, content=_content_body(path, content), headers=headers)
+    if resp.status_code == 404:
+        return MISSING
+    if not (200 <= resp.status_code < 300):
+        raise CogniVaultError(
+            f"update note failed ({resp.status_code})",
+            resp.status_code,
+            _excerpt(resp.text),
+        )
+    return UPDATED
+
+
+async def delete_note(path: str, cv: dict[str, Any] | None = None) -> str:
+    """DELETE ``/api/vault/content`` for ``path``.
+
+    A **404** is tolerated (already gone) and reported as :data:`DELETED`. Any
+    other non-2xx raises :class:`CogniVaultError`.
+    """
+    base, token = _resolve_cv(cv)
+    url = f"{base}/api/vault/content"
+    headers = _auth_headers(token, {"Content-Type": "application/json; charset=utf-8"})
+    body = json.dumps({"path": path}, ensure_ascii=False).encode("utf-8")
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.request("DELETE", url, content=body, headers=headers)
+    if resp.status_code == 404:
+        return DELETED
+    if not (200 <= resp.status_code < 300):
+        raise CogniVaultError(
+            f"delete note failed ({resp.status_code})",
+            resp.status_code,
+            _excerpt(resp.text),
+        )
+    return DELETED
+
+
+async def list_files(
+    cv: dict[str, Any] | None = None, recursive: bool = True
+) -> list[str]:
+    """GET ``/api/vault/files`` and return the file entry paths (files only).
+
+    Tolerates several response shapes: a bare list, or a dict with ``files`` /
+    ``entries`` / ``results``; entries may be plain path strings or objects with
+    a ``path``/``name`` (directory-typed entries are filtered out).
+    """
+    base, token = _resolve_cv(cv)
+    url = f"{base}/api/vault/files"
+    headers = _auth_headers(token)
+    params = {"recursive": "true" if recursive else "false"}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(url, params=params, headers=headers)
+    if resp.status_code != 200:
+        raise CogniVaultError(
+            f"list files failed ({resp.status_code})",
+            resp.status_code,
+            _excerpt(resp.text),
+        )
+    data = resp.json()
+    if isinstance(data, dict):
+        entries = data.get("files") or data.get("entries") or data.get("results") or []
+    else:
+        entries = data or []
+    out: list[str] = []
+    for entry in entries:
+        if isinstance(entry, str):
+            out.append(entry)
+        elif isinstance(entry, dict):
+            etype = str(entry.get("type", "") or "").lower()
+            if etype in ("dir", "directory", "folder"):
+                continue
+            if entry.get("isDir") or entry.get("directory"):
+                continue
+            path = entry.get("path") or entry.get("name")
+            if path:
+                out.append(str(path))
+    return out
+
+
+async def clear_vault(cv: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Delete every file in the vault (best-effort). Used by replace mode.
+
+    Lists files then deletes each one, collecting per-file failures rather than
+    aborting. Returns ``{deleted, failed, total}`` where ``failed`` is a list of
+    ``(path, status)`` tuples.
+    """
+    files = await list_files(cv, recursive=True)
+    deleted = 0
+    failed: list[tuple[str, int]] = []
+    for path in files:
+        try:
+            await delete_note(path, cv)
+            deleted += 1
+        except CogniVaultError as exc:
+            failed.append((path, exc.status))
+    return {"deleted": deleted, "failed": failed, "total": len(files)}

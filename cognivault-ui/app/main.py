@@ -7,6 +7,9 @@ the machine.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import os
 import warnings
 from pathlib import Path
 from typing import Any
@@ -21,6 +24,7 @@ from .deps import ApiError, api_error_handler
 from .routes import (
     chat_routes,
     config_routes,
+    confluence_routes,
     env_routes,
     history_routes,
     upload_routes,
@@ -42,6 +46,22 @@ def _suppress_insecure_warnings() -> None:
     except Exception:  # noqa: BLE001 — urllib3 may be absent; best-effort only
         pass
     warnings.filterwarnings("ignore", message=".*[Uu]nverified HTTPS.*")
+
+
+def _auto_sync_scheduler_enabled() -> bool:
+    """Whether to start the Confluence auto-sync background task.
+
+    Gated behind ``CONFLUENCE_AUTO_SYNC_SCHEDULER``. Default: **on in server
+    mode, off in local mode**. Server deployments are the multi-tenant, long-lived
+    target where unattended periodic syncs make sense; a local single-user run (and
+    every ``TestClient`` startup) leaves it off so importing/serving the app never
+    spawns a background loop unless explicitly opted in. Set the env var to
+    ``1/true/yes/on`` (or ``0/false/no/off``) to override the per-mode default.
+    """
+    raw = os.environ.get("CONFLUENCE_AUTO_SYNC_SCHEDULER")
+    if raw is None or raw == "":
+        return settings.is_server()
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def create_app() -> FastAPI:
@@ -67,6 +87,11 @@ def create_app() -> FastAPI:
     app.include_router(chat_routes.router, dependencies=auth)
     app.include_router(history_routes.router, dependencies=auth)
     app.include_router(upload_routes.router, dependencies=auth)
+    # Confluence source: per-user data, registered in BOTH modes behind the same
+    # bearer-token gate. The CONFLUENCE_ENABLED admin flag (default on) lets a
+    # server deployment turn the surface off entirely.
+    if settings.confluence_enabled():
+        app.include_router(confluence_routes.router, dependencies=auth)
     if not settings.is_server():
         # Env provisioning is a local-only concern; in server mode these routes
         # simply don't exist (the 404 envelope handles them).
@@ -133,6 +158,38 @@ def create_app() -> FastAPI:
         raise ApiError(
             404, "NOT_FOUND", f"нет такого маршрута: {request.url.path}"
         )
+
+    # Confluence auto-sync scheduler (phase 5). Started as a background task on
+    # startup ONLY when the Confluence surface is enabled AND the scheduler is
+    # opted in (see ``_auto_sync_scheduler_enabled`` — on in server, off in local
+    # / under test). The task is fully exception-safe: a scheduler crash never
+    # affects request serving, and startup never blocks on it.
+    @app.on_event("startup")
+    async def _start_confluence_scheduler() -> None:
+        app.state.confluence_scheduler_task = None
+        app.state.confluence_scheduler_stop = None
+        if not (settings.confluence_enabled() and _auto_sync_scheduler_enabled()):
+            return
+        # Imported lazily so the module (and its asyncio task) only loads when the
+        # scheduler is actually enabled — keeps plain imports / tests cheap.
+        from .confluence import scheduler
+
+        stop = asyncio.Event()
+        app.state.confluence_scheduler_stop = stop
+        app.state.confluence_scheduler_task = asyncio.create_task(
+            scheduler.run_scheduler(stop_event=stop)
+        )
+
+    @app.on_event("shutdown")
+    async def _stop_confluence_scheduler() -> None:
+        stop = getattr(app.state, "confluence_scheduler_stop", None)
+        task = getattr(app.state, "confluence_scheduler_task", None)
+        if stop is not None:
+            stop.set()
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     # SPA + static assets. Mounted last so it only catches non-/api paths.
     _STATIC_DIR.mkdir(parents=True, exist_ok=True)

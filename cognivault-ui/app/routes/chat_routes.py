@@ -12,6 +12,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import gigachat, history, rag, settings
+from ..confluence import store as confluence_store
 from ..deps import cv_context, resolve_paths
 from ..gigachat import GigaChatCertMissing, GigaChatError, GigaConfig
 from ..sse import format_sse, sse_error
@@ -68,6 +69,14 @@ async def chat(request: Request) -> Any:
     cv = cv_context(request)
     paths = resolve_paths(request)
 
+    # Reverse index {vault_path: confluence_page_url} so RAG source chips can link
+    # back to their origin Confluence page. Defensive: a manifest error must never
+    # break chat — fall back to no urls.
+    try:
+        url_index = confluence_store.manifest_url_index(paths)
+    except Exception:  # noqa: BLE001 — link enrichment is best-effort
+        url_index = {}
+
     cfg = settings.effective_config()
     gcfg = GigaConfig.from_dict(cfg.get("gigachat", {}))
 
@@ -123,6 +132,13 @@ async def chat(request: Request) -> Any:
                     yield format_sse("notice", {"message": notice})
                 elif system_message is not None:
                     rag_used = True
+                    # Attach a Confluence page url to any source whose vault path
+                    # is a synced Confluence page (absent otherwise). Mutates the
+                    # source dicts in place so the persisted history keeps the link.
+                    for source in sources:
+                        u = url_index.get(source.get("path"))
+                        if u:
+                            source["url"] = u
                     yield format_sse(
                         "sources", {"sources": sources, "context_chars": context_chars}
                     )

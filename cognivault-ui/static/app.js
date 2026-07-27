@@ -17,6 +17,11 @@
     tokenVisible: false,   // masked token field state
     pipTokenVisible: false, // masked SberOSC token field state
     loginTokenVisible: false, // masked login-modal token field state
+    confConfig: null,      // last GET /api/confluence/config
+    confAuthMode: "basic", // "basic" | "pat"
+    confPasswordVisible: false,
+    confPatVisible: false,
+    confSyncing: false,    // a confluence sync SSE is in flight
   };
 
   /* ============================ DOM ============================ */
@@ -84,6 +89,37 @@
     envImportBtn: $("env-import-btn"),
     envImportResult: $("env-import-result"),
     console: $("console"),
+    // §3.5 confluence source
+    sectionConfluence: $("section-confluence"),
+    confBaseUrl: $("conf-base-url"),
+    confBaseUrlLocked: $("conf-base-url-locked"),
+    confAuthBasic: $("conf-auth-basic"),
+    confAuthPat: $("conf-auth-pat"),
+    confBasicFields: $("conf-basic-fields"),
+    confPatFields: $("conf-pat-fields"),
+    confLogin: $("conf-login"),
+    confPassword: $("conf-password"),
+    confPasswordToggle: $("conf-password-toggle"),
+    confPasswordSaved: $("conf-password-saved"),
+    confPat: $("conf-pat"),
+    confPatToggle: $("conf-pat-toggle"),
+    confPatSaved: $("conf-pat-saved"),
+    confRootUrl: $("conf-root-url"),
+    confTlsFields: $("conf-tls-fields"),
+    confCaPath: $("conf-ca-path"),
+    confVerifySsl: $("conf-verify-ssl"),
+    confAutoSync: $("conf-auto-sync"),
+    confIntervalField: $("conf-interval-field"),
+    confAutoSyncInterval: $("conf-auto-sync-interval"),
+    confReplaceMode: $("conf-replace-mode"),
+    confSave: $("conf-save"),
+    confValidate: $("conf-validate"),
+    confSync: $("conf-sync"),
+    confSaved: $("conf-saved"),
+    confValidateResult: $("conf-validate-result"),
+    confSyncCounter: $("conf-sync-counter"),
+    confConsole: $("confluence-console"),
+    confStatus: $("conf-status"),
     // server-mode sections (hidden in server mode / shown read-only)
     sectionServerInfo: $("section-server-info"),
     sectionConn: $("section-conn"),
@@ -681,6 +717,8 @@
     dom.scrim.hidden = false;
     dom.drawer.hidden = false;
     document.addEventListener("keydown", drawerKeydown, true);
+    // Load the Confluence source config each time the drawer opens (both modes).
+    loadConfluenceConfig();
     const first = dom.drawer.querySelector("button, input, select, a[href], textarea");
     if (first) first.focus();
   }
@@ -843,6 +881,267 @@
     }
   }
 
+  /* ============================ CONFLUENCE SOURCE ============================ */
+  function confServerLocked() {
+    return (state.confConfig && state.confConfig.mode === "server") || isServerMode();
+  }
+
+  function applyConfAuthMode(mode) {
+    state.confAuthMode = mode === "pat" ? "pat" : "basic";
+    const basic = state.confAuthMode === "basic";
+    dom.confAuthBasic.setAttribute("aria-pressed", String(basic));
+    dom.confAuthPat.setAttribute("aria-pressed", String(!basic));
+    dom.confBasicFields.hidden = !basic;
+    dom.confPatFields.hidden = basic;
+  }
+
+  function applyConfInterval() {
+    const on = dom.confAutoSync.checked;
+    dom.confIntervalField.style.opacity = on ? "1" : ".5";
+    dom.confAutoSyncInterval.disabled = !on;
+  }
+
+  function toggleConfPasswordVisibility() {
+    state.confPasswordVisible = !state.confPasswordVisible;
+    dom.confPassword.type = state.confPasswordVisible ? "text" : "password";
+    dom.confPasswordToggle.textContent = state.confPasswordVisible ? "Скрыть" : "Показать";
+    dom.confPasswordToggle.setAttribute("aria-pressed", String(state.confPasswordVisible));
+  }
+  function toggleConfPatVisibility() {
+    state.confPatVisible = !state.confPatVisible;
+    dom.confPat.type = state.confPatVisible ? "text" : "password";
+    dom.confPatToggle.textContent = state.confPatVisible ? "Скрыть" : "Показать";
+    dom.confPatToggle.setAttribute("aria-pressed", String(state.confPatVisible));
+  }
+
+  async function loadConfluenceConfig() {
+    let c;
+    try { c = await apiGet("/api/confluence/config"); } catch (_) { return; }
+    state.confConfig = c || {};
+    c = state.confConfig;
+    const server = c.mode === "server";
+    dom.confBaseUrl.value = c.base_url || "";
+    dom.confLogin.value = c.login || "";
+    dom.confRootUrl.value = c.root_url || "";
+    dom.confCaPath.value = c.ca_path || "";
+    dom.confVerifySsl.checked = c.verify_ssl !== false;
+    dom.confAutoSync.checked = !!c.auto_sync;
+    dom.confAutoSyncInterval.value = c.auto_sync_interval_min != null ? c.auto_sync_interval_min : "";
+    dom.confReplaceMode.checked = !!c.replace_mode;
+    // secrets are never returned — clear the inputs, surface a "saved" hint
+    dom.confPassword.value = "";
+    dom.confPat.value = "";
+    dom.confPasswordSaved.hidden = !c.has_password;
+    dom.confPatSaved.hidden = !c.has_pat;
+    applyConfAuthMode(c.auth_mode === "pat" ? "pat" : "basic");
+    // admin-locked fields (server mode): base_url read-only, CA/TLS hidden
+    dom.confBaseUrl.readOnly = server;
+    dom.confBaseUrlLocked.hidden = !server;
+    dom.confTlsFields.hidden = server;
+    applyConfInterval();
+    dom.confValidateResult.hidden = true;
+    dom.confValidateResult.textContent = "";
+    await loadConfluenceStatus();
+  }
+
+  async function saveConfluenceConfig() {
+    const server = confServerLocked();
+    const payload = {
+      auth_mode: state.confAuthMode,
+      login: dom.confLogin.value.trim(),
+      root_url: dom.confRootUrl.value.trim(),
+      auto_sync: dom.confAutoSync.checked,
+      replace_mode: dom.confReplaceMode.checked,
+    };
+    const iv = parseInt(dom.confAutoSyncInterval.value, 10);
+    if (!isNaN(iv)) payload.auto_sync_interval_min = iv;
+    if (!server) {
+      // base_url / ca_path / verify_ssl are admin-locked in server mode → omit
+      payload.base_url = dom.confBaseUrl.value.trim();
+      payload.ca_path = dom.confCaPath.value.trim();
+      payload.verify_ssl = dom.confVerifySsl.checked;
+    }
+    // never clear a saved secret — only send when the user typed something
+    const pw = dom.confPassword.value;
+    const pat = dom.confPat.value;
+    if (pw) payload.password = pw;
+    if (pat) payload.pat = pat;
+    dom.confSave.disabled = true;
+    try {
+      await apiSend("/api/confluence/config", "PUT", payload);
+      flashSaved(dom.confSaved);
+      toast("ok", "Настройки сохранены", "Источник Confluence обновлён");
+      await loadConfluenceConfig();
+    } catch (e) {
+      toast("err", "Ошибка сохранения", e.message);
+    } finally {
+      dom.confSave.disabled = false;
+    }
+  }
+
+  const CONF_VALIDATE_ERR = {
+    BAD_URL: "Неверный адрес или ссылка на страницу",
+    AUTH_FAILED_BASIC_SSO: "Basic отключён — переключитесь на токен (PAT)",
+    PAGE_NOT_FOUND: "Корневая страница не найдена",
+    TLS_ERROR: "Ошибка TLS-сертификата сервера",
+    CONF_UNAVAILABLE: "Confluence недоступен, попробуйте позже",
+  };
+
+  function showConfValidate(kind, text) {
+    dom.confValidateResult.hidden = false;
+    dom.confValidateResult.textContent = "";
+    const p = el("span", "pill " + kind);
+    p.appendChild(el("span", "dot"));
+    p.appendChild(document.createTextNode(text));
+    dom.confValidateResult.appendChild(p);
+  }
+
+  async function validateConfluence() {
+    dom.confValidate.disabled = true;
+    showConfValidate("warn", "Проверка подключения…");
+    try {
+      const res = await fetch("/api/confluence/validate", {
+        method: "POST",
+        headers: Object.assign({ "Content-Type": "application/json", Accept: "application/json" }, authHeaders()),
+        body: JSON.stringify({}),
+      });
+      if (res.status === 401 && isServerMode()) { handleUnauthorized(); throw unauthorizedError(); }
+      let body = null;
+      try { body = await res.json(); } catch (_) {}
+      if (res.ok && body && body.ok) {
+        const est = body.page_count_estimate != null ? body.page_count_estimate : "?";
+        const mode = body.auth_mode_used || state.confAuthMode;
+        const title = body.root_title || "Корневая страница";
+        const space = body.space ? " · " + body.space : "";
+        showConfValidate("ok", "✓ " + title + space + ", ~" + est + " страниц (вход: " + mode + ")");
+      } else {
+        const err = (body && body.error) || {};
+        showConfValidate("err", CONF_VALIDATE_ERR[err.code] || err.message || "Не удалось проверить подключение");
+      }
+    } catch (e) {
+      if (!e.handled) showConfValidate("err", "Ошибка соединения: " + e.message);
+    } finally {
+      dom.confValidate.disabled = false;
+    }
+  }
+
+  async function loadConfluenceStatus() {
+    let st;
+    try { st = await apiGet("/api/confluence/status"); } catch (_) { return; }
+    st = st || {};
+    const parts = [];
+    if (st.last_sync_at) {
+      const when = relTime(st.last_sync_at) || String(st.last_sync_at);
+      parts.push("Последняя синхронизация: " + when);
+    } else {
+      parts.push("Последняя синхронизация: ещё не выполнялась");
+    }
+    if (st.page_count != null) {
+      const noun = pluralRu(st.page_count, "страница", "страницы", "страниц");
+      parts.push(st.page_count + " " + noun);
+    }
+    if (st.root_title) parts.push(st.root_title);
+    dom.confStatus.textContent = parts.join(" · ");
+  }
+
+  // Console rendering for the confluence sync SSE (separate from env #console).
+  function confLog(kind, text) {
+    const cls = kind === "error" ? "ln lv-err"
+      : kind === "done" ? "step lv-ok"
+      : kind === "step" ? "step"
+      : "ln lv-dim"; // log
+    const line = el("span", cls);
+    const prefix = (kind === "step" || kind === "done") ? "▸ " : "";
+    line.textContent = prefix + text;
+    dom.confConsole.appendChild(line);
+    dom.confConsole.scrollTop = dom.confConsole.scrollHeight;
+  }
+
+  const CONF_PAGE_ACTION = {
+    new: { label: "создано", cls: "lv-ok" },
+    updated: { label: "обновлено", cls: "lv-teal" },
+    skipped: { label: "пропущено", cls: "lv-dim" },
+    deleted: { label: "удалено", cls: "lv-warn" },
+    failed: { label: "ошибка", cls: "lv-err" },
+  };
+  function renderConfPage(d) {
+    d = d || {};
+    const a = CONF_PAGE_ACTION[d.action] || { label: String(d.action || "?"), cls: "lv-dim" };
+    const line = el("span", "ln");
+    line.appendChild(el("span", a.cls, "+ " + a.label + ": "));
+    const total = d.total != null ? d.total : "?";
+    const index = d.index != null ? d.index : "?";
+    line.appendChild(document.createTextNode((d.title || "Без названия") + " (" + index + "/" + total + ")"));
+    dom.confConsole.appendChild(line);
+    dom.confConsole.scrollTop = dom.confConsole.scrollHeight;
+    if (d.total != null) {
+      dom.confSyncCounter.hidden = false;
+      dom.confSyncCounter.textContent = "Обработано " + index + " из " + total;
+    }
+  }
+
+  async function syncConfluence() {
+    if (state.confSyncing) return;
+    const replace = dom.confReplaceMode.checked;
+    state.confSyncing = true;
+    dom.confSync.disabled = true;
+    dom.confConsole.hidden = false;
+    dom.confConsole.textContent = "";
+    dom.confSyncCounter.hidden = false;
+    dom.confSyncCounter.textContent = "";
+    confLog("step", "Запуск синхронизации…");
+    try {
+      const res = await fetch("/api/confluence/sync", {
+        method: "POST",
+        headers: Object.assign({ "Content-Type": "application/json", Accept: "text/event-stream" }, authHeaders()),
+        body: JSON.stringify({ replace: replace }),
+      });
+      if (res.status === 401 && isServerMode()) { handleUnauthorized(); return; }
+      if (!res.ok || !res.body) {
+        let msg = "HTTP " + res.status;
+        try { const j = await res.json(); if (j && j.error) msg = j.error.message || j.error.code || msg; } catch (_) {}
+        throw new Error(msg);
+      }
+      await consumeSSE(res, (ev) => {
+        const d = ev.data || {};
+        switch (ev.event) {
+          case "step":
+            confLog("step", d.label || d.name || "");
+            break;
+          case "page":
+            renderConfPage(d);
+            break;
+          case "log":
+            confLog("log", d.line != null ? d.line : String(d));
+            break;
+          case "done": {
+            const summary = "Готово: создано " + (d.synced || 0) +
+              ", обновлено " + (d.updated || 0) +
+              ", пропущено " + (d.skipped || 0) +
+              ", удалено " + (d.deleted || 0) +
+              ", вложений " + (d.attachments || 0) +
+              ", ошибок " + (d.failed || 0) +
+              " · " + (d.duration_s != null ? d.duration_s : "?") + " с";
+            confLog("done", summary);
+            toast("ok", "Синхронизация завершена", summary);
+            loadConfluenceStatus();
+            break;
+          }
+          case "error":
+            confLog("error", (d.code ? "[" + d.code + "] " : "") + (d.message || "Ошибка") + (d.detail ? " — " + d.detail : ""));
+            toast("err", "Ошибка синхронизации", d.message || d.code || "");
+            break;
+        }
+      });
+    } catch (e) {
+      confLog("error", "Ошибка: " + e.message);
+      toast("err", "Ошибка синхронизации", e.message);
+    } finally {
+      state.confSyncing = false;
+      dom.confSync.disabled = false;
+    }
+  }
+
   /* ============================ CHAT ============================ */
   function applyRagUI() {
     dom.ragSwitch.setAttribute("aria-checked", String(state.rag));
@@ -905,7 +1204,20 @@
     const chips = el("div", "chips");
     sources.forEach((s) => {
       const chip = el("div", "chip");
-      chip.appendChild(el("span", "ct", s.title || s.name || "Документ"));
+      const titleText = s.title || s.name || "Документ";
+      // Clickable Confluence source: title becomes a link when a safe http(s)
+      // url is provided; otherwise it stays plain text as before.
+      if (s.url && /^https?:\/\//i.test(s.url)) {
+        const a = el("a", "ct link");
+        a.href = s.url; // property assignment — not innerHTML, so injection-safe
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.appendChild(document.createTextNode(titleText));
+        a.appendChild(el("span", "cext", "↗"));
+        chip.appendChild(a);
+      } else {
+        chip.appendChild(el("span", "ct", titleText));
+      }
       if (s.path) chip.appendChild(el("span", "cp", s.path));
       const depthLabel = DEPTH_LABEL[s.depth];
       if (depthLabel) chip.appendChild(el("span", "cd", depthLabel));
@@ -1210,6 +1522,16 @@
     dom.saveEnvMirror.addEventListener("click", saveEnvMirror);
     dom.envSetupBtn.addEventListener("click", runEnvSetup);
     dom.envImportBtn.addEventListener("click", importEnv);
+
+    // confluence source
+    dom.confAuthBasic.addEventListener("click", () => applyConfAuthMode("basic"));
+    dom.confAuthPat.addEventListener("click", () => applyConfAuthMode("pat"));
+    dom.confPasswordToggle.addEventListener("click", toggleConfPasswordVisibility);
+    dom.confPatToggle.addEventListener("click", toggleConfPatVisibility);
+    dom.confAutoSync.addEventListener("change", applyConfInterval);
+    dom.confSave.addEventListener("click", saveConfluenceConfig);
+    dom.confValidate.addEventListener("click", validateConfluence);
+    dom.confSync.addEventListener("click", syncConfluence);
 
     // server-mode login / logout
     if (dom.loginSubmit) dom.loginSubmit.addEventListener("click", submitLogin);

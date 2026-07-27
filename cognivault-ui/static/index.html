@@ -164,6 +164,84 @@
       </details>
     </section>
 
+    <!-- §3.5 Источник Confluence -->
+    <section class="section" id="section-confluence" aria-labelledby="s-conf">
+      <span class="eyebrow" id="s-conf">Источник Confluence</span>
+      <div class="field">
+        <label for="conf-base-url">Адрес Confluence</label>
+        <input class="input" id="conf-base-url" placeholder="https://confluence.sberbank.ru">
+        <small class="hint" id="conf-base-url-locked" hidden>Задаётся администратором</small>
+      </div>
+      <div class="field">
+        <label id="conf-authmode-label">Способ входа</label>
+        <div class="segmented" id="conf-authmode" role="group" aria-labelledby="conf-authmode-label">
+          <button class="seg" id="conf-auth-basic" type="button" aria-pressed="true">Логин и пароль</button>
+          <button class="seg" id="conf-auth-pat" type="button" aria-pressed="false">Токен (PAT)</button>
+        </div>
+      </div>
+      <div id="conf-basic-fields">
+        <div class="field">
+          <label for="conf-login">Логин</label>
+          <input class="input" id="conf-login" placeholder="ivanov_ii" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="conf-password">Пароль</label>
+          <div class="inline">
+            <input class="input" id="conf-password" type="password" placeholder="••••••••••••" autocomplete="off">
+            <button class="linkbtn" id="conf-password-toggle" type="button" aria-pressed="false">Показать</button>
+          </div>
+          <small class="hint" id="conf-password-saved" hidden>Пароль сохранён</small>
+        </div>
+      </div>
+      <div id="conf-pat-fields" hidden>
+        <div class="field">
+          <label for="conf-pat">Токен (PAT)</label>
+          <div class="inline">
+            <input class="input" id="conf-pat" type="password" placeholder="••••••••••••" autocomplete="off">
+            <button class="linkbtn" id="conf-pat-toggle" type="button" aria-pressed="false">Показать</button>
+          </div>
+          <small class="hint" id="conf-pat-saved" hidden>Токен сохранён</small>
+        </div>
+      </div>
+      <div class="field">
+        <label for="conf-root-url">Ссылка на корневую страницу</label>
+        <input class="input" id="conf-root-url" placeholder="https://confluence.sberbank.ru/pages/viewpage.action?pageId=…">
+      </div>
+      <div id="conf-tls-fields">
+        <div class="field">
+          <label for="conf-ca-path">CA-бандл <span class="hint">(необязательно)</span></label>
+          <input class="input" id="conf-ca-path" placeholder="/path/to/ca.pem">
+        </div>
+        <div class="checkline">
+          <input type="checkbox" id="conf-verify-ssl">
+          <label for="conf-verify-ssl">Проверять TLS</label>
+        </div>
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="conf-auto-sync">
+        <label for="conf-auto-sync">Автообновление</label>
+      </div>
+      <div class="field" id="conf-interval-field">
+        <label for="conf-auto-sync-interval">Интервал автообновления, мин</label>
+        <input class="input" id="conf-auto-sync-interval" type="number" min="1" placeholder="60">
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="conf-replace-mode">
+        <label for="conf-replace-mode">Очистить вольт перед синхронизацией</label>
+      </div>
+      <small class="hint warn-hint" id="conf-replace-warn">Удалит вручную загруженные файлы перед синхронизацией.</small>
+      <div class="section-actions">
+        <button class="btn primary" id="conf-save">Сохранить</button>
+        <button class="btn ghost" id="conf-validate">Проверить подключение</button>
+        <button class="btn ghost" id="conf-sync">Синхронизировать сейчас</button>
+        <span class="saved" id="conf-saved" hidden>✓ Сохранено</span>
+      </div>
+      <div class="conf-validate-result" id="conf-validate-result" hidden></div>
+      <div class="conf-sync-counter" id="conf-sync-counter" hidden></div>
+      <div class="console" id="confluence-console" aria-live="polite" aria-label="Журнал синхронизации Confluence" hidden></div>
+      <div class="conf-status" id="conf-status"></div>
+    </section>
+
     <!-- §4 Окружение -->
     <section class="section" id="section-env" aria-labelledby="s-env">
       <span class="eyebrow" id="s-env">Окружение</span>
