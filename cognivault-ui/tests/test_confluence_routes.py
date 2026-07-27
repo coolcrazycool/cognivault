@@ -202,6 +202,134 @@ def test_status_running_reflects_lock(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# base_url derivation: _is_configured + /validate host guard
+# --------------------------------------------------------------------------- #
+
+
+def test_is_configured_true_with_root_url_only(tmp_path):
+    """A parseable root_url alone (no separate base_url) satisfies the base."""
+    cfg = {"root_url": "https://confluence.sberbank.ru/x?pageId=1"}
+    secret = {"pat": "tok"}
+    assert confluence_routes._is_configured(cfg, secret) is True
+    # No creds → not configured.
+    assert confluence_routes._is_configured(cfg, {}) is False
+    # No usable target → not configured.
+    assert confluence_routes._is_configured({"base_url": ""}, secret) is False
+
+
+class _FakeConfluenceClient:
+    """Minimal stand-in for ConfluenceClient used by /validate (no network)."""
+
+    last_cfg: dict = {}
+
+    @classmethod
+    def from_config(cls, cfg, secret, **kw):
+        cls.last_cfg = dict(cfg)
+        return cls()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
+
+    async def get_page(self, page_id):
+        return {"title": "Корень", "space": "ENG", "id": page_id}
+
+    async def _request(self, method, path, **kw):
+        class _R:
+            @staticmethod
+            def json():
+                return {"totalSize": 4}
+
+        return _R()
+
+
+def _server_mode(monkeypatch, paths):
+    monkeypatch.setattr(settings, "is_server", lambda: True)
+    monkeypatch.setattr(confluence_routes, "resolve_paths", lambda request: paths)
+
+
+def test_validate_server_mode_rejects_foreign_host(tmp_path, monkeypatch):
+    """A root link on a host other than the admin host → HOST_NOT_ALLOWED."""
+    paths = _paths(tmp_path)
+    store.save_config(
+        paths, {"root_url": "https://evil.example.com/pages/viewpage.action?pageId=9"}
+    )
+    store.save_secret(paths, {"pat": "tok"})
+    _server_mode(monkeypatch, paths)
+
+    with TestClient(create_app()) as client:
+        resp = client.post(
+            "/api/confluence/validate",
+            json={},
+            headers={"Authorization": "Bearer tok"},
+        )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "HOST_NOT_ALLOWED"
+
+
+def test_validate_server_mode_same_host_ok_and_stores_base(tmp_path, monkeypatch):
+    """Same-host root link validates and persists the derived base_url."""
+    paths = _paths(tmp_path)
+    store.save_config(
+        paths,
+        {"root_url": "https://confluence.sberbank.ru/pages/viewpage.action?pageId=1"},
+    )
+    store.save_secret(paths, {"pat": "tok"})
+    _server_mode(monkeypatch, paths)
+    monkeypatch.setattr(
+        confluence_routes, "ConfluenceClient", _FakeConfluenceClient
+    )
+
+    with TestClient(create_app()) as client:
+        resp = client.post(
+            "/api/confluence/validate",
+            json={},
+            headers={"Authorization": "Bearer tok"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["root_title"] == "Корень"
+    # Derived base persisted to the config file.
+    assert store.load_config(paths)["base_url"] == "https://confluence.sberbank.ru"
+    # The client was built with the derived base, not a stored/admin one.
+    assert _FakeConfluenceClient.last_cfg["base_url"] == "https://confluence.sberbank.ru"
+
+
+def test_validate_context_path_base_derived(tmp_path, monkeypatch):
+    """A /confluence context-path link derives (and stores) the base with it."""
+    paths = _paths(tmp_path)
+    store.save_config(
+        paths,
+        {
+            "root_url": (
+                "https://confluence.sberbank.ru/confluence/pages/"
+                "viewpage.action?pageId=7"
+            )
+        },
+    )
+    store.save_secret(paths, {"pat": "tok"})
+    _server_mode(monkeypatch, paths)
+    monkeypatch.setattr(
+        confluence_routes, "ConfluenceClient", _FakeConfluenceClient
+    )
+
+    with TestClient(create_app()) as client:
+        resp = client.post(
+            "/api/confluence/validate",
+            json={},
+            headers={"Authorization": "Bearer tok"},
+        )
+    assert resp.status_code == 200
+    assert (
+        store.load_config(paths)["base_url"]
+        == "https://confluence.sberbank.ru/confluence"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Chat sources get a Confluence url when the path is in the manifest
 # --------------------------------------------------------------------------- #
 

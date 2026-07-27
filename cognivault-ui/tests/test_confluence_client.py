@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.confluence.client import (  # noqa: E402
     ConfluenceClient,
     ConfluenceError,
+    parse_base_url,
     parse_page_url,
     resolve_display_url,
 )
@@ -76,6 +77,45 @@ def test_parse_garbage_returns_none():
     assert parse_page_url("not a url at all") is None
     assert parse_page_url("") is None
     assert parse_page_url(f"{BASE}/dashboard.action") is None
+
+
+# --------------------------------------------------------------------------- #
+# parse_base_url matrix
+# --------------------------------------------------------------------------- #
+
+
+def test_base_from_pageid_url():
+    assert parse_base_url(f"{BASE}/pages/viewpage.action?pageId=12345") == BASE
+
+
+def test_base_from_display_url():
+    assert parse_base_url(f"{BASE}/display/ENG/Some+Page") == BASE
+
+
+def test_base_from_spaces_url():
+    assert parse_base_url(f"{BASE}/spaces/ENG/pages/67890/My+Page") == BASE
+
+
+def test_base_with_context_path():
+    url = f"{BASE}/confluence/pages/viewpage.action?pageId=555"
+    assert parse_base_url(url) == f"{BASE}/confluence"
+
+
+def test_base_with_context_path_spaces():
+    url = f"{BASE}/confluence/spaces/ENG/pages/777/Title"
+    assert parse_base_url(url) == f"{BASE}/confluence"
+
+
+def test_base_strips_trailing_slash():
+    # A bare host root (no known segment) collapses to scheme://netloc.
+    assert parse_base_url(f"{BASE}/") == BASE
+
+
+def test_base_non_http_returns_none():
+    assert parse_base_url("ftp://host/pages/viewpage.action?pageId=1") is None
+    assert parse_base_url("not a url at all") is None
+    assert parse_base_url("") is None
+    assert parse_base_url("/pages/viewpage.action?pageId=1") is None
 
 
 # --------------------------------------------------------------------------- #

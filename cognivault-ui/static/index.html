@@ -168,11 +168,6 @@
     <section class="section" id="section-confluence" aria-labelledby="s-conf">
       <span class="eyebrow" id="s-conf">Источник Confluence</span>
       <div class="field">
-        <label for="conf-base-url">Адрес Confluence</label>
-        <input class="input" id="conf-base-url" placeholder="https://confluence.sberbank.ru">
-        <small class="hint" id="conf-base-url-locked" hidden>Задаётся администратором</small>
-      </div>
-      <div class="field">
         <label id="conf-authmode-label">Способ входа</label>
         <div class="segmented" id="conf-authmode" role="group" aria-labelledby="conf-authmode-label">
           <button class="seg" id="conf-auth-basic" type="button" aria-pressed="true">Логин и пароль</button>
@@ -206,6 +201,7 @@
       <div class="field">
         <label for="conf-root-url">Ссылка на корневую страницу</label>
         <input class="input" id="conf-root-url" placeholder="https://confluence.sberbank.ru/pages/viewpage.action?pageId=…">
+        <small class="hint">Адрес Confluence определяется из ссылки автоматически</small>
       </div>
       <div id="conf-tls-fields">
         <div class="field">

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -24,6 +25,7 @@ from ..confluence import store
 from ..confluence.client import (
     ConfluenceClient,
     ConfluenceError,
+    parse_base_url,
     parse_page_url,
     resolve_display_url,
 )
@@ -32,8 +34,10 @@ from ..deps import cv_context, get_token, resolve_paths, user_bucket
 
 router = APIRouter(prefix="/api/confluence")
 
-# Connection settings the administrator owns in server mode.
-_ADMIN_LOCKED_KEYS = ("base_url", "ca_path", "verify_ssl")
+# TLS connection settings the administrator owns in server mode. ``base_url`` is
+# no longer here: it is derived from the root page link (see ``parse_base_url``)
+# and, in server mode, constrained to the admin host by ``_host_guard``.
+_ADMIN_LOCKED_KEYS = ("ca_path", "verify_ssl")
 _SECRET_KEYS = ("password", "pat")
 
 
@@ -52,16 +56,47 @@ def _error(
 
 
 def _effective_config(paths: Any) -> dict[str, Any]:
-    """Per-user config with admin-locked keys overridden in server mode."""
+    """Per-user config with the REST base derived from the root link.
+
+    The ``base_url`` is derived from ``root_url`` via :func:`parse_base_url`
+    (the source of truth — including any ``/confluence`` context path), falling
+    back to the stored value, or the admin default in server mode. Admin-locked
+    TLS settings (``ca_path``/``verify_ssl``) still come from the environment in
+    server mode.
+    """
     cfg = store.load_config(paths)
     if settings.is_server():
         cfg = {
             **cfg,
-            "base_url": settings.confluence_base_url(),
             "ca_path": settings.confluence_ca_path(),
             "verify_ssl": settings.confluence_verify_ssl(),
         }
+    derived = parse_base_url(str(cfg.get("root_url", "") or ""))
+    if derived:
+        cfg = {**cfg, "base_url": derived}
+    elif settings.is_server():
+        cfg = {**cfg, "base_url": settings.confluence_base_url()}
     return cfg
+
+
+def _host_guard(base_url: str | None) -> JSONResponse | None:
+    """Server-mode admin guard: the derived base host must be the admin host.
+
+    Returns a typed ``HOST_NOT_ALLOWED`` error response when the host of the
+    derived base differs from ``settings.confluence_base_url()``'s host; ``None``
+    when allowed. In local mode there is no restriction (always ``None``).
+    """
+    if not settings.is_server():
+        return None
+    admin_host = urlsplit(settings.confluence_base_url()).netloc
+    derived_host = urlsplit(base_url or "").netloc
+    if derived_host != admin_host:
+        return _error(
+            400,
+            "HOST_NOT_ALLOWED",
+            f"Ссылка не на разрешённый Confluence ({admin_host})",
+        )
+    return None
 
 
 def _max_concurrency() -> int:
@@ -80,12 +115,17 @@ def _sync_lock_key(request: Request) -> str:
 
 
 def _is_configured(cfg: dict[str, Any], secret: dict[str, Any]) -> bool:
-    """True when a base URL, a root target, and a credential are all present."""
-    has_target = bool(cfg.get("base_url")) and bool(
-        cfg.get("root_url") or cfg.get("root_page_id")
+    """True when a root target (with a derivable base) and a credential exist.
+
+    The base is satisfied by a parseable ``root_url`` (from which it is derived)
+    or a previously stored ``base_url`` — a separate base field is not required.
+    """
+    has_base = bool(parse_base_url(str(cfg.get("root_url", "") or ""))) or bool(
+        cfg.get("base_url")
     )
+    has_target = bool(cfg.get("root_url") or cfg.get("root_page_id"))
     has_cred = bool(secret.get("password")) or bool(secret.get("pat"))
-    return has_target and has_cred
+    return has_base and has_target and has_cred
 
 
 def _confluence_error_response(exc: ConfluenceError) -> JSONResponse:
@@ -151,6 +191,16 @@ async def put_config(
         if k in store.DEFAULT_CONFLUENCE_CONFIG and k not in _SECRET_KEYS
     }
 
+    # Derive & persist the REST base from the root link (no visible field). This
+    # keeps the manifest ``source_url``s and the chat source-link index pointing
+    # at the correct host + context path.
+    effective_root = str(
+        body.get("root_url", store.load_config(paths).get("root_url", "")) or ""
+    )
+    derived_base = parse_base_url(effective_root)
+    if derived_base:
+        non_secret["base_url"] = derived_base
+
     if non_secret:
         store.save_config(paths, non_secret)
 
@@ -210,6 +260,20 @@ async def validate(
     if not root_url:
         return _error(400, "BAD_URL", "не указана ссылка на корневую страницу")
 
+    # Derive the REST base from the root link — the source of truth for the base.
+    derived_base = parse_base_url(root_url)
+    if not derived_base:
+        return _error(
+            400, "BAD_URL", "не удалось распознать ссылку на страницу Confluence"
+        )
+
+    # Server-mode admin guard: the link must target the allowed Confluence host.
+    guard = _host_guard(derived_base)
+    if guard is not None:
+        return guard
+
+    merged_cfg = {**merged_cfg, "base_url": derived_base}
+
     client = ConfluenceClient.from_config(
         merged_cfg, merged_secret, max_concurrency=_max_concurrency()
     )
@@ -226,6 +290,9 @@ async def validate(
             estimate = await _count_estimate(client, root_id)
     except ConfluenceError as exc:
         return _confluence_error_response(exc)
+
+    # Persist the derived base so downstream (manifest/chat links) uses it.
+    store.save_config(paths, {"base_url": derived_base})
 
     return {
         "ok": True,
@@ -277,6 +344,11 @@ async def sync(
             "CONFLUENCE_NOT_CONFIGURED",
             "Сначала сохраните подключение к Confluence",
         )
+
+    # Server-mode admin guard on the derived base host (pre-flight, plain HTTP).
+    guard = _host_guard(cfg.get("base_url"))
+    if guard is not None:
+        return guard
 
     cv = cv_context(request)
     replace = bool(body.get("replace", False))

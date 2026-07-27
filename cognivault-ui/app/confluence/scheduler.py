@@ -34,6 +34,7 @@ from typing import Any
 
 from .. import settings
 from ..config import PATHS, AppPaths
+from .client import parse_base_url
 from .store import load_config, load_manifest, load_secret
 from .sync import SYNC_LOCKS, sync_stream
 
@@ -154,11 +155,16 @@ async def _run_one(
 
 
 def _server_effective_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Overlay the admin-locked connection settings, mirroring the route's
-    ``_effective_config`` (base_url / ca_path / verify_ssl from the environment)."""
+    """Overlay the admin-locked TLS settings and derive the REST base.
+
+    Mirrors the route's ``_effective_config``: ``ca_path``/``verify_ssl`` come
+    from the environment, and ``base_url`` is derived from the root link
+    (source of truth, incl. any context path), falling back to the admin default.
+    """
+    derived = parse_base_url(str(cfg.get("root_url", "") or ""))
     return {
         **cfg,
-        "base_url": settings.confluence_base_url(),
+        "base_url": derived or settings.confluence_base_url(),
         "ca_path": settings.confluence_ca_path(),
         "verify_ssl": settings.confluence_verify_ssl(),
     }

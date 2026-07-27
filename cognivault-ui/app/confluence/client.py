@@ -105,6 +105,38 @@ def parse_page_url(url: str) -> str | None:
     return None
 
 
+# Known Confluence path roots. The REST base is everything *before* the first
+# of these segments — i.e. ``scheme://netloc`` plus any context-path prefix.
+_BASE_CUT_RE = re.compile(r"/(?:pages|display|spaces|rest)(?:/|$)")
+
+
+def parse_base_url(url: str) -> str | None:
+    """Derive the Confluence REST base from a full page/space URL.
+
+    Returns ``scheme://netloc`` **plus** any context-path prefix that precedes
+    the first ``/pages``, ``/display``, ``/spaces`` or ``/rest`` segment, with any
+    trailing slash stripped::
+
+        https://host/confluence/pages/viewpage.action?pageId=1 → https://host/confluence
+        https://host/pages/viewpage.action?pageId=1            → https://host
+        https://host/spaces/ENG/pages/2/Title                  → https://host
+
+    Returns ``None`` for anything that is not a usable ``http(s)`` URL (no
+    scheme/host). When no known segment is present the host root is returned.
+    """
+    if not url or not isinstance(url, str):
+        return None
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return None
+    m = _BASE_CUT_RE.search(parts.path or "")
+    prefix = (parts.path or "")[: m.start()] if m else ""
+    return f"{parts.scheme}://{parts.netloc}{prefix}".rstrip("/")
+
+
 async def resolve_display_url(client: "ConfluenceClient", url: str) -> str | None:
     """Resolve a ``/display/<SPACE>/<Title>`` URL to a page id via the API.
 

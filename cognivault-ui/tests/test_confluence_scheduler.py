@@ -167,8 +167,8 @@ def test_server_tick_runs_only_eligible_users(tmp_path, monkeypatch):
     assert kw["lock_key"] == "aaa"
     assert kw["cv"] == {"base_url": "http://cognivault:3000", "token": "cv-a"}
     assert kw["replace"] is False
-    # Admin-locked base_url overlaid onto the per-user cfg.
-    assert kw["cfg"]["base_url"] == settings.confluence_base_url()
+    # base_url derived from the per-user root link (source of truth).
+    assert kw["cfg"]["base_url"] == "https://confluence.example.com"
     # The per-user auto-sync log was written with the drained frames.
     log_text = (p_a.confluence_dir / "last-auto-sync.log").read_text()
     assert "event: done" in log_text

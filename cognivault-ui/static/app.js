@@ -91,8 +91,6 @@
     console: $("console"),
     // §3.5 confluence source
     sectionConfluence: $("section-confluence"),
-    confBaseUrl: $("conf-base-url"),
-    confBaseUrlLocked: $("conf-base-url-locked"),
     confAuthBasic: $("conf-auth-basic"),
     confAuthPat: $("conf-auth-pat"),
     confBasicFields: $("conf-basic-fields"),
@@ -920,7 +918,6 @@
     state.confConfig = c || {};
     c = state.confConfig;
     const server = c.mode === "server";
-    dom.confBaseUrl.value = c.base_url || "";
     dom.confLogin.value = c.login || "";
     dom.confRootUrl.value = c.root_url || "";
     dom.confCaPath.value = c.ca_path || "";
@@ -934,9 +931,8 @@
     dom.confPasswordSaved.hidden = !c.has_password;
     dom.confPatSaved.hidden = !c.has_pat;
     applyConfAuthMode(c.auth_mode === "pat" ? "pat" : "basic");
-    // admin-locked fields (server mode): base_url read-only, CA/TLS hidden
-    dom.confBaseUrl.readOnly = server;
-    dom.confBaseUrlLocked.hidden = !server;
+    // admin-locked fields (server mode): CA/TLS hidden. The REST base is derived
+    // from the root link, so there is no base-url field to lock.
     dom.confTlsFields.hidden = server;
     applyConfInterval();
     dom.confValidateResult.hidden = true;
@@ -956,8 +952,8 @@
     const iv = parseInt(dom.confAutoSyncInterval.value, 10);
     if (!isNaN(iv)) payload.auto_sync_interval_min = iv;
     if (!server) {
-      // base_url / ca_path / verify_ssl are admin-locked in server mode → omit
-      payload.base_url = dom.confBaseUrl.value.trim();
+      // ca_path / verify_ssl are admin-locked in server mode → omit. base_url is
+      // never sent: the backend derives it from root_url automatically.
       payload.ca_path = dom.confCaPath.value.trim();
       payload.verify_ssl = dom.confVerifySsl.checked;
     }
