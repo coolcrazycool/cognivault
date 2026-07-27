@@ -71,7 +71,7 @@ spec:
           # закешированный вердикт «Заблокирован» по старому образу.
           # Образ тянется через прокси SberOSC из ghcr.io/coolcrazycool/cognivault-ui
           # (пакет ghcr должен быть PUBLIC).
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-c83b1af
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-7dca4f7
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
