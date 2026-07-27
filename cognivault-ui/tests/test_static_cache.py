@@ -1,0 +1,74 @@
+"""Static SPA-shell cache-policy tests.
+
+After a redeploy the browser/proxy must never serve a stale cached ``app.js``
+(or ``index.html``/``style.css``/``favicon.svg``). ``NoCacheStaticFiles`` marks
+those shell assets ``Cache-Control: no-store`` and strips revalidation
+validators so a client always refetches a fresh 200. ``/api/*`` and ``/healthz``
+must be left untouched.
+
+pytest + Starlette ``TestClient`` (no real network), LOCAL mode.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import pytest
+from fastapi.testclient import TestClient
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app import settings  # noqa: E402
+from app.main import create_app  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _local_mode(monkeypatch):
+    monkeypatch.setattr(settings, "is_server", lambda: False)
+
+
+@pytest.fixture()
+def client() -> TestClient:
+    return TestClient(create_app())
+
+
+def test_shell_assets_are_no_store(client: TestClient) -> None:
+    """Every SPA shell asset must carry no-store and no long-cache validators."""
+    for path in ("/", "/index.html", "/app.js", "/style.css", "/favicon.svg"):
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        cc = resp.headers.get("cache-control", "")
+        assert "no-store" in cc, f"{path} cache-control={cc!r}"
+        # Strip revalidation validators so a stale client can't 304 its way back.
+        assert "etag" not in resp.headers, path
+        assert "last-modified" not in resp.headers, path
+
+
+def test_app_js_served_fresh_and_is_javascript(client: TestClient) -> None:
+    """app.js still serves JS content, and a conditional request re-serves 200."""
+    resp = client.get("/app.js")
+    assert resp.status_code == 200
+    assert "javascript" in resp.headers.get("content-type", "")
+    assert "no-store" in resp.headers.get("cache-control", "")
+    # Even if a client presents stale validators, it gets a fresh body, not 304.
+    again = client.get(
+        "/app.js", headers={"If-None-Match": '"stale"', "If-Modified-Since": "x"}
+    )
+    assert again.status_code == 200
+
+
+def test_index_html_served_at_root(client: TestClient) -> None:
+    """html=True behaviour preserved: GET / returns the SPA HTML shell."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers.get("content-type", "")
+
+
+def test_api_and_healthz_not_no_store(client: TestClient) -> None:
+    """API/probe responses must NOT be forced no-store (unchanged behaviour)."""
+    for path in ("/api/config", "/healthz"):
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        cc = resp.headers.get("cache-control", "")
+        assert "no-store" not in cc, f"{path} cache-control={cc!r}"

@@ -1523,15 +1523,16 @@
     dom.envSetupBtn.addEventListener("click", runEnvSetup);
     dom.envImportBtn.addEventListener("click", importEnv);
 
-    // confluence source
-    dom.confAuthBasic.addEventListener("click", () => applyConfAuthMode("basic"));
-    dom.confAuthPat.addEventListener("click", () => applyConfAuthMode("pat"));
-    dom.confPasswordToggle.addEventListener("click", toggleConfPasswordVisibility);
-    dom.confPatToggle.addEventListener("click", toggleConfPatVisibility);
-    dom.confAutoSync.addEventListener("change", applyConfInterval);
-    dom.confSave.addEventListener("click", saveConfluenceConfig);
-    dom.confValidate.addEventListener("click", validateConfluence);
-    dom.confSync.addEventListener("click", syncConfluence);
+    // confluence source — null-guard every lookup so one missing element can
+    // never abort the rest of the section's (or later) event wiring.
+    if (dom.confAuthBasic) dom.confAuthBasic.addEventListener("click", () => applyConfAuthMode("basic"));
+    if (dom.confAuthPat) dom.confAuthPat.addEventListener("click", () => applyConfAuthMode("pat"));
+    if (dom.confPasswordToggle) dom.confPasswordToggle.addEventListener("click", toggleConfPasswordVisibility);
+    if (dom.confPatToggle) dom.confPatToggle.addEventListener("click", toggleConfPatVisibility);
+    if (dom.confAutoSync) dom.confAutoSync.addEventListener("change", applyConfInterval);
+    if (dom.confSave) dom.confSave.addEventListener("click", saveConfluenceConfig);
+    if (dom.confValidate) dom.confValidate.addEventListener("click", validateConfluence);
+    if (dom.confSync) dom.confSync.addEventListener("click", syncConfluence);
 
     // server-mode login / logout
     if (dom.loginSubmit) dom.loginSubmit.addEventListener("click", submitLogin);

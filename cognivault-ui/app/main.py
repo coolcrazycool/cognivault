@@ -15,8 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from . import deps, settings
 from .config import PATHS
@@ -31,6 +32,47 @@ from .routes import (
 )
 
 _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+# SPA shell assets that must never be served stale after a redeploy. The browser
+# / proxy must refetch these (not reuse a cached copy or revalidate to a 304) so a
+# fresh app.js/index.html always loads. Fingerprinted assets and fonts are absent
+# here and keep default (cacheable) behaviour.
+_SHELL_ASSETS = frozenset({"index.html", "app.js", "style.css", "favicon.svg"})
+
+
+class NoCacheStaticFiles(StaticFiles):
+    """``StaticFiles`` that serves the SPA shell with a no-store policy.
+
+    Only the shell assets in ``_SHELL_ASSETS`` (index.html — also served at
+    ``/`` via ``html=True`` — plus app.js, style.css, favicon.svg) are affected.
+    For those we (a) set ``Cache-Control: no-store, must-revalidate`` and strip
+    any long-cache validators (ETag/Last-Modified/Expires) and (b) bypass the
+    ``is_not_modified`` 304 shortcut so a client that cached an older build can
+    never revalidate its way back to stale content — it always gets a fresh 200.
+
+    Scoped to the static mount, so ``/api/*``, SSE, and ``/healthz`` responses
+    are never touched. Any other static file keeps default caching behaviour.
+    """
+
+    def file_response(
+        self,
+        full_path: Any,
+        stat_result: Any,
+        scope: Scope,
+        status_code: int = 200,
+    ) -> Any:
+        if os.path.basename(str(full_path)) in _SHELL_ASSETS:
+            # Build the response directly (no is_not_modified check) so shell
+            # assets are always returned fresh, never as a 304.
+            response = FileResponse(
+                full_path, status_code=status_code, stat_result=stat_result
+            )
+            response.headers["cache-control"] = "no-store, must-revalidate"
+            for stale in ("etag", "last-modified", "expires"):
+                if stale in response.headers:
+                    del response.headers[stale]
+            return response
+        return super().file_response(full_path, stat_result, scope, status_code)
 
 
 def _suppress_insecure_warnings() -> None:
@@ -193,7 +235,9 @@ def create_app() -> FastAPI:
 
     # SPA + static assets. Mounted last so it only catches non-/api paths.
     _STATIC_DIR.mkdir(parents=True, exist_ok=True)
-    app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
+    app.mount(
+        "/", NoCacheStaticFiles(directory=str(_STATIC_DIR), html=True), name="static"
+    )
 
     return app
 
