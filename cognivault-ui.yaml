@@ -93,13 +93,6 @@ spec:
               readOnly: true
             - name: data
               mountPath: /data
-            # Внутренний CA Сбера для проверки TLS Confluence (см. CONFLUENCE_CA_PATH).
-            # subPath, чтобы файл лёг рядом с сертификатами GigaChat в /certs,
-            # не затирая примонтированный секрет.
-            - name: sber-ca
-              mountPath: /certs/sber-ca.pem
-              subPath: sber-ca.pem
-              readOnly: true
           startupProbe:
             httpGet:
               path: /healthz
@@ -134,12 +127,6 @@ spec:
             secretName: cognivault-gigachat-certs
         - name: data
           emptyDir: {}
-        # PEM внутреннего УЦ для проверки TLS Confluence. Реальный бандл вставляет
-        # платформа/пользователь в ConfigMap `sber-ca` (ниже) — до этого монтируется
-        # заглушка; пока бандла нет, включайте CONFLUENCE_VERIFY_SSL: "false".
-        - name: sber-ca
-          configMap:
-            name: sber-ca
 ---
 apiVersion: v1
 kind: Service
@@ -177,27 +164,11 @@ spec:
 #
 # ВНИМАНИЕ: TLS у текущего ingress не настроен (обычный HTTP) — cv-токены идут
 # открытым текстом; при наличии серта добавьте spec.tls[].secretName.
----
-# Внутренний CA-бандл Сбера для проверки TLS при обращении UI-пода к Confluence.
-# ЗАГЛУШКА: реальный PEM (цепочку корневого/промежуточного УЦ) должна вставить
-# платформа/пользователь ВМЕСТО текста ниже — целиком, включая строки
-# -----BEGIN CERTIFICATE----- / -----END CERTIFICATE-----. Ключ файла — sber-ca.pem
-# (совпадает с subPath монтирования и CONFLUENCE_CA_PATH=/certs/sber-ca.pem).
-# Если бандла ещё нет — оставьте заглушку и временно снимите проверку через
-# CONFLUENCE_VERIFY_SSL: "false" в cognivault-ui-config.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: sber-ca
-  labels:
-    app.kubernetes.io/name: cognivault-ui
-data:
-  sber-ca.pem: |
-    -----BEGIN CERTIFICATE-----
-    # ЗАМЕНИТЕ этот блок на реальный PEM внутреннего УЦ Сбера (одна или несколько
-    # цепочек). Заглушка нужна лишь чтобы том смонтировался; проверка TLS с ней
-    # не пройдёт — до вставки настоящего бандла используйте CONFLUENCE_VERIFY_SSL=false.
-    -----END CERTIFICATE-----
+# CA-бандл для TLS Confluence сейчас НЕ используется (CONFLUENCE_VERIFY_SSL=false),
+# поэтому ConfigMap `sber-ca` и том sber-ca намеренно убраны — чтобы под не падал
+# на отсутствующем ConfigMap. Когда появится реальный внутренний УЦ Сбера: верните
+# ConfigMap `sber-ca` (data: sber-ca.pem: <PEM>), том sber-ca и volumeMount
+# (subPath /certs/sber-ca.pem), и поставьте CONFLUENCE_VERIFY_SSL: "true".
 ---
 # ОПЦИОНАЛЬНО — примените ТОЛЬКО если сервис-меш блокирует исходящий трафик по
 # умолчанию (Istio outboundTrafficPolicy = REGISTRY_ONLY): тогда сайдкар режет
