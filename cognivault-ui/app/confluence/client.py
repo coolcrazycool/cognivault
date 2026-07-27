@@ -568,8 +568,19 @@ class ConfluenceClient:
             )
         return out
 
-    async def download(self, url: str) -> bytes:
-        """GET a (possibly relative) download URL with the same auth; return bytes."""
+    async def download(
+        self, url: str, *, timeout: httpx.Timeout | None = None
+    ) -> bytes:
+        """GET a (possibly relative) download URL with the same auth; return bytes.
+
+        ``timeout`` overrides the client-default per this request only, so a single
+        stuck attachment can be bounded by a short read timeout without slowing the
+        rest of the sync. A read timeout surfaces as ``httpx.ReadTimeout`` →
+        :class:`ConfluenceError` (``CONF_UNAVAILABLE``), which the caller isolates.
+        """
         full = urljoin(str(self._client.base_url) + "/", url)
-        resp = await self._request("GET", full)
+        kw: dict[str, Any] = {}
+        if timeout is not None:
+            kw["timeout"] = timeout
+        resp = await self._request("GET", full, **kw)
         return resp.content

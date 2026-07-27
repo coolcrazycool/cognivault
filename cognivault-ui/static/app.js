@@ -110,6 +110,7 @@
     confIntervalField: $("conf-interval-field"),
     confAutoSyncInterval: $("conf-auto-sync-interval"),
     confReplaceMode: $("conf-replace-mode"),
+    confSyncAttachments: $("conf-sync-attachments"),
     confSave: $("conf-save"),
     confValidate: $("conf-validate"),
     confSync: $("conf-sync"),
@@ -925,6 +926,7 @@
     dom.confAutoSync.checked = !!c.auto_sync;
     dom.confAutoSyncInterval.value = c.auto_sync_interval_min != null ? c.auto_sync_interval_min : "";
     dom.confReplaceMode.checked = !!c.replace_mode;
+    dom.confSyncAttachments.checked = !!c.sync_attachments;
     // secrets are never returned — clear the inputs, surface a "saved" hint
     dom.confPassword.value = "";
     dom.confPat.value = "";
@@ -948,6 +950,7 @@
       root_url: dom.confRootUrl.value.trim(),
       auto_sync: dom.confAutoSync.checked,
       replace_mode: dom.confReplaceMode.checked,
+      sync_attachments: dom.confSyncAttachments.checked,
     };
     const iv = parseInt(dom.confAutoSyncInterval.value, 10);
     if (!isNaN(iv)) payload.auto_sync_interval_min = iv;
@@ -1196,11 +1199,29 @@
   function renderSources(bubble, sources, contextChars) {
     if (!sources || !sources.length) return;
     const wrap = el("div", "sources");
-    wrap.appendChild(el("span", "eyebrow", "Источники"));
+
+    // Collapsed-by-default disclosure. The header carries the count and the
+    // existing context-size info; chips are hidden until the header is clicked.
+    const count = sources.length;
+    let headText = "Источники (" + count + ")";
+    if (typeof contextChars === "number" && contextChars > 0) {
+      headText += " · контекст " + contextChars.toLocaleString("ru-RU") + " симв.";
+    }
+    const toggle = el("button", "src-toggle");
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", "false");
+    const chev = el("span", "src-chev", "▸");
+    chev.setAttribute("aria-hidden", "true");
+    toggle.appendChild(chev);
+    toggle.appendChild(el("span", "src-head", headText));
+
     const chips = el("div", "chips");
+    chips.hidden = true; // collapsed by default (per-render UI state, not persisted)
     sources.forEach((s) => {
       const chip = el("div", "chip");
       const titleText = s.title || s.name || "Документ";
+      // Full path is kept only as a tooltip for power users — never shown inline.
+      if (s.path) chip.title = s.path;
       // Clickable Confluence source: title becomes a link when a safe http(s)
       // url is provided; otherwise it stays plain text as before.
       if (s.url && /^https?:\/\//i.test(s.url)) {
@@ -1214,7 +1235,6 @@
       } else {
         chip.appendChild(el("span", "ct", titleText));
       }
-      if (s.path) chip.appendChild(el("span", "cp", s.path));
       const depthLabel = DEPTH_LABEL[s.depth];
       if (depthLabel) chip.appendChild(el("span", "cd", depthLabel));
       if (s.score != null) {
@@ -1223,16 +1243,86 @@
       }
       chips.appendChild(chip);
     });
+
+    const setOpen = (open) => {
+      toggle.setAttribute("aria-expanded", String(open));
+      chips.hidden = !open;
+      chev.classList.toggle("open", open);
+    };
+    toggle.addEventListener("click", () => setOpen(toggle.getAttribute("aria-expanded") !== "true"));
+
+    wrap.appendChild(toggle);
     wrap.appendChild(chips);
-    // subtle, non-interactive context summary
-    const count = sources.length;
-    const noun = pluralRu(count, "источник", "источника", "источников");
-    let info = count + " " + noun;
-    if (typeof contextChars === "number" && contextChars > 0) {
-      info = "контекст: " + contextChars.toLocaleString("ru-RU") + " симв. · " + info;
-    }
-    wrap.appendChild(el("div", "ctx-info", info));
     bubble.appendChild(wrap);
+  }
+
+  /* ---- inline citation linkifier ----
+   * Turns `[Источник N]`, `[Источник 1, 2]`, `[Источники 1, 2, 3]` inside a
+   * rendered answer into hyperlinks. Only numbers whose source carries a safe
+   * http(s) `url` become links; others stay plain text. Runs over text nodes
+   * via a TreeWalker that skips <a>/<code>/<pre>, so code and existing links are
+   * never touched. Applied once on final render (done / abort / history), not
+   * per streaming token. hrefs are set via DOM property, never string-built. */
+  function linkifyCitations(container, sources) {
+    if (!container || !sources || !sources.length) return;
+    const urlByN = new Map();
+    sources.forEach((s) => {
+      if (s && s.n != null && s.url && /^https?:\/\//i.test(s.url)) urlByN.set(Number(s.n), s.url);
+    });
+    if (!urlByN.size) return;
+
+    const hasCite = (t) => /\[\s*Источник(?:и|а)?\s+\d/.test(t);
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        for (let p = node.parentNode; p && p !== container; p = p.parentNode) {
+          const tag = p.nodeName;
+          if (tag === "A" || tag === "CODE" || tag === "PRE") return NodeFilter.FILTER_REJECT;
+        }
+        return hasCite(node.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
+      },
+    });
+    const targets = [];
+    let node;
+    while ((node = walker.nextNode())) targets.push(node);
+    targets.forEach((n) => replaceCitationsInText(n, urlByN));
+  }
+
+  function replaceCitationsInText(node, urlByN) {
+    const text = node.nodeValue;
+    // g1 = "[Источник " (bracket + word + spaces); g2 = numbers+separators; g3 = "]"
+    const re = /(\[\s*Источник(?:и|а)?\s+)(\d+(?:\s*[,;]\s*\d+)*)(\s*\])/g;
+    let m, last = 0, frag = null;
+    while ((m = re.exec(text))) {
+      if (!frag) frag = document.createDocumentFragment();
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      frag.appendChild(document.createTextNode(m[1]));
+      // split the numbers portion, keeping separators as text; wrap only digits
+      m[2].split(/(\d+)/).forEach((part) => {
+        if (!part) return;
+        const url = /^\d+$/.test(part) ? urlByN.get(Number(part)) : undefined;
+        if (url) {
+          const a = document.createElement("a");
+          a.href = url; // DOM property — not string-interpolated
+          a.target = "_blank";
+          a.rel = "noopener noreferrer";
+          a.className = "cite-link";
+          a.appendChild(document.createTextNode(part));
+          const ext = document.createElement("span");
+          ext.className = "cext";
+          ext.textContent = "↗";
+          a.appendChild(ext);
+          frag.appendChild(a);
+        } else {
+          frag.appendChild(document.createTextNode(part));
+        }
+      });
+      frag.appendChild(document.createTextNode(m[3]));
+      last = re.lastIndex;
+    }
+    if (frag) {
+      if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+      node.parentNode.replaceChild(frag, node);
+    }
   }
 
   function renderThread() {
@@ -1244,6 +1334,7 @@
       } else {
         const { bubble, content } = addMessageNode("assistant", "", { asHtml: true });
         content.innerHTML = renderMarkdown(m.content || "");
+        linkifyCitations(content, m.sources);
         renderSources(bubble, m.sources, m.context_chars);
       }
     });
@@ -1349,8 +1440,9 @@
           }
           case "done":
             if (cursor.parentNode) cursor.remove();
-            // finalize with markdown render
+            // finalize with markdown render, then hyperlink inline citations
             content.innerHTML = renderMarkdown(answer);
+            linkifyCitations(content, sourcesData);
             state.messages.push({ role: "assistant", content: answer, sources: sourcesData, context_chars: contextChars, rag: state.rag });
             break;
           case "error": {
@@ -1370,6 +1462,7 @@
         if (cursor.parentNode) cursor.remove();
         if (answer) {
           content.innerHTML = renderMarkdown(answer);
+          linkifyCitations(content, sourcesData);
           state.messages.push({ role: "assistant", content: answer, sources: sourcesData, context_chars: contextChars, rag: state.rag });
         } else {
           bubble.parentNode && bubble.parentNode.remove();

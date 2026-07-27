@@ -33,6 +33,10 @@ DEFAULT_CONFLUENCE_CONFIG: dict[str, Any] = {
     "auto_sync": False,
     "auto_sync_interval_min": 60,
     "replace_mode": False,
+    # Attachments (images/binaries) are OFF by default: they are not indexed for
+    # semantic search and downloading/uploading them is the slow, hang-prone step.
+    # A text-only sync is fast and immune to the attachments-stage idle timeout.
+    "sync_attachments": False,
 }
 
 

@@ -61,6 +61,35 @@ _MANIFEST_FLUSH_EVERY = 20
 # Emit an enumeration heartbeat every N discovered pages.
 _ENUM_HEARTBEAT_EVERY = 100
 
+# Attachments stage (only when explicitly enabled): flush the attachments zip in
+# small batches so the SSE stream never idles behind one giant silent upload.
+_ATT_BATCH_FILES = 10
+_ATT_BATCH_BYTES = 20 * 1024 * 1024
+# Per-file read timeout for an attachment download: a single stuck binary can not
+# hang the whole sync — it times out, is logged, and the loop continues.
+_ATT_READ_TIMEOUT = httpx.Timeout(connect=10, read=60, write=30, pool=10)
+# Emit a heartbeat log at least this often during long downloads/uploads so the
+# ingress idle-timeout (~60s) never drops the stream mid-transfer.
+_HEARTBEAT_SECS = 15.0
+
+
+async def _with_heartbeat(awaitable: Any) -> AsyncIterator[Any]:
+    """Drive ``awaitable`` to completion, cueing a heartbeat every ~15s.
+
+    Yields ``None`` roughly every :data:`_HEARTBEAT_SECS` while the awaitable is
+    still running (the caller emits a keep-alive ``log`` frame on each cue), then
+    yields the completed :class:`asyncio.Future` **last**. The caller retrieves the
+    value via ``future.result()`` (which re-raises any error). The awaitable is
+    never cancelled by the timeout — only observed.
+    """
+    task = asyncio.ensure_future(awaitable)
+    while True:
+        done, _pending = await asyncio.wait({task}, timeout=_HEARTBEAT_SECS)
+        if done:
+            break
+        yield None
+    yield task
+
 # Markdown emitted by the converter for still-unresolved *dynamic* macros
 # (include / excerpt-include / jira). Used only to decide whether the optional,
 # default-off export_view enhancement has anything to do for a page.
@@ -502,59 +531,161 @@ async def sync_stream(
                     )
 
                 # ---- step 6: attachments ----------------------------------
-                if any(refs_by_page.values()):
+                # OFF by default: images/binaries are not indexed for semantic
+                # search, and downloading them from Confluence + uploading a zip is
+                # the slow, hang-prone step that trips the ingress idle-timeout. A
+                # text-only sync (the default) is fast and immune to that hang.
+                sync_attachments = bool(cfg.get("sync_attachments", False))
+                if not sync_attachments:
+                    yield format_sse(
+                        "step",
+                        {
+                            "name": "attachments",
+                            "label": "Вложения пропущены (выключено)",
+                        },
+                    )
+                    yield log(
+                        "вложения выключены (sync_attachments=false) — "
+                        "синхронизируются только текстовые страницы"
+                    )
+                elif any(refs_by_page.values()):
                     yield format_sse(
                         "step", {"name": "attachments", "label": "Вложения"}
                     )
-                    att_entries: list[tuple[str, bytes]] = []
-                    for pid, refs in refs_by_page.items():
-                        if not refs:
-                            continue
-                        try:
-                            atts = await client.list_attachments(pid)
-                        except ConfluenceError as exc:
-                            yield log(
-                                f"вложения {pid}: пропущены ({exc.message})"
-                            )
-                            continue
-                        by_name = {a["filename"]: a for a in atts}
-                        old_att = (pages.get(pid) or {}).get("attachments", {}) or {}
-                        new_att: dict[str, Any] = {}
-                        for fname in refs:
-                            a = by_name.get(fname)
-                            if not a:
-                                continue
-                            size = a.get("size") or 0
-                            if size and size > _MAX_ATTACHMENT_BYTES:
-                                yield log(
-                                    f"вложение {fname} ({size} б) пропущено — превышает лимит"
-                                )
+                    # The whole stage is best-effort: the text pages + manifest are
+                    # already written, so ANY attachment failure degrades to a log
+                    # warning and falls through to finalize — never a terminal error
+                    # that would lose the completed run.
+                    try:
+                        att_entries: list[tuple[str, bytes]] = []
+                        att_batch_bytes = 0
+                        att_index = 0
+                        att_total = sum(
+                            len(r) for r in refs_by_page.values() if r
+                        )
+                        for pid, refs in refs_by_page.items():
+                            if not refs:
                                 continue
                             try:
-                                data = await client.download(a["download_url"])
+                                atts = await client.list_attachments(pid)
                             except ConfluenceError as exc:
                                 yield log(
-                                    f"вложение {fname}: пропущено ({exc.message})"
+                                    f"вложения {pid}: пропущены ({exc.message})"
                                 )
                                 continue
-                            zippath = f"Confluence/attachments/{pid}/{fname}"
-                            att_entries.append((zippath, data))
-                            new_att[fname] = {"path": zippath, "size": len(data)}
-                            counts["attachments"] += 1
-                        # Delete attachments no longer referenced.
-                        for fname, m in old_att.items():
-                            if fname not in new_att and m.get("path"):
+                            by_name = {a["filename"]: a for a in atts}
+                            old_att = (
+                                (pages.get(pid) or {}).get("attachments", {}) or {}
+                            )
+                            new_att: dict[str, Any] = {}
+                            for fname in refs:
+                                att_index += 1
+                                a = by_name.get(fname)
+                                if not a:
+                                    continue
+                                size = a.get("size") or 0
+                                if size and size > _MAX_ATTACHMENT_BYTES:
+                                    yield log(
+                                        f"вложение {fname} ({size} б) пропущено — "
+                                        f"превышает лимит"
+                                    )
+                                    continue
+                                # Progress + keep-alive: a frame right before every
+                                # download, plus a heartbeat every ~15s while a slow
+                                # binary is in flight.
+                                yield log(
+                                    f"Вложение {att_index}/{att_total}: {fname}"
+                                )
+                                dl_task = None
+                                async for beat in _with_heartbeat(
+                                    client.download(
+                                        a["download_url"], timeout=_ATT_READ_TIMEOUT
+                                    )
+                                ):
+                                    if beat is None:
+                                        yield log(
+                                            f"вложение {fname}: загрузка "
+                                            f"продолжается…"
+                                        )
+                                    else:
+                                        dl_task = beat
                                 try:
-                                    await cognivault.delete_note(m["path"], cv)
-                                except cognivault.CogniVaultError:
-                                    pass
-                        if pid in pages:
-                            pages[pid]["attachments"] = new_att
-                    if att_entries:
-                        await cognivault.upload(
-                            _make_zip(att_entries),
-                            "confluence-attachments.zip",
-                            cv,
+                                    data = dl_task.result()
+                                except Exception as exc:  # noqa: BLE001
+                                    # One stuck/failed file must not fail the page or
+                                    # abort the sync — log and move on.
+                                    msg = getattr(exc, "message", str(exc))
+                                    yield log(
+                                        f"вложение {fname}: пропущено ({msg})"
+                                    )
+                                    continue
+                                zippath = f"Confluence/attachments/{pid}/{fname}"
+                                att_entries.append((zippath, data))
+                                att_batch_bytes += len(data)
+                                new_att[fname] = {
+                                    "path": zippath,
+                                    "size": len(data),
+                                }
+                                counts["attachments"] += 1
+                                # Flush in small batches so the upload never idles
+                                # the stream behind one giant silent zip.
+                                if (
+                                    len(att_entries) >= _ATT_BATCH_FILES
+                                    or att_batch_bytes >= _ATT_BATCH_BYTES
+                                ):
+                                    yield log(
+                                        f"вложения: выгрузка пакета "
+                                        f"({len(att_entries)} файлов)…"
+                                    )
+                                    up_task = None
+                                    async for beat in _with_heartbeat(
+                                        cognivault.upload(
+                                            _make_zip(att_entries),
+                                            "confluence-attachments.zip",
+                                            cv,
+                                        )
+                                    ):
+                                        if beat is None:
+                                            yield log(
+                                                "вложения: выгрузка продолжается…"
+                                            )
+                                        else:
+                                            up_task = beat
+                                    up_task.result()
+                                    att_entries = []
+                                    att_batch_bytes = 0
+                            # Delete attachments no longer referenced.
+                            for fname, m in old_att.items():
+                                if fname not in new_att and m.get("path"):
+                                    try:
+                                        await cognivault.delete_note(m["path"], cv)
+                                    except cognivault.CogniVaultError:
+                                        pass
+                            if pid in pages:
+                                pages[pid]["attachments"] = new_att
+                        # Flush the final partial batch.
+                        if att_entries:
+                            yield log(
+                                f"вложения: выгрузка пакета "
+                                f"({len(att_entries)} файлов)…"
+                            )
+                            up_task = None
+                            async for beat in _with_heartbeat(
+                                cognivault.upload(
+                                    _make_zip(att_entries),
+                                    "confluence-attachments.zip",
+                                    cv,
+                                )
+                            ):
+                                if beat is None:
+                                    yield log("вложения: выгрузка продолжается…")
+                                else:
+                                    up_task = beat
+                            up_task.result()
+                    except Exception as exc:  # noqa: BLE001 — stage isolation
+                        yield log(
+                            f"вложения: этап прерван из-за ошибки ({exc}) — "
+                            f"текстовые страницы уже сохранены, продолжаю"
                         )
 
                 # ---- step 7: deletes --------------------------------------

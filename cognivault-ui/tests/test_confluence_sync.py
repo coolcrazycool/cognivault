@@ -91,6 +91,14 @@ class ConfMock:
         self.children = ["101", "102"]
         # Page ids for which get_page should hard-fail (partial-failure test).
         self.fail_ids: set[str] = set()
+        # Attachment support (default: none, so existing tests are unaffected).
+        # {page_id: [{"filename", "size"}]}
+        self.attachments: dict[str, list[dict]] = {}
+        # download-path substrings whose GET should hard-fail (isolation test).
+        self.download_fail: set[str] = set()
+        # Spies for the attachments-stage tests.
+        self.list_attachment_calls: list[str] = []
+        self.download_calls: list[str] = []
 
     def _payload(self, p: dict) -> dict:
         return {
@@ -118,9 +126,31 @@ class ConfMock:
                 200, json={"results": results, "_links": {}}, request=request
             )
         if path.endswith("/child/attachment"):
+            m = re.match(r"^/rest/api/content/(\d+)/child/attachment$", path)
+            pid = m.group(1) if m else ""
+            self.list_attachment_calls.append(pid)
+            results = [
+                {
+                    "title": att["filename"],
+                    "extensions": {
+                        "fileSize": att.get("size", 0),
+                        "mediaType": "image/png",
+                    },
+                    "version": {"number": 1},
+                    "_links": {
+                        "download": f"/download/attachments/{pid}/{att['filename']}"
+                    },
+                }
+                for att in self.attachments.get(pid, [])
+            ]
             return httpx.Response(
-                200, json={"results": [], "_links": {}}, request=request
+                200, json={"results": results, "_links": {}}, request=request
             )
+        if path.startswith("/download/"):
+            self.download_calls.append(path)
+            if any(bad in path for bad in self.download_fail):
+                return httpx.Response(500, text="boom", request=request)
+            return httpx.Response(200, content=b"BINARYDATA", request=request)
         m = re.match(r"^/rest/api/content/(\d+)$", path)
         if m:
             pid = m.group(1)
@@ -214,7 +244,9 @@ _SECRET = {"pat": "secret-pat-value"}
 _CV = {"base_url": CV_BASE, "token": "cv-token"}
 
 
-def _run_sync(conf: ConfMock, cvm: CVMock, paths: AppPaths, **kw) -> list[tuple[str, dict]]:
+def _run_sync(
+    conf: ConfMock, cvm: CVMock, paths: AppPaths, cfg: dict | None = None, **kw
+) -> list[tuple[str, dict]]:
     """Drive sync_stream to completion, returning parsed (event, data) frames.
 
     Monkeypatches ``httpx.AsyncClient`` (module-wide) to inject the CogniVault
@@ -233,7 +265,7 @@ def _run_sync(conf: ConfMock, cvm: CVMock, paths: AppPaths, **kw) -> list[tuple[
         agen = sync.sync_stream(
             cv=_CV,
             paths=paths,
-            cfg=_cfg(),
+            cfg=cfg if cfg is not None else _cfg(),
             secret=_SECRET,
             transport=httpx.MockTransport(conf.handler),
             now_iso="2026-07-27T12:00:00Z",
@@ -541,6 +573,95 @@ def test_sync_lock_prevents_concurrent_runs():
     event, data = parsed[0]
     assert event == "error"
     assert data["code"] == "SYNC_ALREADY_RUNNING"
+
+
+# --------------------------------------------------------------------------- #
+# Tests: attachments stage — OFF by default, hardened when enabled
+# --------------------------------------------------------------------------- #
+
+
+def _img(fname: str) -> str:
+    return f'<ac:image><ri:attachment ri:filename="{fname}"/></ac:image>'
+
+
+def _seed_attachment_page(conf: ConfMock) -> None:
+    """Add a child page (id 103) that references two image attachments."""
+    conf.pages["103"] = {
+        "id": "103",
+        "title": "Со вложениями",
+        "space": "ENG",
+        "version": 1,
+        "ancestors": ["Root Space Home"],
+        "body": f"<p>{_img('diagram.png')}{_img('photo.jpg')}</p>",
+    }
+    conf.children = ["101", "102", "103"]
+    conf.attachments["103"] = [
+        {"filename": "diagram.png", "size": 1024},
+        {"filename": "photo.jpg", "size": 2048},
+    ]
+
+
+def test_attachments_disabled_by_default_skips_stage():
+    """Default sync (sync_attachments unset) never lists/downloads attachments."""
+    conf, cvm, paths = ConfMock(), CVMock(), _tmp_paths()
+    _seed_attachment_page(conf)
+
+    frames = _run_sync(conf, cvm, paths)  # _cfg() has no sync_attachments → False
+
+    done = _done(frames)
+    assert done["synced"] == 4  # root + 101 + 102 + 103, all text
+    assert done["attachments"] == 0
+
+    # The attachments step ran but as a "skipped/выключено" no-op.
+    steps = _events(frames, "step")
+    att_steps = [s for s in steps if s.get("name") == "attachments"]
+    assert len(att_steps) == 1
+    assert "выключено" in att_steps[0]["label"].lower()
+
+    # No attachment listing or download ever happened.
+    assert conf.list_attachment_calls == []
+    assert conf.download_calls == []
+
+    # Text pages are written regardless.
+    assert "Confluence/ENG/Root Space Home/Со вложениями.md" in cvm.vault
+
+
+def test_attachments_enabled_emits_heartbeat_and_isolates_failure():
+    """With sync_attachments=True: per-file logs, a failed download is isolated."""
+    conf, cvm, paths = ConfMock(), CVMock(), _tmp_paths()
+    _seed_attachment_page(conf)
+    conf.download_fail = {"photo.jpg"}  # one attachment fails to download
+
+    cfg = {**_cfg(), "sync_attachments": True}
+    frames = _run_sync(conf, cvm, paths, cfg=cfg)
+
+    done = _done(frames)
+    # Sync still completes; the failing attachment does not abort the run.
+    assert done["synced"] == 4
+    assert done["attachments"] == 1  # only diagram.png made it
+
+    # The attachments stage actually ran (not the skipped label).
+    att_steps = [s for s in _events(frames, "step") if s.get("name") == "attachments"]
+    assert att_steps and "выключено" not in att_steps[0]["label"].lower()
+
+    logs = [d["line"] for d in _events(frames, "log")]
+    # Per-file progress frame emitted before each download (keeps SSE alive).
+    assert any("Вложение 1/2: diagram.png" in ln for ln in logs)
+    assert any("Вложение 2/2: photo.jpg" in ln for ln in logs)
+    # The failing one is logged as skipped, not fatal.
+    assert any("photo.jpg" in ln and "пропущено" in ln for ln in logs)
+
+    # Both downloads were attempted (the failing 500 is retried once); only the
+    # good file was uploaded to the vault.
+    assert any("diagram.png" in p for p in conf.download_calls)
+    assert any("photo.jpg" in p for p in conf.download_calls)
+    good = "Confluence/attachments/103/diagram.png"
+    assert good in cvm.vault
+    assert "Confluence/attachments/103/photo.jpg" not in cvm.vault
+
+    # Manifest records only the successfully-synced attachment for page 103.
+    manifest = store.load_manifest(paths)
+    assert set(manifest["pages"]["103"]["attachments"]) == {"diagram.png"}
 
 
 if __name__ == "__main__":  # pragma: no cover
