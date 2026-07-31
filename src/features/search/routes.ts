@@ -52,7 +52,7 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
     },
   );
 
-  // POST /hybrid — Hybrid search combining semantic + lexical via Reciprocal Rank Fusion (RRF)
+  // POST /hybrid — Ranked retrieval endpoint; currently pure semantic ranking (see SearchService.hybrid)
   fastify.post<{ Body: SearchRequestBody }>(
     '/hybrid',
     { schema: hybridSearchSchema },

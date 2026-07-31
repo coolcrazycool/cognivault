@@ -165,9 +165,11 @@ describe('search routes', () => {
   });
 
   beforeEach(() => {
-    mockQdrantSearch.mockClear();
-    mockQdrantScroll.mockClear();
-    mockEmbed.mockClear();
+    // mockReset (not mockClear) — it also drops unconsumed mockResolvedValueOnce queues,
+    // which matters now that hybrid no longer calls scroll
+    mockQdrantSearch.mockReset();
+    mockQdrantScroll.mockReset();
+    mockEmbed.mockReset();
     // Reset to default return values
     mockQdrantSearch.mockResolvedValue(MOCK_SCORED_POINTS);
     mockQdrantScroll.mockResolvedValue(MOCK_SCROLL_RESULT);
@@ -202,6 +204,60 @@ describe('search routes', () => {
       expect(Array.isArray(first.tags)).toBe(true);
       expect('project' in first).toBe(true);
       expect('status' in first).toBe(true);
+      // chunk_index defaults to 0 when the payload has none; rank is 1-based
+      expect(first.chunk_index).toBe(0);
+      expect(body.results.map((r: { rank: number }) => r.rank)).toEqual([1, 2]);
+    });
+
+    it('propagates chunk_index from payload and assigns 1-based rank', async () => {
+      mockQdrantSearch.mockResolvedValueOnce([
+        {
+          id: 'uuid-c0',
+          score: 0.9,
+          payload: {
+            text: 'chunk zero',
+            path: 'notes/multi.md',
+            title: 'multi',
+            section_path: 'multi > a',
+            chunk_index: 0,
+            tags: [],
+            project: null,
+            status: null,
+            type: null,
+          },
+        },
+        {
+          id: 'uuid-c3',
+          score: 0.7,
+          payload: {
+            text: 'chunk three',
+            path: 'notes/multi.md',
+            title: 'multi',
+            section_path: 'multi > b',
+            chunk_index: 3,
+            tags: [],
+            project: null,
+            status: null,
+            type: null,
+          },
+        },
+      ]);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/semantic',
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'multi' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(
+        body.results.map((r: { chunk_index: number; rank: number }) => [r.chunk_index, r.rank]),
+      ).toEqual([
+        [0, 1],
+        [3, 2],
+      ]);
     });
 
     it('calls embedder.embed with query and tenant qdrant.search with the embedding vector', async () => {
@@ -352,7 +408,7 @@ describe('search routes', () => {
       expect(body.query_ms).toBeTypeOf('number');
     });
 
-    it('calls both qdrant.search (semantic) AND qdrant.scroll (lexical)', async () => {
+    it('calls qdrant.search exactly once and never calls qdrant.scroll (no lexical leg)', async () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
@@ -360,11 +416,11 @@ describe('search routes', () => {
         payload: { query: 'hybrid test' },
       });
 
-      expect(mockQdrantSearch).toHaveBeenCalled();
-      expect(mockQdrantScroll).toHaveBeenCalled();
+      expect(mockQdrantSearch).toHaveBeenCalledTimes(1);
+      expect(mockQdrantScroll).not.toHaveBeenCalled();
     });
 
-    it('calls semantic with 2x the requested limit', async () => {
+    it('passes the requested limit straight through (no 2x oversampling)', async () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
@@ -372,34 +428,48 @@ describe('search routes', () => {
         payload: { query: 'hybrid test', limit: 5 },
       });
 
-      // semantic uses qdrant.search -- it should receive limit=10 (2x)
-      expect(mockQdrantSearch).toHaveBeenCalledWith(expect.objectContaining({ limit: 10 }));
+      expect(mockQdrantSearch).toHaveBeenCalledWith(expect.objectContaining({ limit: 5 }));
     });
 
-    it('calls lexical with 2x the requested limit', async () => {
-      await app.inject({
+    it('scores are the clamped cosine scores from qdrant (not RRF sums)', async () => {
+      const response = await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
         headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
-        payload: { query: 'hybrid test', limit: 5 },
+        payload: { query: 'hybrid test' },
       });
 
-      // lexical uses qdrant.scroll
-      expect(mockQdrantScroll).toHaveBeenCalled();
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.results.map((r: { score: number }) => r.score)).toEqual([0.95, 0.8]);
     });
 
-    it('deduplicates same-path results with accumulated RRF score', async () => {
-      // Both semantic and lexical return a result with the same path
-      const sharedPath = 'notes/shared.md';
+    it('clamps out-of-range cosine scores into [0, 1]', async () => {
       mockQdrantSearch.mockResolvedValueOnce([
         {
-          id: 'uuid-s1',
-          score: 0.9,
+          id: 'uuid-hi',
+          score: 1.4,
           payload: {
-            text: 'shared text',
-            path: sharedPath,
-            title: 'shared',
-            section_path: 'shared > intro',
+            text: 'too high',
+            path: 'notes/hi.md',
+            title: 'hi',
+            section_path: 'hi',
+            chunk_index: 0,
+            tags: [],
+            project: null,
+            status: null,
+            type: null,
+          },
+        },
+        {
+          id: 'uuid-lo',
+          score: -0.2,
+          payload: {
+            text: 'negative',
+            path: 'notes/lo.md',
+            title: 'lo',
+            section_path: 'lo',
+            chunk_index: 0,
             tags: [],
             project: null,
             status: null,
@@ -407,23 +477,53 @@ describe('search routes', () => {
           },
         },
       ]);
-      mockQdrantScroll.mockResolvedValueOnce({
-        points: [
-          {
-            id: 'uuid-l1',
-            payload: {
-              text: 'shared text',
-              path: sharedPath,
-              title: 'shared',
-              section_path: 'shared > intro',
-              tags: [],
-              project: null,
-              status: null,
-              type: null,
-            },
-          },
-        ],
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'test' },
       });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.results.map((r: { score: number }) => r.score)).toEqual([1, 0]);
+    });
+
+    it('keeps multiple chunks of the same file (dedup key is path + chunk_index)', async () => {
+      const sharedPath = 'notes/shared.md';
+      mockQdrantSearch.mockResolvedValueOnce([
+        {
+          id: 'uuid-s1',
+          score: 0.9,
+          payload: {
+            text: 'shared chunk 0',
+            path: sharedPath,
+            title: 'shared',
+            section_path: 'shared > intro',
+            chunk_index: 0,
+            tags: [],
+            project: null,
+            status: null,
+            type: null,
+          },
+        },
+        {
+          id: 'uuid-s2',
+          score: 0.85,
+          payload: {
+            text: 'shared chunk 1',
+            path: sharedPath,
+            title: 'shared',
+            section_path: 'shared > details',
+            chunk_index: 1,
+            tags: [],
+            project: null,
+            status: null,
+            type: null,
+          },
+        },
+      ]);
 
       const response = await app.inject({
         method: 'POST',
@@ -434,15 +534,49 @@ describe('search routes', () => {
 
       expect(response.statusCode).toBe(200);
       const body = response.json();
-      // The shared path should appear only once (deduplicated)
       const sharedResults = body.results.filter((r: { path: string }) => r.path === sharedPath);
-      expect(sharedResults).toHaveLength(1);
-      // Score should be > 1/(1+60) since it accumulated from both sources
-      const singleRrfScore = 1 / (1 + 60);
-      expect(sharedResults[0].score).toBeGreaterThan(singleRrfScore);
+      // Both chunks must survive -- the UI relies on several hits per file for smart expansion
+      expect(sharedResults).toHaveLength(2);
+      expect(
+        sharedResults.map((r: { chunk_index: number; rank: number }) => [r.chunk_index, r.rank]),
+      ).toEqual([
+        [0, 1],
+        [1, 2],
+      ]);
     });
 
-    it('degrades gracefully when semantic returns empty -- returns lexical results', async () => {
+    it('drops exact duplicate points (same path AND same chunk_index)', async () => {
+      const duplicatePayload = {
+        text: 'dupe text',
+        path: 'notes/dupe.md',
+        title: 'dupe',
+        section_path: 'dupe > intro',
+        chunk_index: 2,
+        tags: [],
+        project: null,
+        status: null,
+        type: null,
+      };
+      mockQdrantSearch.mockResolvedValueOnce([
+        { id: 'uuid-d1', score: 0.9, payload: duplicatePayload },
+        { id: 'uuid-d2', score: 0.7, payload: duplicatePayload },
+      ]);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'dupe' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.results).toHaveLength(1);
+      expect(body.results[0].rank).toBe(1);
+      expect(body.results[0].score).toBe(0.9);
+    });
+
+    it('returns an empty result set when semantic returns nothing', async () => {
       mockQdrantSearch.mockResolvedValueOnce([]);
 
       const response = await app.inject({
@@ -454,10 +588,11 @@ describe('search routes', () => {
 
       expect(response.statusCode).toBe(200);
       const body = response.json();
-      expect(body.results.length).toBeGreaterThan(0);
+      expect(body.results).toEqual([]);
+      expect(body.total).toBe(0);
     });
 
-    it('degrades gracefully when lexical returns empty -- returns semantic results', async () => {
+    it('is unaffected by the lexical (scroll) path returning nothing', async () => {
       mockQdrantScroll.mockResolvedValueOnce({ points: [] });
 
       const response = await app.inject({
@@ -527,7 +662,7 @@ describe('search routes', () => {
     });
 
     it('hybrid search with folder filter excludes results outside folder', async () => {
-      // Both semantic and lexical return mixed paths -- only Projects/ should survive
+      // Qdrant returns mixed paths -- only Projects/ should survive the post-filter
       mockQdrantSearch.mockResolvedValueOnce([
         {
           id: 'uuid-s1',
@@ -558,36 +693,6 @@ describe('search routes', () => {
           },
         },
       ]);
-      mockQdrantScroll.mockResolvedValueOnce({
-        points: [
-          {
-            id: 'uuid-l1',
-            payload: {
-              text: 'lexical in projects',
-              path: 'Projects/gamma.md',
-              title: 'gamma',
-              section_path: 'gamma > setup',
-              tags: [],
-              project: null,
-              status: null,
-              type: null,
-            },
-          },
-          {
-            id: 'uuid-l2',
-            payload: {
-              text: 'lexical outside',
-              path: 'notes/unrelated.md',
-              title: 'unrelated',
-              section_path: 'main',
-              tags: [],
-              project: null,
-              status: null,
-              type: null,
-            },
-          },
-        ],
-      });
 
       const response = await app.inject({
         method: 'POST',
@@ -623,6 +728,10 @@ describe('search routes', () => {
       for (const result of body.results) {
         expect(result.score).toBe(1.0);
       }
+      // chunk_index/rank are filled uniformly across all three search methods
+      expect(
+        body.results.map((r: { chunk_index: number; rank: number }) => [r.chunk_index, r.rank]),
+      ).toEqual([[0, 1]]);
     });
 
     it('calls tenant qdrant.scroll (not search) with should conditions for text/title/section_path', async () => {

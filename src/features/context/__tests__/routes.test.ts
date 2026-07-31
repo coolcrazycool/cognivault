@@ -378,9 +378,9 @@ describe('context routes', () => {
     });
 
     it('chunks from same note path produce a single entry in the response', async () => {
-      // uuid-1 and uuid-2 both have path 'Architecture/system.md'
-      // hybrid() deduplicates by path in scoreMap, so only one SearchResult per path comes through
-      // ContextService then groups by path — Architecture/system.md should appear exactly once
+      // uuid-1 and uuid-2 both have path 'Architecture/system.md'.
+      // hybrid() now returns BOTH chunks (dedup key is path + chunk_index); ContextService
+      // groups by path and merges them, so Architecture/system.md appears exactly once.
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/context',
@@ -448,8 +448,9 @@ describe('context routes', () => {
         payload: { query: 'test' },
       });
 
-      // Semantic side uses qdrant.search with limit=100 (50 * 2x oversampling in hybrid)
-      expect(mockQdrantSearch).toHaveBeenCalledWith(expect.objectContaining({ limit: 100 }));
+      // hybrid() passes the limit straight to qdrant.search (no oversampling, no lexical leg)
+      expect(mockQdrantSearch).toHaveBeenCalledWith(expect.objectContaining({ limit: 50 }));
+      expect(mockQdrantScroll).not.toHaveBeenCalled();
     });
 
     it('meta.query_ms is a non-negative integer', async () => {

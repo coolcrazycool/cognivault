@@ -35,6 +35,10 @@ export const SearchResultSchema = Type.Object({
   project: Type.Union([Type.String(), Type.Null()]),
   status: Type.Union([Type.String(), Type.Null()]),
   type: Type.Union([Type.String(), Type.Null()]),
+  // 0-based position of the chunk inside its source note (0 when the payload lacks it)
+  chunk_index: Type.Integer({ minimum: 0 }),
+  // 1-based position of this result in the returned list
+  rank: Type.Integer({ minimum: 1 }),
 });
 
 export type SearchResult = Static<typeof SearchResultSchema>;

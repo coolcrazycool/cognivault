@@ -13,6 +13,8 @@ function makeResult(
     project: null,
     status: null,
     type: null,
+    chunk_index: 0,
+    rank: 1,
     ...overrides,
   };
 }

@@ -8,6 +8,7 @@ interface QdrantPayload {
   path?: string;
   title?: string;
   section_path?: string;
+  chunk_index?: number;
   tags?: string[];
   project?: string | null;
   status?: string | null;
@@ -63,7 +64,9 @@ export class SearchService {
         (hit) => folderPrefix === undefined || (hit.payload?.path ?? '').startsWith(folderPrefix),
         // TODO: At scale, add a text index on path field to push filtering to Qdrant.
       )
-      .map((hit) => this.toSearchResult(hit.payload ?? {}, this.normalizeScore(hit.score)));
+      .map((hit, i) =>
+        this.toSearchResult(hit.payload ?? {}, this.normalizeScore(hit.score), i + 1),
+      );
   }
 
   async lexical(query: string, limit: number, filters: SearchFilters): Promise<SearchResult[]> {
@@ -99,43 +102,29 @@ export class SearchService {
         (p) => folderPrefix === undefined || (p.payload?.path ?? '').startsWith(folderPrefix),
         // TODO: At scale, add a text index on path field to push filtering to Qdrant.
       )
-      .map((p) => this.toSearchResult(p.payload ?? {}, 1.0));
+      .map((p, i) => this.toSearchResult(p.payload ?? {}, 1.0, i + 1));
   }
 
   async hybrid(query: string, limit: number, filters: SearchFilters): Promise<SearchResult[]> {
-    // Fetch from both sources in parallel with 2x the requested limit
-    const [semanticResults, lexicalResults] = await Promise.all([
-      this.semantic(query, limit * 2, filters),
-      this.lexical(query, limit * 2, filters),
-    ]);
+    // Until the Wave 3 BM25 + reranker pipeline lands, hybrid is pure semantic ranking:
+    // lexical() has no ranking signal (scroll returns a flat score of 1.0), so RRF fusion
+    // only destroyed the cosine ordering and produced meaningless ~0.02 scores.
+    const results = await this.semantic(query, limit, filters);
 
-    // RRF fusion with hardcoded K=60 (per user decision -- no env config)
-    const RRF_K = 60;
-    const scoreMap = new Map<string, { result: SearchResult; score: number }>();
+    // Safety net against duplicate points from Qdrant. The key is path + chunk_index --
+    // several chunks of the SAME file in the result set are desired behaviour (the UI
+    // relies on multiple hits per file for smart expansion), so we never dedupe by path.
+    const seen = new Set<string>();
+    const deduped: SearchResult[] = [];
+    for (const result of results) {
+      const key = `${result.path}::${result.chunk_index}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(result);
+    }
 
-    const accumulateRRF = (results: SearchResult[]): void => {
-      results.forEach((result, i) => {
-        const rrfScore = 1 / (i + 1 + RRF_K);
-        const existing = scoreMap.get(result.path);
-        if (existing) {
-          existing.score += rrfScore;
-        } else {
-          scoreMap.set(result.path, { result, score: rrfScore });
-        }
-      });
-    };
-
-    accumulateRRF(semanticResults);
-    accumulateRRF(lexicalResults);
-
-    // Sort by fused score descending, take top limit, clamp scores to [0, 1]
-    return Array.from(scoreMap.values())
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
-      .map(({ result, score }) => ({
-        ...result,
-        score: Math.min(1, Math.max(0, score)),
-      }));
+    // Re-rank after dedup so `rank` stays a contiguous 1-based position in the returned list
+    return deduped.map((result, i) => ({ ...result, rank: i + 1 }));
   }
 
   private buildFilter(filters: SearchFilters): QdrantFilter | undefined {
@@ -176,7 +165,7 @@ export class SearchService {
     return Math.min(1, Math.max(0, raw));
   }
 
-  private toSearchResult(payload: QdrantPayload, score: number): SearchResult {
+  private toSearchResult(payload: QdrantPayload, score: number, rank: number): SearchResult {
     return {
       text: typeof payload.text === 'string' ? payload.text : '',
       path: typeof payload.path === 'string' ? payload.path : '',
@@ -187,6 +176,8 @@ export class SearchService {
       project: typeof payload.project === 'string' ? payload.project : null,
       status: typeof payload.status === 'string' ? payload.status : null,
       type: typeof payload.type === 'string' ? payload.type : null,
+      chunk_index: typeof payload.chunk_index === 'number' ? payload.chunk_index : 0,
+      rank,
     };
   }
 }
