@@ -65,11 +65,10 @@ spec:
           # Тег всегда конкретный, иммутабельный sha-<gitsha>: SberOSC не проксирует
           # `latest` и кеширует вердикт скана по digest.
           #
-          # Пин НЕ совпадает с пином UI в 05-ui.yaml — и это нормально: образы
-          # собираются независимо, из своих путей. sha-9f9da6f добавляет mTLS до
-          # внешнего Qdrant и получение JWT у IAM Platform V Vector DB; UI с тех
-          # пор не менялся.
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-9f9da6f
+          # Пины бэкенда и UI могут расходиться: образы собираются независимо,
+          # каждый из своего пути, и компонент, который не менялся, остаётся на
+          # прежнем коммите. Здесь они совпадают — оба собраны из e30dc81.
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-e30dc81
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

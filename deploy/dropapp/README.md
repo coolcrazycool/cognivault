@@ -19,8 +19,8 @@ Namespace: `ci05490208-oasis-cognivault`.
 
 | Компонент | Образ |
 |-----------|-------|
-| бэкенд | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-9f9da6f` |
-| UI | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-f8a989d` |
+| бэкенд | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-e30dc81` |
+| UI | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-e30dc81` |
 
 ---
 
