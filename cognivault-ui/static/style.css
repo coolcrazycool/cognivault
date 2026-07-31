@@ -161,6 +161,14 @@ button,input,textarea,select{font:inherit;color:inherit}
 .field .hint{font-size:11.5px;color:var(--fg-muted);font-weight:400}
 .input{height:40px;padding:0 12px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-input);font-family:var(--font-mono);font-size:13px;width:100%}
 .input:focus{border-color:var(--accent)}
+.input:disabled{opacity:.6;cursor:not-allowed}
+/* Multiline settings field (prompts) — same skin as .input, but tall and resizable. */
+.textarea{min-height:200px;padding:10px 12px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-input);font-family:var(--font-mono);font-size:12.5px;line-height:1.5;width:100%;resize:vertical}
+.textarea:focus{border-color:var(--accent)}
+.textarea.ro,.textarea[readonly]{min-height:140px;opacity:.75}
+.lock-hint{display:block;font-size:11.5px;color:var(--fg-muted)}
+.dirty-flag{font-size:11px;font-weight:500;color:var(--warn)}
+.sub-hint{display:block;margin:-9px 0 13px;font-size:11.5px;color:var(--fg-muted)}
 .checkline{display:flex;align-items:center;gap:9px;margin-bottom:13px;font-size:13px}
 .checkline input{width:16px;height:16px;accent-color:var(--accent)}
 .inline{display:flex;gap:8px} .inline .input{flex:1}
@@ -195,6 +203,9 @@ button,input,textarea,select{font:inherit;color:inherit}
 .seg[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg)}
 .input[readonly]{opacity:.7;cursor:not-allowed}
 .warn-hint{display:block;color:var(--warn);margin:-6px 0 12px}
+/* Standing note at the top of the settings drawer (config is not persisted). */
+.drawer-warn{margin:14px 0 0;padding:9px 12px;background:var(--warn-weak);border-radius:var(--r-sm);font-size:12px;line-height:1.5}
+.drawer-warn code{font-family:var(--font-mono);font-size:11.5px}
 .conf-validate-result{margin-top:12px;display:flex;flex-wrap:wrap;gap:8px}
 .conf-validate-result .pill{height:auto;min-height:28px;white-space:normal;text-align:left}
 .conf-sync-counter{margin-top:10px;font-size:12px;color:var(--fg-muted);font-variant-numeric:tabular-nums}

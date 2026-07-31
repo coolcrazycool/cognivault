@@ -124,8 +124,16 @@
     sectionConn: $("section-conn"),
     sectionCert: $("section-cert"),
     sectionEnv: $("section-env"),
-    srvModel: $("srv-model"),
-    srvParams: $("srv-params"),
+    // §M model / §S rag / §P prompts — tuning form (both modes)
+    saveModel: $("save-model"),
+    savedModel: $("saved-model"),
+    saveRag: $("save-rag"),
+    savedRag: $("saved-rag"),
+    savePrompts: $("save-prompts"),
+    savedPrompts: $("saved-prompts"),
+    roPrompts: $("ro-prompts"),
+    roPromptCondense: $("ro-prompt-condense"),
+    roPromptGrader: $("ro-prompt-grader"),
     // login modal (server mode)
     loginScrim: $("login-scrim"),
     loginToken: $("login-token"),
@@ -205,9 +213,25 @@
     });
     if (res.status === 401 && isServerMode()) { handleUnauthorized(); throw unauthorizedError(); }
     if (!res.ok) {
+      // Keep the whole error envelope on the thrown error: callers that only need
+      // a sentence use .message, validation-heavy ones (PUT /api/config) also
+      // show .detail instead of a generic "something went wrong".
       let msg = path + " → " + res.status;
-      try { const j = await res.json(); if (j && j.error) msg = j.error.message || msg; } catch (_) {}
-      throw new Error(msg);
+      let code = null;
+      let detail = null;
+      try {
+        const j = await res.json();
+        if (j && j.error) {
+          msg = j.error.message || msg;
+          code = j.error.code || null;
+          detail = j.error.detail != null ? j.error.detail : null;
+        }
+      } catch (_) {}
+      const err = new Error(msg);
+      err.status = res.status;
+      err.code = code;
+      err.detail = detail;
+      throw err;
     }
     const ct = res.headers.get("content-type") || "";
     return ct.includes("application/json") ? res.json() : null;
@@ -448,15 +472,35 @@
     else root.removeAttribute("data-theme"); // auto
     dom.themeBtn.textContent = theme === "light" ? "☀" : theme === "dark" ? "☾" : "◐";
   }
-  function getServerTheme() { try { return localStorage.getItem(THEME_KEY) || "auto"; } catch (_) { return "auto"; } }
+  // Server mode: `ui.theme` is a per-token setting, so the server value wins once
+  // we are logged in; localStorage is the pre-login / offline fallback and keeps
+  // the choice from flashing on the next boot before the config lands.
+  function getServerTheme() {
+    // Logged in → the token's stored theme is authoritative (it follows the user
+    // across browsers). Not logged in → the anonymous GET only ever carries the
+    // admin default, so fall back to whatever this browser last chose.
+    if (getToken()) {
+      const fromServer = state.config && state.config.ui && state.config.ui.theme;
+      if (fromServer) return fromServer;
+    }
+    try { return localStorage.getItem(THEME_KEY) || "auto"; } catch (_) { return "auto"; }
+  }
   async function cycleTheme() {
     const order = ["auto", "light", "dark"];
-    // Server mode: theme is client-only (no PUT /api/config — it would 403).
     if (isServerMode()) {
       const cur = getServerTheme();
       const next = order[(order.indexOf(cur) + 1) % order.length];
       applyTheme(next);
       try { localStorage.setItem(THEME_KEY, next); } catch (_) {}
+      if (state.config) {
+        if (!state.config.ui) state.config.ui = {};
+        state.config.ui.theme = next;
+      }
+      // Persist per token — but only once there IS one: a pre-login toggle would
+      // 401 and bounce the user into the login dialog for a cosmetic action.
+      if (getToken()) {
+        try { await apiSend("/api/config", "PUT", { ui: { theme: next } }); } catch (_) {}
+      }
       return;
     }
     const cur = (state.config && state.config.ui && state.config.ui.theme) || "auto";
@@ -542,10 +586,13 @@
     }
   }
 
-  function onLoggedIn(who) {
+  async function onLoggedIn(who) {
     const userId = (who && (who.userId || who.user_id)) || "";
     if (dom.identityUser) dom.identityUser.textContent = userId;
     if (dom.identity) dom.identity.hidden = false;
+    // Re-read the config with the user's token: the anonymous boot request can
+    // legitimately carry a narrower subset than the authenticated one.
+    try { state.config = await apiGet("/api/config"); } catch (_) {}
     applyServerConfig();
     refreshStatus();
     loadHistory();
@@ -575,22 +622,16 @@
     if (dom.pillEnv) dom.pillEnv.hidden = true;
   }
 
-  // Apply the safe config subset returned in server mode (no edit forms).
+  // Apply the safe config subset returned in server mode. Model / RAG / prompt
+  // knobs are editable here too — only the fields listed in `locked` stay
+  // read-only, so the drawer shows a real form instead of static text.
   function applyServerConfig() {
     const c = state.config || {};
     const rag = c.rag || {};
     state.rag = rag.default_on !== false;
     applyRagUI();
     applyTheme(getServerTheme());
-    const g = c.gigachat || {};
-    if (dom.srvModel) dom.srvModel.textContent = g.model || "—";
-    if (dom.srvParams) {
-      const parts = [];
-      if (g.temperature != null) parts.push("температура: " + g.temperature);
-      if (g.max_tokens != null) parts.push("макс. токенов: " + g.max_tokens);
-      if (g.model_context_tokens != null) parts.push("контекст: " + g.model_context_tokens);
-      dom.srvParams.textContent = parts.join(" · ");
-    }
+    bindTuningForm();
   }
 
   /* ============================ SETTINGS ============================ */
@@ -617,6 +658,9 @@
     const rag = c.rag || {};
     state.rag = rag.default_on !== false;
     applyRagUI();
+
+    // model / RAG / prompt tuning form
+    bindTuningForm();
 
     // theme
     applyTheme((c.ui && c.ui.theme) || "auto");
@@ -664,6 +708,7 @@
     try {
       const updated = await apiSend("/api/config", "PUT", payload);
       if (updated) state.config = updated; else state.config.gigachat = payload.gigachat;
+      bindTuningForm(); // §2 writes gigachat.model too — keep §M in sync
       flashSaved(dom.savedCert);
       toast("ok", "Настройки сохранены", "Сертификаты обновлены");
       await refreshStatus();
@@ -707,6 +752,218 @@
     } finally {
       dom.saveEnvMirror.disabled = false;
     }
+  }
+
+  /* ============================ MODEL / RAG / PROMPT TUNING ============================
+   * Three drawer sections (§M model, §S search, §P prompts) driven by descriptor
+   * tables instead of hand-written per-field code. A descriptor is
+   *   { key, id, type, label, def?, locked? }
+   * where `type` decides coercion on the way out: "text" stays a string,
+   * "int"/"number" become numbers, "bool" a boolean. Each section saves on its
+   * own button and PUTs exactly one subtree of /api/config.
+   */
+  const MODEL_FIELDS = [
+    { key: "model", id: "cfg-gc-model", type: "text", label: "Модель" },
+    { key: "temperature", id: "cfg-gc-temperature", type: "number", label: "Температура" },
+    { key: "max_tokens", id: "cfg-gc-max-tokens", type: "int", label: "Максимум токенов в ответе" },
+    // the context window is sized by the deployment, never by the user
+    { key: "model_context_tokens", id: "cfg-gc-context-tokens", type: "int", label: "Окно контекста модели", locked: true },
+  ];
+
+  const RAG_FIELDS = [
+    { key: "default_on", id: "cfg-rag-default-on", type: "bool", label: "Поиск по умолчанию", def: true },
+    { key: "limit", id: "cfg-rag-limit", type: "int", label: "Фрагментов в ответе" },
+    { key: "rerank_candidates", id: "cfg-rag-rerank-candidates", type: "int", label: "Кандидатов на отбор" },
+    { key: "grader_enabled", id: "cfg-rag-grader-enabled", type: "bool", label: "Оценка релевантности" },
+    { key: "grader_threshold", id: "cfg-rag-grader-threshold", type: "int", label: "Порог оценки" },
+    { key: "grader_keep_top", id: "cfg-rag-grader-keep-top", type: "int", label: "Оставлять лучших" },
+    { key: "condense_enabled", id: "cfg-rag-condense-enabled", type: "bool", label: "Уточнение вопроса" },
+    { key: "max_context_chars", id: "cfg-rag-max-context-chars", type: "int", label: "Бюджет контекста" },
+    { key: "file_full_chars", id: "cfg-rag-file-full-chars", type: "int", label: "Файл целиком до" },
+    { key: "section_max_chars", id: "cfg-rag-section-max-chars", type: "int", label: "Раздел не длиннее" },
+    { key: "max_expanded_files", id: "cfg-rag-max-expanded-files", type: "int", label: "Файлов раскрывать" },
+    { key: "min_score", id: "cfg-rag-min-score", type: "number", label: "Минимальная близость" },
+  ];
+
+  const PROMPT_FIELDS = [
+    { key: "system", id: "cfg-prompt-system", resetId: "prompt-system-reset", dirtyId: "prompt-system-dirty" },
+    { key: "context_reminder", id: "cfg-prompt-reminder", resetId: "prompt-reminder-reset", dirtyId: "prompt-reminder-dirty" },
+  ];
+
+  // Descriptors cache their node (null included) after the first lookup.
+  function fieldNode(f) {
+    if (f.node === undefined) f.node = $(f.id);
+    return f.node;
+  }
+  function promptFlagNode(f) {
+    if (f.flag === undefined) f.flag = $(f.dirtyId);
+    return f.flag;
+  }
+
+  // A field is read-only when the descriptor pins it or the server lists its
+  // dotted path in `locked`. The array may be absent — then nothing is locked.
+  function fieldLocked(f, prefix) {
+    if (f.locked) return true;
+    const locked = state.config?.locked;
+    return Array.isArray(locked) && locked.indexOf(prefix + "." + f.key) !== -1;
+  }
+
+  // Disable a locked input and keep exactly one "set by the admin" note next to
+  // it. Disabled inputs also drop out of the drawer focus trap, which is right.
+  function applyFieldLock(f, prefix) {
+    const node = fieldNode(f);
+    if (!node || !node.parentNode) return;
+    const on = fieldLocked(f, prefix);
+    node.disabled = on;
+    const holder = node.parentNode;
+    const note = holder.querySelector(".lock-hint");
+    if (on && !note) holder.appendChild(el("small", "hint lock-hint", "Значение задаёт администратор"));
+    else if (!on && note) note.remove();
+  }
+
+  function bindFields(fields, prefix, values) {
+    const v = values || {};
+    fields.forEach((f) => {
+      const node = fieldNode(f);
+      if (!node) return;
+      const raw = v[f.key];
+      if (f.type === "bool") node.checked = raw == null ? !!f.def : !!raw;
+      else node.value = raw == null ? "" : String(raw);
+      applyFieldLock(f, prefix);
+    });
+  }
+
+  // Build one PUT subtree out of a descriptor table. Numbers are coerced here —
+  // the backend rejects a string with 400 rather than repairing it. Empty inputs
+  // are omitted entirely so an untouched field never clears a stored value.
+  // Returns the labels of fields whose text is not a valid number as `invalid`.
+  function collectFields(fields, prefix) {
+    const payload = {};
+    const invalid = [];
+    fields.forEach((f) => {
+      const node = fieldNode(f);
+      if (!node || fieldLocked(f, prefix)) return; // never echo admin-managed values back
+      if (f.type === "bool") { payload[f.key] = !!node.checked; return; }
+      const raw = String(node.value == null ? "" : node.value).trim();
+      if (!raw) return;
+      if (f.type === "text") { payload[f.key] = raw; return; }
+      const num = Number(raw.replace(",", "."));
+      if (!Number.isFinite(num) || (f.type === "int" && !Number.isInteger(num))) {
+        invalid.push(f.label);
+        return;
+      }
+      payload[f.key] = num;
+    });
+    return { payload: payload, invalid: invalid };
+  }
+
+  function promptDefault(key) {
+    const d = state.config?.defaults?.prompts;
+    return d && typeof d[key] === "string" ? d[key] : null;
+  }
+  // "изменён" badge — only meaningful once the server told us the built-in text.
+  function refreshPromptDirty(f) {
+    const node = fieldNode(f);
+    const flag = promptFlagNode(f);
+    if (!node || !flag) return;
+    const def = promptDefault(f.key);
+    flag.hidden = def == null || node.value === def;
+  }
+
+  function bindPrompts() {
+    const prompts = state.config?.prompts || {};
+    PROMPT_FIELDS.forEach((f) => {
+      const node = fieldNode(f);
+      if (!node) return;
+      node.value = typeof prompts[f.key] === "string" ? prompts[f.key] : "";
+      refreshPromptDirty(f);
+    });
+    // Service prompts carry a strict JSON contract → shown read-only, and only
+    // when the server actually exposes them.
+    const ro = state.config?.readonly?.prompts;
+    const hasRo = !!(ro && (ro.condense || ro.grader));
+    if (dom.roPrompts) dom.roPrompts.hidden = !hasRo;
+    if (!hasRo) return;
+    if (dom.roPromptCondense) dom.roPromptCondense.value = ro.condense || "";
+    if (dom.roPromptGrader) dom.roPromptGrader.value = ro.grader || "";
+  }
+
+  function bindTuningForm() {
+    const c = state.config || {};
+    bindFields(MODEL_FIELDS, "gigachat", c.gigachat);
+    bindFields(RAG_FIELDS, "rag", c.rag);
+    bindPrompts();
+  }
+
+  // Adopt a GET/PUT /api/config response and surface everything the server said
+  // about it. `warnings` / `ignored` may be absent — both are optional.
+  function applyConfigResponse(updated) {
+    if (!updated || typeof updated !== "object") return;
+    state.config = updated;
+    const warnings = Array.isArray(updated.warnings) ? updated.warnings : [];
+    warnings.forEach((w) => toast("warn", "Внимание", String(w)));
+    const ignored = Array.isArray(updated.ignored) ? updated.ignored : [];
+    if (ignored.length) toast("warn", "Часть настроек не применена", ignored.join(", "));
+    bindTuningForm();
+  }
+
+  // 400 from PUT /api/config carries {code,message,detail} — show the detail too.
+  function configErrorText(e) {
+    const detail = e && e.detail;
+    let extra = "";
+    if (typeof detail === "string") extra = detail;
+    else if (detail != null) { try { extra = JSON.stringify(detail); } catch (_) { extra = String(detail); } }
+    return [(e && e.message) || "Не удалось сохранить", extra].filter(Boolean).join(" — ");
+  }
+
+  async function putConfigSubtree(body, btn, savedNode, okMessage) {
+    if (btn) btn.disabled = true;
+    try {
+      const updated = await apiSend("/api/config", "PUT", body);
+      applyConfigResponse(updated);
+      if (savedNode) flashSaved(savedNode);
+      toast("ok", "Настройки сохранены", okMessage);
+    } catch (e) {
+      if (!e.handled) toast("err", "Ошибка сохранения", configErrorText(e));
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  async function saveFieldSection(fields, prefix, btn, savedNode, okMessage) {
+    const collected = collectFields(fields, prefix);
+    if (collected.invalid.length) {
+      toast("warn", "Проверьте значения", "Ожидается число: " + collected.invalid.join(", "));
+      return;
+    }
+    const body = {};
+    body[prefix] = collected.payload;
+    await putConfigSubtree(body, btn, savedNode, okMessage);
+  }
+
+  function saveModelSettings() {
+    return saveFieldSection(MODEL_FIELDS, "gigachat", dom.saveModel, dom.savedModel, "Параметры модели обновлены");
+  }
+  function saveRagSettings() {
+    return saveFieldSection(RAG_FIELDS, "rag", dom.saveRag, dom.savedRag, "Параметры поиска обновлены");
+  }
+
+  // An empty textarea is not a reset — resetting is the button below it, which
+  // sends null explicitly.
+  function savePromptSettings() {
+    const prompts = {};
+    PROMPT_FIELDS.forEach((f) => {
+      const node = fieldNode(f);
+      if (!node) return;
+      const v = node.value;
+      if (v.trim()) prompts[f.key] = v;
+    });
+    return putConfigSubtree({ prompts: prompts }, dom.savePrompts, dom.savedPrompts, "Промпты обновлены");
+  }
+  function resetPrompt(f) {
+    const prompts = {};
+    prompts[f.key] = null; // null = back to the built-in default
+    return putConfigSubtree({ prompts: prompts }, dom.savePrompts, dom.savedPrompts, "Промпт сброшен к стандартному");
   }
 
   /* ---- drawer open/close + focus trap ---- */
@@ -1681,6 +1938,17 @@
     dom.tokenToggle.addEventListener("click", toggleTokenVisibility);
     dom.saveConn.addEventListener("click", saveConnection);
     dom.saveCert.addEventListener("click", saveCertificates);
+
+    // settings §M/§S/§P — model, search and prompt tuning
+    if (dom.saveModel) dom.saveModel.addEventListener("click", saveModelSettings);
+    if (dom.saveRag) dom.saveRag.addEventListener("click", saveRagSettings);
+    if (dom.savePrompts) dom.savePrompts.addEventListener("click", savePromptSettings);
+    PROMPT_FIELDS.forEach((f) => {
+      const node = fieldNode(f);
+      if (node) node.addEventListener("input", () => refreshPromptDirty(f));
+      const reset = $(f.resetId);
+      if (reset) reset.addEventListener("click", () => resetPrompt(f));
+    });
 
     // upload
     dom.dropzone.addEventListener("click", () => dom.fileInput.click());

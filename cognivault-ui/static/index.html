@@ -82,15 +82,150 @@
   </div>
   <div class="drawer-body">
 
+    <p class="warn-hint drawer-warn" id="persist-warn">
+      Настройки живут в рабочем каталоге сервиса (<code>/data</code>, том <code>emptyDir</code>):
+      они переживут перезагрузку страницы, но не перезапуск пода — после него вернутся стандартные значения.
+    </p>
+
     <!-- §0 Сведения о сервисе (только для server-режима, read-only) -->
     <section class="section" id="section-server-info" aria-labelledby="s-srv" hidden>
       <span class="eyebrow" id="s-srv">Сведения о сервисе</span>
-      <div class="field">
-        <label>Модель</label>
-        <div class="ro-value" id="srv-model">—</div>
-      </div>
-      <div class="ro-line" id="srv-params"></div>
       <small class="hint">Настройки подключения и сертификатов управляются администратором.</small>
+    </section>
+
+    <!-- §M Модель и генерация -->
+    <section class="section" id="section-model" aria-labelledby="s-model">
+      <span class="eyebrow" id="s-model">Модель и генерация</span>
+      <div class="field">
+        <label for="cfg-gc-model">Модель</label>
+        <input class="input" id="cfg-gc-model" placeholder="GigaChat-3-Ultra-preview">
+        <small class="hint">Идентификатор модели GigaChat, которая отвечает в чате</small>
+      </div>
+      <div class="field">
+        <label for="cfg-gc-temperature">Температура</label>
+        <input class="input" id="cfg-gc-temperature" type="number" min="0" max="2" step="0.1" placeholder="0.3">
+        <small class="hint">Разброс ответа: 0 — предсказуемо и сухо, 2 — свободно и творчески</small>
+      </div>
+      <div class="field">
+        <label for="cfg-gc-max-tokens">Максимум токенов в ответе</label>
+        <input class="input" id="cfg-gc-max-tokens" type="number" min="1" step="1" placeholder="2048">
+        <small class="hint">Верхняя граница длины одного ответа</small>
+      </div>
+      <div class="field">
+        <label for="cfg-gc-context-tokens">Окно контекста модели</label>
+        <input class="input" id="cfg-gc-context-tokens" type="number" min="1" step="1">
+        <small class="hint">Сколько токенов модель принимает за раз — вопрос, история и найденные документы вместе</small>
+      </div>
+      <div class="section-actions">
+        <button class="btn primary" id="save-model" type="button">Сохранить</button>
+        <span class="saved" id="saved-model" hidden>✓ Сохранено</span>
+      </div>
+    </section>
+
+    <!-- §S Поиск и контекст -->
+    <section class="section" id="section-rag" aria-labelledby="s-rag">
+      <span class="eyebrow" id="s-rag">Поиск и контекст</span>
+      <div class="checkline">
+        <input type="checkbox" id="cfg-rag-default-on">
+        <label for="cfg-rag-default-on">Включать поиск по базе знаний по умолчанию</label>
+      </div>
+      <small class="hint sub-hint">Каким будет переключатель RAG в новом чате</small>
+      <div class="field">
+        <label for="cfg-rag-limit">Фрагментов в ответе</label>
+        <input class="input" id="cfg-rag-limit" type="number" min="1" step="1" placeholder="8">
+        <small class="hint">Сколько фрагментов доходит до модели после отбора</small>
+      </div>
+      <div class="field">
+        <label for="cfg-rag-rerank-candidates">Кандидатов на отбор</label>
+        <input class="input" id="cfg-rag-rerank-candidates" type="number" min="1" step="1" placeholder="30">
+        <small class="hint">Сколько фрагментов ищем перед отбором — больше значит точнее, но медленнее</small>
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="cfg-rag-grader-enabled">
+        <label for="cfg-rag-grader-enabled">Оценивать релевантность найденного</label>
+      </div>
+      <small class="hint sub-hint">Отдельный проход модели отсеивает фрагменты не по теме</small>
+      <div class="field">
+        <label for="cfg-rag-grader-threshold">Порог оценки</label>
+        <input class="input" id="cfg-rag-grader-threshold" type="number" min="1" max="5" step="1" placeholder="3">
+        <small class="hint">Порог оценки релевантности, 1–5: ниже порога фрагмент выбрасывается</small>
+      </div>
+      <div class="field">
+        <label for="cfg-rag-grader-keep-top">Оставлять лучших</label>
+        <input class="input" id="cfg-rag-grader-keep-top" type="number" min="0" step="1" placeholder="3">
+        <small class="hint">Сколько лучших фрагментов сохранить, если порог не прошёл никто</small>
+      </div>
+      <div class="checkline">
+        <input type="checkbox" id="cfg-rag-condense-enabled">
+        <label for="cfg-rag-condense-enabled">Уточнять вопрос по истории чата</label>
+      </div>
+      <small class="hint sub-hint">Переписывает вопрос с учётом предыдущих реплик перед поиском</small>
+      <div class="field">
+        <label for="cfg-rag-max-context-chars">Бюджет контекста, символов</label>
+        <input class="input" id="cfg-rag-max-context-chars" type="number" min="1" step="1" placeholder="24000">
+        <small class="hint">Общий размер найденного текста, который уходит в модель</small>
+      </div>
+      <div class="field">
+        <label for="cfg-rag-file-full-chars">Файл целиком до, символов</label>
+        <input class="input" id="cfg-rag-file-full-chars" type="number" min="1" step="1" placeholder="6000">
+        <small class="hint">Документы короче этого размера подставляются целиком</small>
+      </div>
+      <div class="field">
+        <label for="cfg-rag-section-max-chars">Раздел не длиннее, символов</label>
+        <input class="input" id="cfg-rag-section-max-chars" type="number" min="1" step="1" placeholder="3000">
+        <small class="hint">Предел для одного раздела документа</small>
+      </div>
+      <div class="field">
+        <label for="cfg-rag-max-expanded-files">Файлов раскрывать</label>
+        <input class="input" id="cfg-rag-max-expanded-files" type="number" min="0" step="1" placeholder="3">
+        <small class="hint">Сколько документов разрешено дочитать целиком за один запрос</small>
+      </div>
+      <div class="field">
+        <label for="cfg-rag-min-score">Минимальная близость</label>
+        <input class="input" id="cfg-rag-min-score" type="number" min="0" max="1" step="0.01" placeholder="0.2">
+        <small class="hint">Порог сходства фрагмента с вопросом, 0–1: ниже — не берём</small>
+      </div>
+      <div class="section-actions">
+        <button class="btn primary" id="save-rag" type="button">Сохранить</button>
+        <span class="saved" id="saved-rag" hidden>✓ Сохранено</span>
+      </div>
+    </section>
+
+    <!-- §P Промпты -->
+    <section class="section" id="section-prompts" aria-labelledby="s-prompts">
+      <span class="eyebrow" id="s-prompts">Промпты</span>
+      <div class="field">
+        <label for="cfg-prompt-system">Системный промпт <span class="dirty-flag" id="prompt-system-dirty" hidden>изменён</span></label>
+        <textarea class="textarea" id="cfg-prompt-system" spellcheck="false" placeholder="Ты — помощник по внутренним документам…"></textarea>
+        <small class="hint">Общие правила поведения ассистента — задаётся один раз на весь диалог</small>
+        <div class="section-actions">
+          <button class="linkbtn" id="prompt-system-reset" type="button">Сбросить к стандартному</button>
+        </div>
+      </div>
+      <div class="field">
+        <label for="cfg-prompt-reminder">Напоминание перед вопросом <span class="dirty-flag" id="prompt-reminder-dirty" hidden>изменён</span></label>
+        <textarea class="textarea" id="cfg-prompt-reminder" spellcheck="false" placeholder="Отвечай только по приведённым документам…"></textarea>
+        <small class="hint">Короткая вставка прямо перед вопросом — напоминает про источники и ссылки</small>
+        <div class="section-actions">
+          <button class="linkbtn" id="prompt-reminder-reset" type="button">Сбросить к стандартному</button>
+        </div>
+      </div>
+      <div class="section-actions">
+        <button class="btn primary" id="save-prompts" type="button">Сохранить</button>
+        <span class="saved" id="saved-prompts" hidden>✓ Сохранено</span>
+      </div>
+      <details class="filelist" id="ro-prompts" hidden>
+        <summary>Служебные промпты (только для чтения)</summary>
+        <small class="hint">Эти промпты требуют от модели строгий JSON-ответ: любая правка ломает разбор, поэтому редактировать их нельзя.</small>
+        <div class="field">
+          <label for="ro-prompt-condense">Уточнение вопроса (condense)</label>
+          <textarea class="textarea ro" id="ro-prompt-condense" readonly spellcheck="false"></textarea>
+        </div>
+        <div class="field">
+          <label for="ro-prompt-grader">Оценка релевантности (grader)</label>
+          <textarea class="textarea ro" id="ro-prompt-grader" readonly spellcheck="false"></textarea>
+        </div>
+      </details>
     </section>
 
     <!-- §1 Подключение -->
