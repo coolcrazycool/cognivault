@@ -27,6 +27,7 @@ from .routes import (
     config_routes,
     confluence_routes,
     env_routes,
+    feedback_routes,
     history_routes,
     upload_routes,
 )
@@ -128,6 +129,7 @@ def create_app() -> FastAPI:
     app.include_router(config_routes.router)
     app.include_router(chat_routes.router, dependencies=auth)
     app.include_router(history_routes.router, dependencies=auth)
+    app.include_router(feedback_routes.router, dependencies=auth)
     app.include_router(upload_routes.router, dependencies=auth)
     # Confluence source: per-user data, registered in BOTH modes behind the same
     # bearer-token gate. The CONFLUENCE_ENABLED admin flag (default on) lets a

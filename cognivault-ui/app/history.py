@@ -69,7 +69,7 @@ def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if role == "system":
             continue
         entry: dict[str, Any] = {"role": role, "content": msg.get("content", "")}
-        for key in ("rag", "sources", "truncated"):
+        for key in ("rag", "sources", "truncated", "context_chars", "invalid_citations"):
             if key in msg:
                 entry[key] = msg[key]
         clean.append(entry)
