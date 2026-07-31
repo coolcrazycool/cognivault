@@ -1,3 +1,4 @@
+import type { QdrantClientParams } from '@qdrant/js-client-rest';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
@@ -120,10 +121,50 @@ async function logServerVersion(client: QdrantClient, log: FastifyBaseLogger): P
   }
 }
 
+/**
+ * Build the Qdrant client options. The external Qdrant sits behind a reverse proxy that
+ * speaks HTTP Basic (native Qdrant only understands the `api-key` header), so the
+ * credentials go out as an `Authorization` header. Without both credentials no auth
+ * header is added at all.
+ *
+ * NEVER log the returned object — it carries the password in `headers.Authorization`.
+ */
+function buildClientParams(): QdrantClientParams {
+  const params: QdrantClientParams = {
+    url: config.QDRANT_URL,
+    timeout: config.QDRANT_TIMEOUT_MS,
+    // Client 1.17 vs server 1.16 makes the client print an incompatibility warning on
+    // every start. We probe and log the server version ourselves (`logServerVersion`),
+    // so the built-in check is pure noise.
+    checkCompatibility: false,
+  };
+
+  const user = config.QDRANT_USERNAME;
+  const pass = config.QDRANT_PASSWORD;
+  if (user && pass) {
+    params.headers = {
+      Authorization: `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`,
+    };
+  }
+
+  return params;
+}
+
 async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
   const dimensions = resolveDimensions(config);
 
-  const client = new QdrantClient({ url: config.QDRANT_URL });
+  const params = buildClientParams();
+  const client = new QdrantClient(params);
+
+  // Log the auth MODE only — never the header value or the params object.
+  fastify.log.info(
+    {
+      qdrantUrl: config.QDRANT_URL,
+      qdrantAuth: params.headers ? 'basic' : 'none',
+      qdrantTimeoutMs: config.QDRANT_TIMEOUT_MS,
+    },
+    'Qdrant client configured',
+  );
 
   await logServerVersion(client, fastify.log);
 

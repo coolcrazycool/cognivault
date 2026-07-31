@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TenantQdrantClient } from '../../lib/tenant-qdrant-client.js';
 
 // Set required env vars before any imports that trigger config parsing
@@ -13,6 +13,8 @@ const mockCreateCollection = vi.fn();
 const mockCreatePayloadIndex = vi.fn();
 const mockDelete = vi.fn();
 const mockVersionInfo = vi.fn();
+/** Records the options object the plugin passes to `new QdrantClient(...)`. */
+const mockClientConstructor = vi.fn();
 
 vi.mock('@qdrant/js-client-rest', () => {
   class MockQdrantClient {
@@ -22,6 +24,10 @@ vi.mock('@qdrant/js-client-rest', () => {
     createPayloadIndex = mockCreatePayloadIndex;
     delete = mockDelete;
     versionInfo = mockVersionInfo;
+
+    constructor(params?: unknown) {
+      mockClientConstructor(params);
+    }
   }
   return { QdrantClient: MockQdrantClient };
 });
@@ -401,5 +407,141 @@ describe('qdrantPlugin', () => {
     });
 
     await app.close();
+  });
+
+  describe('client construction', () => {
+    const QDRANT_ENV_KEYS = ['QDRANT_USERNAME', 'QDRANT_PASSWORD', 'QDRANT_TIMEOUT_MS'] as const;
+
+    const USERNAME = 'qdrant-reader';
+    const PASSWORD = 'sup3r-s3cr3t-p@ss';
+
+    interface ClientParams {
+      url?: string;
+      timeout?: number;
+      checkCompatibility?: boolean;
+      headers?: Record<string, string>;
+    }
+
+    interface StartedApp {
+      close: () => Promise<void>;
+      params: ClientParams;
+      logCalls: unknown[][];
+    }
+
+    /**
+     * Boot the plugin with a fresh module registry so `config.ts` re-reads process.env,
+     * and hand back the options the client was constructed with plus every logger call.
+     */
+    async function start(env: Partial<Record<string, string>>): Promise<StartedApp> {
+      for (const key of QDRANT_ENV_KEYS) {
+        delete process.env[key];
+      }
+      for (const [key, value] of Object.entries(env)) {
+        if (value !== undefined) {
+          process.env[key] = value;
+        }
+      }
+
+      vi.resetModules();
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+
+      const app = Fastify({ logger: false });
+      const logCalls: unknown[][] = [];
+      for (const level of ['info', 'warn', 'error'] as const) {
+        vi.spyOn(app.log, level).mockImplementation(((...args: unknown[]) => {
+          logCalls.push(args);
+          return undefined;
+        }) as never);
+      }
+
+      await app.register(qdrantPlugin);
+      await app.ready();
+
+      const params = mockClientConstructor.mock.calls.at(-1)?.[0] as ClientParams;
+      return { close: () => app.close(), params, logCalls };
+    }
+
+    beforeEach(() => {
+      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      mockCreatePayloadIndex.mockResolvedValue({});
+    });
+
+    afterEach(() => {
+      for (const key of QDRANT_ENV_KEYS) {
+        delete process.env[key];
+      }
+    });
+
+    it('sends a Basic Authorization header when both credentials are set', async () => {
+      const { close, params } = await start({
+        QDRANT_USERNAME: USERNAME,
+        QDRANT_PASSWORD: PASSWORD,
+      });
+
+      const authorization = params.headers?.Authorization;
+      expect(authorization).toMatch(/^Basic /);
+      const decoded = Buffer.from(String(authorization).slice('Basic '.length), 'base64').toString(
+        'utf8',
+      );
+      expect(decoded).toBe(`${USERNAME}:${PASSWORD}`);
+
+      await close();
+    });
+
+    it('sends no Authorization header when credentials are absent', async () => {
+      const { close, params } = await start({});
+
+      expect(params.headers?.Authorization).toBeUndefined();
+
+      await close();
+    });
+
+    it('disables the built-in compatibility check and forwards the timeout', async () => {
+      const { close, params } = await start({ QDRANT_TIMEOUT_MS: '12345' });
+
+      expect(params.checkCompatibility).toBe(false);
+      expect(params.timeout).toBe(12345);
+
+      await close();
+    });
+
+    it('defaults the timeout to 30s', async () => {
+      const { close, params } = await start({});
+
+      expect(params.timeout).toBe(30_000);
+
+      await close();
+    });
+
+    it('never leaks the password into the logs', async () => {
+      const { close, logCalls } = await start({
+        QDRANT_USERNAME: USERNAME,
+        QDRANT_PASSWORD: PASSWORD,
+      });
+
+      const serialized = JSON.stringify(logCalls);
+      expect(serialized).not.toContain(PASSWORD);
+      // The base64 blob must not surface either.
+      expect(serialized).not.toContain(Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64'));
+      // …but the auth MODE is reported, so a misconfiguration is visible in the logs.
+      const authLog = logCalls.find(
+        (args) => (args[0] as { qdrantAuth?: string } | undefined)?.qdrantAuth === 'basic',
+      );
+      expect(authLog).toBeDefined();
+
+      await close();
+    });
+
+    it('reports qdrantAuth "none" when running without credentials', async () => {
+      const { close, logCalls } = await start({});
+
+      const authLog = logCalls.find(
+        (args) => (args[0] as { qdrantAuth?: string } | undefined)?.qdrantAuth === 'none',
+      );
+      expect(authLog).toBeDefined();
+
+      await close();
+    });
   });
 });
