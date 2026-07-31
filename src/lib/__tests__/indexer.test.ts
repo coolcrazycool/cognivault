@@ -6,6 +6,27 @@ import { createDatabase } from '../../db/client.js';
 import type { FileChangeEvent } from '../indexer.js';
 import { VaultIndexer } from '../indexer.js';
 
+// Records every fs.readFile the indexer performs, so the mtime/size pretest can be
+// asserted directly ("this file was never opened"). The real implementation still runs.
+const { readFileCalls } = vi.hoisted(() => ({ readFileCalls: [] as string[] }));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...original,
+    readFile: (
+      target: Parameters<typeof original.readFile>[0],
+      ...rest: unknown[]
+    ): ReturnType<typeof original.readFile> => {
+      readFileCalls.push(String(target));
+      return (original.readFile as (...args: unknown[]) => ReturnType<typeof original.readFile>)(
+        target,
+        ...rest,
+      );
+    },
+  };
+});
+
 // Create a real VaultManager-like stub for tests
 // (avoids circular deps and allows fine-grained control of file listing)
 interface MockVaultEntry {
@@ -63,11 +84,28 @@ function createMockVault(vaultRoot: string) {
   };
 }
 
+/**
+ * Stand in for the pipeline: acknowledge every created/updated/moved event so the
+ * indexed_files row actually gets written. Without this the indexer keeps the file
+ * "pending" forever, which is the whole point of the transactional handshake.
+ */
+function attachAutoConfirm(indexer: VaultIndexer): void {
+  indexer.on('changes', (events) => {
+    for (const event of events) {
+      if (event.type !== 'deleted') {
+        indexer.confirmIndexed(event.path);
+      }
+    }
+  });
+}
+
 function createTestIndexer(opts: {
   vaultRoot: string;
   dbPath: string;
   pollIntervalMs?: number;
   stabilityDelayMs?: number;
+  /** Set false to observe the pending state before the pipeline confirms. */
+  autoConfirm?: boolean;
 }) {
   const { db } = createDatabase(opts.dbPath);
   const vault = createMockVault(opts.vaultRoot) as unknown as import('../vault.js').VaultManager;
@@ -87,6 +125,10 @@ function createTestIndexer(opts: {
     },
     logger,
   });
+
+  if (opts.autoConfirm !== false) {
+    attachAutoConfirm(indexer);
+  }
 
   return { indexer, db, logger };
 }
@@ -126,6 +168,7 @@ describe('VaultIndexer', () => {
   let dbPath: string;
 
   beforeEach(async () => {
+    readFileCalls.length = 0;
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'indexer-test-'));
     vaultRoot = path.join(tmpDir, 'vault');
     dbPath = path.join(tmpDir, 'test.db');
@@ -563,6 +606,241 @@ describe('VaultIndexer', () => {
       const totalCreated = batches.flat().filter((e) => e.type === 'created').length;
       expect(totalCreated).toBe(250);
     }, 15000);
+  });
+
+  describe('mtime/size pretest', () => {
+    it('does not read a file whose mtime and size are unchanged', async () => {
+      const absPath = await writeMd(vaultRoot, 'quiet.md', 'stable content');
+
+      const { indexer } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 100,
+        stabilityDelayMs: 20,
+      });
+
+      indexer.start();
+      // Initial scan hashes everything; wait for it plus several poll cycles.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
+      readFileCalls.length = 0;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      indexer.stop();
+
+      expect(readFileCalls.filter((p) => p === absPath)).toHaveLength(0);
+    });
+
+    it('skips hashing entirely when the stat matches (stale hash in DB is not noticed)', async () => {
+      await writeMd(vaultRoot, 'quiet.md', 'stable content');
+
+      const { indexer, db } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 100,
+        stabilityDelayMs: 20,
+      });
+
+      indexer.start();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      // Corrupt only the hash. A poller that still hashes every file would report an
+      // update; the pretest must short-circuit on the untouched mtime/size.
+      const { indexedFiles } = await import('../../db/schema.js');
+      const { eq } = await import('drizzle-orm');
+      db.update(indexedFiles)
+        .set({ contentHash: 'stale-hash' })
+        .where(eq(indexedFiles.path, 'quiet.md'))
+        .run();
+
+      const seen: FileChangeEvent[] = [];
+      indexer.on('changes', (events) => seen.push(...events));
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      indexer.stop();
+
+      expect(seen.filter((e) => e.path === 'quiet.md')).toHaveLength(0);
+    });
+
+    it('hashes and emits when the stat differs', async () => {
+      await writeMd(vaultRoot, 'busy.md', 'first content');
+
+      const { indexer } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 100,
+        stabilityDelayMs: 20,
+      });
+
+      indexer.start();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      const seen: FileChangeEvent[] = [];
+      indexer.on('changes', (events) => seen.push(...events));
+
+      await fs.writeFile(path.join(vaultRoot, 'busy.md'), 'second content, longer', 'utf-8');
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      indexer.stop();
+
+      expect(seen.some((e) => e.path === 'busy.md' && e.type === 'updated')).toBe(true);
+    });
+  });
+
+  describe('Transactional persistence (pendingIndex)', () => {
+    it('does not write the indexed_files row until confirmIndexed is called', async () => {
+      await writeMd(vaultRoot, 'pending.md', 'body');
+
+      const { indexer, db } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 200,
+        stabilityDelayMs: 20,
+        autoConfirm: false,
+      });
+
+      const changePromise = waitForChanges(indexer, 1, 5000);
+      indexer.start();
+      const events = (await changePromise).flat();
+
+      expect(events.some((e) => e.path === 'pending.md' && e.type === 'created')).toBe(true);
+
+      const { indexedFiles } = await import('../../db/schema.js');
+      expect(db.select().from(indexedFiles).all()).toHaveLength(0);
+
+      indexer.confirmIndexed('pending.md');
+      indexer.stop();
+
+      const rows = db.select().from(indexedFiles).all();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.path).toBe('pending.md');
+      expect(rows[0]?.fileType).toBe('md');
+      expect(rows[0]?.contentHash).toBe(events.find((e) => e.path === 'pending.md')?.contentHash);
+      expect(rows[0]?.size).toBe(Buffer.byteLength('body'));
+      expect(rows[0]?.indexedAt).toBeTruthy();
+    });
+
+    it('confirmIndexed for an unknown path is a no-op', async () => {
+      const { indexer, db } = createTestIndexer({ vaultRoot, dbPath, autoConfirm: false });
+
+      indexer.confirmIndexed('never-seen.md');
+
+      const { indexedFiles } = await import('../../db/schema.js');
+      expect(db.select().from(indexedFiles).all()).toHaveLength(0);
+      indexer.stop();
+    });
+
+    it('failIndexed leaves the row untouched so the next poll re-emits the change', async () => {
+      await writeMd(vaultRoot, 'retry.md', 'body');
+
+      const { indexer, db } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 150,
+        stabilityDelayMs: 20,
+        autoConfirm: false,
+      });
+
+      const emissions: FileChangeEvent[] = [];
+      indexer.on('changes', (events) => {
+        for (const event of events) {
+          if (event.path !== 'retry.md') continue;
+          emissions.push(event);
+          // Simulate the pipeline failing on every attempt.
+          indexer.failIndexed(event.path);
+        }
+      });
+
+      indexer.start();
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      indexer.stop();
+
+      const { indexedFiles } = await import('../../db/schema.js');
+      expect(db.select().from(indexedFiles).all()).toHaveLength(0);
+      expect(emissions.length).toBeGreaterThanOrEqual(2);
+      expect(emissions.every((e) => e.type === 'created')).toBe(true);
+    });
+
+    it('does not re-emit a path that is still pending with the same hash', async () => {
+      await writeMd(vaultRoot, 'inflight.md', 'body');
+
+      const { indexer } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 100,
+        stabilityDelayMs: 20,
+        autoConfirm: false,
+      });
+
+      const emissions: FileChangeEvent[] = [];
+      indexer.on('changes', (events) => {
+        emissions.push(...events.filter((e) => e.path === 'inflight.md'));
+      });
+
+      indexer.start();
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      indexer.stop();
+
+      expect(emissions).toHaveLength(1);
+    });
+
+    it('re-emits a pending path when its content changes again', async () => {
+      await writeMd(vaultRoot, 'inflight.md', 'first body');
+
+      const { indexer } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 100,
+        stabilityDelayMs: 20,
+        autoConfirm: false,
+      });
+
+      const emissions: FileChangeEvent[] = [];
+      indexer.on('changes', (events) => {
+        emissions.push(...events.filter((e) => e.path === 'inflight.md'));
+      });
+
+      indexer.start();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      await fs.writeFile(path.join(vaultRoot, 'inflight.md'), 'second body, different', 'utf-8');
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      indexer.stop();
+
+      expect(emissions.length).toBeGreaterThanOrEqual(2);
+      expect(new Set(emissions.map((e) => e.contentHash)).size).toBe(2);
+    });
+
+    it('confirmIndexed on a moved file carries the row over to the new path', async () => {
+      const content = 'content that survives a rename';
+      await writeMd(vaultRoot, 'before.md', content);
+
+      const { indexer, db } = createTestIndexer({
+        vaultRoot,
+        dbPath,
+        pollIntervalMs: 150,
+        stabilityDelayMs: 20,
+      });
+
+      indexer.start();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+
+      const { indexedFiles } = await import('../../db/schema.js');
+      expect(
+        db
+          .select()
+          .from(indexedFiles)
+          .all()
+          .map((r) => r.path),
+      ).toEqual(['before.md']);
+
+      await fs.unlink(path.join(vaultRoot, 'before.md'));
+      await writeMd(vaultRoot, 'after.md', content);
+
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      indexer.stop();
+
+      const rows = db.select().from(indexedFiles).all();
+      expect(rows.map((r) => r.path)).toEqual(['after.md']);
+    });
   });
 
   describe('Lifecycle', () => {

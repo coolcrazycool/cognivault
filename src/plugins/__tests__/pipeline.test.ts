@@ -1,6 +1,8 @@
+import { EventEmitter } from 'node:events';
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ChunkParseError } from '../../lib/chunk-errors.js';
 import type { FileChangeEvent } from '../../lib/indexer.js';
 
 // ── Mock format chunkers ──
@@ -54,6 +56,12 @@ const RICH_CONTENT =
 
 const TEST_USER_ID = 'test-user-1';
 
+interface FileFailedRecord {
+  userId: string;
+  path: string;
+  error: string;
+}
+
 // Mock PQueue that actually runs tasks
 function createMockQueue() {
   const queue = {
@@ -85,6 +93,9 @@ async function buildTestApp(opts?: {
   qdrantDelete: ReturnType<typeof vi.fn>;
   setPayload: ReturnType<typeof vi.fn>;
   dbUpdate: ReturnType<typeof vi.fn>;
+  confirmIndexed: ReturnType<typeof vi.fn>;
+  failIndexed: ReturnType<typeof vi.fn>;
+  fileFailed: FileFailedRecord[];
   metrics: {
     embeddingRequests: { inc: ReturnType<typeof vi.fn> };
     chunksProcessed: { inc: ReturnType<typeof vi.fn> };
@@ -117,6 +128,14 @@ async function buildTestApp(opts?: {
   const vaultRootPath = opts?.vaultRootPath ?? '/tmp/test-vault';
 
   const mockQueue = createMockQueue();
+
+  const confirmIndexed = vi.fn();
+  const failIndexed = vi.fn();
+  const pipelineEvents = new EventEmitter();
+  const fileFailed: FileFailedRecord[] = [];
+  pipelineEvents.on('file-failed', (payload: FileFailedRecord) => {
+    fileFailed.push(payload);
+  });
 
   const metricsObj = {
     searchDuration: { startTimer: vi.fn().mockReturnValue(vi.fn()) },
@@ -178,7 +197,7 @@ async function buildTestApp(opts?: {
         // Indexers map with test user entry
         const indexersMap = new Map();
         indexersMap.set(TEST_USER_ID, {
-          indexer: { on: vi.fn(), removeListener: vi.fn() },
+          indexer: { on: vi.fn(), removeListener: vi.fn(), confirmIndexed, failIndexed },
           queue: mockQueue,
           vault: {
             readContent,
@@ -186,13 +205,26 @@ async function buildTestApp(opts?: {
           },
         });
         f.decorate('indexers', indexersMap as unknown as FastifyInstance['indexers']);
+
+        // Stand-in for the pipeline-events plugin's EventEmitter
+        f.decorate(
+          'pipelineEvents',
+          pipelineEvents as unknown as FastifyInstance['pipelineEvents'],
+        );
       },
       { name: 'test-deps' },
     ),
   );
 
   // Satisfy fp dependency checks with empty plugins
-  for (const name of ['db', 'embedder', 'qdrant', 'metrics', 'registry'] as const) {
+  for (const name of [
+    'db',
+    'embedder',
+    'qdrant',
+    'metrics',
+    'registry',
+    'pipeline-events',
+  ] as const) {
     await app.register(fp(async () => {}, { name }));
   }
 
@@ -208,6 +240,9 @@ async function buildTestApp(opts?: {
     qdrantDelete,
     setPayload,
     dbUpdate,
+    confirmIndexed,
+    failIndexed,
+    fileFailed,
     metrics: metricsObj,
     mockQueue,
   };
@@ -512,6 +547,136 @@ describe('pipeline plugin (per-user)', () => {
       expect(embed).not.toHaveBeenCalled();
       expect(upsert).not.toHaveBeenCalled();
       expect(qdrantDelete).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
+  // ── transactional confirmation ──
+
+  describe('index confirmation handshake', () => {
+    it('confirms the file exactly once after a successful upsert', async () => {
+      const { app, confirmIndexed, failIndexed, upsert, fileFailed } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'notes/my-note.md', type: 'created', contentHash: 'abc123' },
+      ]);
+
+      expect(upsert).toHaveBeenCalledTimes(1);
+      expect(confirmIndexed).toHaveBeenCalledTimes(1);
+      expect(confirmIndexed).toHaveBeenCalledWith('notes/my-note.md');
+      expect(failIndexed).not.toHaveBeenCalled();
+      expect(fileFailed).toHaveLength(0);
+
+      await app.close();
+    });
+
+    it('confirms a valid-but-empty file after its vectors are dropped', async () => {
+      const { app, confirmIndexed, qdrantDelete, upsert, embed } = await buildTestApp({
+        readContent: vi.fn().mockResolvedValue({ content: '---\ntags: [ai]\n---\n' }),
+      });
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'notes/empty.md', type: 'updated', contentHash: 'abc123' },
+      ]);
+
+      expect(embed).not.toHaveBeenCalled();
+      expect(upsert).not.toHaveBeenCalled();
+      expect(qdrantDelete).toHaveBeenCalled();
+      expect(confirmIndexed).toHaveBeenCalledWith('notes/empty.md');
+
+      await app.close();
+    });
+
+    it('fails the file (no confirm) and emits file-failed when embedding throws', async () => {
+      const { app, confirmIndexed, failIndexed, upsert, fileFailed } = await buildTestApp({
+        embed: vi.fn().mockRejectedValue(new Error('embedder exploded')),
+      });
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'notes/my-note.md', type: 'created', contentHash: 'abc123' },
+      ]);
+
+      expect(upsert).not.toHaveBeenCalled();
+      expect(confirmIndexed).not.toHaveBeenCalled();
+      expect(failIndexed).toHaveBeenCalledWith('notes/my-note.md');
+      expect(fileFailed).toEqual([
+        {
+          userId: TEST_USER_ID,
+          path: 'notes/my-note.md',
+          error: expect.stringContaining('embedder exploded'),
+        },
+      ]);
+
+      await app.close();
+    });
+
+    it('leaves vectors and the index row alone when a chunker throws ChunkParseError', async () => {
+      mockChunkCanvas.mockImplementationOnce(() => {
+        throw new ChunkParseError('Invalid JSON in canvas "broken"', 'broken', {});
+      });
+
+      const { app, confirmIndexed, failIndexed, upsert, qdrantDelete, embed, fileFailed } =
+        await buildTestApp({
+          readContent: vi.fn().mockResolvedValue({ content: 'not json {{{' }),
+        });
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'diagrams/broken.canvas', type: 'updated', contentHash: 'abc123' },
+      ]);
+
+      expect(embed).not.toHaveBeenCalled();
+      expect(upsert).not.toHaveBeenCalled();
+      // The critical part: a parse failure must NOT wipe the file's existing vectors.
+      expect(qdrantDelete).not.toHaveBeenCalled();
+      expect(confirmIndexed).not.toHaveBeenCalled();
+      expect(failIndexed).toHaveBeenCalledWith('diagrams/broken.canvas');
+      expect(fileFailed).toHaveLength(1);
+
+      await app.close();
+    });
+
+    it('confirms a moved file so the SQLite row follows the new path', async () => {
+      const { app, confirmIndexed, setPayload } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [
+        {
+          path: 'notes/new-location.md',
+          type: 'moved',
+          contentHash: 'abc123',
+          oldPath: 'notes/old-location.md',
+        },
+      ]);
+
+      expect(setPayload).toHaveBeenCalledTimes(1);
+      expect(confirmIndexed).toHaveBeenCalledWith('notes/new-location.md');
+
+      await app.close();
+    });
+
+    it('fails a moved event that carries no oldPath instead of rewriting every point', async () => {
+      const { app, confirmIndexed, failIndexed, setPayload, fileFailed } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'notes/orphan.md', type: 'moved', contentHash: 'abc123' },
+      ]);
+
+      expect(setPayload).not.toHaveBeenCalled();
+      expect(confirmIndexed).not.toHaveBeenCalled();
+      expect(failIndexed).toHaveBeenCalledWith('notes/orphan.md');
+      expect(fileFailed).toHaveLength(1);
+
+      await app.close();
+    });
+
+    it('confirms an image file after its backlinks are resolved', async () => {
+      const { app, confirmIndexed } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'attachments/diagram.png', type: 'created', contentHash: 'imghash' },
+      ]);
+
+      expect(confirmIndexed).toHaveBeenCalledWith('attachments/diagram.png');
 
       await app.close();
     });
