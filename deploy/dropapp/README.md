@@ -70,7 +70,9 @@ https://console.bcayrqks.k8s.delta.sbrf.ru/k8s/ns/ci05490208-oasis-cognivault/
 Внешние зависимости, которые набор не создаёт:
 
 - **внешний Qdrant** DropApp — `https://tsled-oasis0001.esrt.sber.ru:6433` (резерв `…0002`);
-- **Secret `vectordb-creds`** (`username`, `password`) — заводит платформа DropApp;
+- **Secret `vectordb-creds`** (`username`, `password`) — заводит платформа DropApp.
+  У внешнего Qdrant включена его РОДНАЯ аутентификация, поэтому используется только
+  ключ `password` — как значение `QDRANT_API_KEY` (заголовок `api-key`), см. 3.5;
 - **Secret `sberosc-pull`** — создаёте вы (шаг 2);
 - **GigaChat** — `https://gigachat-ift.sberdevices.delta.sbrf.ru/v1`, авторизация клиентским сертификатом (mTLS).
 
@@ -80,7 +82,7 @@ https://console.bcayrqks.k8s.delta.sbrf.ru/k8s/ns/ci05490208-oasis-cognivault/
 Ingress oasis-cognivault-ingress (nginx, HTTP, без TLS)
   host cognivault-ui.apps.bcayrqks.k8s.delta.sbrf.ru
    └─> Service cognivault-ui:8787 ──> под UI ──┬─> Service cognivault:3000 ─> под бэкенда
-                                               │        └─> внешний Qdrant :6433 (Basic auth + TLS)
+                                               │        └─> внешний Qdrant :6433 (api-key + mTLS)
                                                │        └─> GigaChat (эмбеддинги, mTLS)
                                                ├─> GigaChat (генерация ответа, mTLS)
                                                └─> Confluence (опционально)
@@ -93,7 +95,8 @@ Ingress oasis-cognivault-ingress (nginx, HTTP, без TLS)
 - Доступ в веб-консоль DropApp к namespace `ci05490208-oasis-cognivault`.
 - Секрет **`vectordb-creds`** уже есть в namespace (его заводит платформа). Проверить:
   **Secrets** → в списке должен быть `vectordb-creds` с ключами `username`, `password`.
-  Если его нет — запросить у платформы, без него бэкенд не стартует.
+  Если его нет — запросить у платформы, без него бэкенд не стартует. По умолчанию
+  используется только `password` — это api-key родной аутентификации Qdrant (раздел 3.5).
 - TLS-материал одним комплектом: `client_crt.crt` + `client_key.key` (клиентская пара
   mTLS), `cacert.pem` (бандл внутреннего УЦ Сбера) и, если ключ зашифрован, его пароль.
   Всё это кладётся в один секрет — шаг 2.1.
@@ -250,6 +253,11 @@ OTLP — проходит абсолютно нетронутым.
 `curl` в образах нет — проверяем средствами рантайма. Открываем под, вкладку
 **Terminal**, вставляем однострочник.
 
+> Однострочники ниже проверяют **связность и TLS** — заголовок `Authorization: Basic`
+> в них исторический и на результат этой проверки не влияет (при включённом
+> `QDRANT_API_KEY` переменных `QDRANT_USERNAME`/`QDRANT_PASSWORD` в env пода вообще
+> нет, и в заголовок уйдёт `:`). Аутентификация проверяется отдельно — раздел 3.5.
+
 **Бэкенд-под (есть `node`).** Берёт `QDRANT_URL` и креды прямо из env пода, то есть
 проверяет ровно ту конфигурацию, с которой работает приложение — **без** клиентского
 сертификата и с системными корнями (базовая линия):
@@ -301,8 +309,9 @@ python -c "import base64,ssl,urllib.request as u; c=ssl._create_unverified_conte
 
 | Что видно | Что это значит | Что делать |
 |-----------|----------------|------------|
-| `{"title":"qdrant - vector search engine",…}` | сеть, TLS и Basic-креды рабочие | ничего |
-| `401` / HTML-страница логина от прокси | неверные `username`/`password` | проверить `vectordb-creds`, запросить у платформы |
+| `{"title":"qdrant - vector search engine",…}` | сеть и TLS рабочие (корень `/` у Qdrant открыт и без аутентификации — про креды это ничего не говорит) | проверить `/collections`, раздел 3.5 |
+| `401` + тело `{"status":{"error":"Unauthorized: Must provide an API key or an Authorization bearer token"}}` | это ответ **самого Qdrant**: включена его родная аутентификация, а мы прислали не тот заголовок (или ничего). Basic тут не подходит и вдобавок мешает | задать `QDRANT_API_KEY` из `vectordb-creds/password`, Basic **выключить** — раздел 3.5 |
+| `401` / HTML-страница логина от прокси, `WWW-Authenticate: Basic`, про api key ни слова | 401 отдаёт **прокси** перед Qdrant: нужна Basic-аутентификация | проверить `username`/`password` в `vectordb-creds`, включить пару `QDRANT_USERNAME`/`QDRANT_PASSWORD` (раздел 3.5) |
 | `ERR … UNABLE_TO_VERIFY_LEAF_SIGNATURE` / `SELF_SIGNED_CERT_IN_CHAIN` | сеть есть, не хватает CA внутреннего УЦ (тот же URL без проверки сертификата при этом отвечает корректно) | проверить `QDRANT_CA_PATH` и наличие `/certs/cacert.pem` — шаг 3.4 |
 | `ERR … DEPTH_ZERO_SELF_SIGNED_CERT` | самоподписанный сертификат сервера | тот же CA-бандл; если его нет — временно `QDRANT_VERIFY_SSL: "false"` |
 | `ERR … handshake failure` / `SSLV3_ALERT_HANDSHAKE_FAILURE` / `socket hang up` / `ECONNRESET` сразу после TLS-hello | **прокси требует клиентский сертификат**, а мы его не предъявили | задать `QDRANT_CERT_PATH` / `QDRANT_KEY_PATH` (шаг 3.1); проверить третьим однострочником из 3.2 |
@@ -328,6 +337,68 @@ python -c "import base64,ssl,urllib.request as u; c=ssl._create_unverified_conte
 остальное не затрагиваются. Это правильная замена глобальному
 `NODE_TLS_REJECT_UNAUTHORIZED=0`, который в `04-backend.yaml` оставлен закомментированным
 как аварийный костыль: он гасит проверку **во всём процессе**, включая GigaChat.
+
+### 3.5 Аутентификация Qdrant: `api-key` или Basic
+
+TLS и аутентификация — разные слои, и они ломаются по очереди: сначала не сходился
+TLS, потом заработавшее соединение упёрлось в 401. Схем аутентификации две, и они
+**взаимоисключающие**:
+
+| Схема | Переменные | Что уходит в запрос | Когда нужна |
+|-------|------------|---------------------|-------------|
+| Родная аутентификация Qdrant | `QDRANT_API_KEY` | заголовок `api-key: <ключ>` (его ставит сам клиент) | Qdrant включил свою аутентификацию — наш случай |
+| HTTP Basic | `QDRANT_USERNAME` + `QDRANT_PASSWORD` | `Authorization: Basic …` | перед Qdrant стоит реверс-прокси со своей Basic-аутентификацией |
+
+**Включать обе сразу нельзя.** Бэкенд падает на валидации конфига
+(`QDRANT_API_KEY and QDRANT_USERNAME/QDRANT_PASSWORD are mutually exclusive…`), и это
+не перестраховка: Qdrant видит непустой `Authorization`, который не `Bearer`, и
+отвечает 401 даже при верном api-key. Именно поэтому старая пара Basic не просто «не
+помогала», а **мешала**.
+
+**Как определить, что нужно, — по телу ответа 401:**
+
+- `{"status":{"error":"Unauthorized: Must provide an API key or an Authorization bearer
+  token"}}` — это формат **самого Qdrant**. Значит родная аутентификация: нужен
+  `QDRANT_API_KEY`, Basic убрать.
+- HTML-страница логина, `WWW-Authenticate: Basic`, текст от nginx/шлюза, про api key ни
+  слова — 401 отдаёт **прокси**: нужна пара `QDRANT_USERNAME`/`QDRANT_PASSWORD`.
+
+> Корень `/` у Qdrant отвечает `{"title":"qdrant - vector search engine",…}` и без
+> аутентификации, поэтому проверять надо **`/collections`** — именно этот путь бэкенд
+> дёргает на старте.
+
+**Перебор вариантов из вкладки Terminal бэкенд-пода.** Однострочник по очереди пробует
+`api-key`, `Bearer`, `Basic` и «без аутентификации». Идёт через `node:https` **с
+клиентским сертификатом и CA из `/certs`** — без них соединение просто не установится и
+до 401 дело не дойдёт. Ключ берётся из `QDRANT_API_KEY`, а если его нет — из
+`QDRANT_PASSWORD`:
+
+```
+node -e "const https=require('https'),fs=require('fs');const u=new URL(process.env.QDRANT_URL);const k=process.env.QDRANT_API_KEY||process.env.QDRANT_PASSWORD||'';const b=Buffer.from((process.env.QDRANT_USERNAME||'')+':'+(process.env.QDRANT_PASSWORD||'')).toString('base64');const o={hostname:u.hostname,port:u.port||443,path:'/collections',cert:fs.readFileSync('/certs/client_crt.crt'),key:fs.readFileSync('/certs/client_key.key'),ca:fs.readFileSync('/certs/cacert.pem'),passphrase:process.env.QDRANT_KEY_PASSPHRASE};const v=[['api-key',{'api-key':k}],['bearer',{authorization:'Bearer '+k}],['basic',{authorization:'Basic '+b}],['none',{}]];(async()=>{for(const [n,h] of v){await new Promise(res=>{https.request(Object.assign({},o,{headers:h}),r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>{console.log(n,r.statusCode,d.slice(0,120));res()})}).on('error',e=>{console.log(n,'ERR',e.message,e.code);res()}).end()})}})()"
+```
+
+Ожидаемый вывод при родной аутентификации Qdrant:
+
+```
+api-key 200 {"result":{"collections":[...]},"status":"ok",...}
+bearer 401 {"status":{"error":"Unauthorized: Must provide an API key or an Authorization bearer token"}}
+basic 401 {"status":{"error":"Unauthorized: Must provide an API key or an Authorization bearer token"}}
+none 401 {"status":{"error":"Unauthorized: Must provide an API key or an Authorization bearer token"}}
+```
+
+Строка `basic` в перебор попадает даже когда `QDRANT_USERNAME`/`QDRANT_PASSWORD` в env
+пода не заданы (тогда она заведомо бесполезна) — при необходимости подставьте креды из
+`vectordb-creds` прямо в команду. Если 200 отдаёт `bearer`, а не `api-key`, — перед
+Qdrant всё-таки прокси с Bearer-токеном; тогда пишите в задачу, поддержки этой схемы
+в конфиге сейчас нет.
+
+**Что менять по итогу.** Обе схемы живут в `04-backend.yaml` (блок `env`): вариант с
+`QDRANT_API_KEY` через `secretKeyRef` на `vectordb-creds`/`password` включён, вариант с
+`QDRANT_USERNAME`/`QDRANT_PASSWORD` лежит рядом закомментированным. Переключение —
+закомментировать один блок и раскомментировать другой; одновременно активными их
+оставлять нельзя. В логах после рестарта поле `qdrantAuth` строки
+`Qdrant client configured` покажет выбранную схему: `api-key`, `basic` или `none`.
+Ни ключ, ни пароль в логи не попадают.
 
 ---
 
@@ -377,9 +448,12 @@ kubectl apply -n $NS -f deploy/dropapp/05-ui.yaml
   сертификат (при пустой TLS-конфигурации строки не будет, это нормально);
 - `Qdrant client configured` с полями `qdrantAuth`, `qdrantTls`, `qdrantClientCert`,
   `qdrantVerifySsl` — быстрый способ убедиться, что под подхватил именно ту конфигурацию,
-  которую вы задали;
-- **`Connected to Qdrant`** с версией сервера — подтверждает, что сеть, TLS и Basic-auth
-  отработали;
+  которую вы задали. `qdrantAuth` принимает три значения: `api-key` (родная
+  аутентификация Qdrant, штатный режим), `basic` (прокси с HTTP Basic) и `none`.
+  Значения ключа и пароля в лог не попадают никогда;
+- **`Connected to Qdrant`** с версией сервера — подтверждает, что сеть и TLS отработали;
+  на 401 эта строка появится, а вот следующий шаг (список коллекций) упадёт — смотрите
+  раздел 3.5;
 - создание/проверка коллекции `cognivault`;
 - `Server listening`.
 
@@ -410,6 +484,8 @@ python -c "import urllib.request as u; print(u.urlopen('http://cognivault:3000/h
 | `Cannot read QDRANT_CA_PATH "…": ENOENT` | в секрете нет ключа `cacert.pem` | добавить его в `cognivault-gigachat-certs` (шаг 2.1) или снять `QDRANT_CA_PATH` |
 | `QDRANT_KEY_PATH is required when QDRANT_CERT_PATH is set` | задан только один из двух ключей mTLS | задать оба или убрать оба |
 | `QDRANT_PASSWORD is required when QDRANT_USERNAME is set` | задан только один ключ Basic-auth | проверить оба `secretKeyRef` на `vectordb-creds` |
+| `401 … Must provide an API key or an Authorization bearer token` | 401 отдаёт **сам Qdrant**: включена его родная аутентификация, а мы прислали Basic либо ничего | задать `QDRANT_API_KEY` из `vectordb-creds/password`, пару `QDRANT_USERNAME`/`QDRANT_PASSWORD` убрать — раздел 3.5 |
+| `QDRANT_API_KEY and QDRANT_USERNAME/QDRANT_PASSWORD are mutually exclusive…` | в `04-backend.yaml` активны оба варианта аутентификации | оставить ровно один блок `env`, второй закомментировать |
 | жалоба на `EMBEDDING_DIMENSIONS` | размерность не задана/нечисловая или не совпала с коллекцией | `EMBEDDING_DIMENSIONS: "2560"`; при несовпадении — новая коллекция + reindex |
 | `UNABLE_TO_VERIFY_LEAF_SIGNATURE` на GigaChat | бандл `cacert.pem` не покрывает цепочку GigaChat | вернуть `GIGACHAT_VERIFY_SSL=false` и снять `GIGACHAT_CA_PATH` (см. 3.1) |
 | `413 Request size exceeded` | шлюз режет тело запроса | снизить `GIGACHAT_MAX_REQUEST_BYTES` / `GIGACHAT_MAX_BATCH_ITEMS` |

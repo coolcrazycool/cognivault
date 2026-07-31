@@ -7,8 +7,15 @@ const configSchema = z
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
     VAULT_PATH: z.string().optional(),
     QDRANT_URL: z.string().url().default('http://localhost:6333'),
-    // External Qdrant sits behind a reverse proxy with Basic auth (native Qdrant only
-    // speaks the `api-key` header). Both must be set together, or neither.
+    // Two MUTUALLY EXCLUSIVE authentication schemes, depending on what answers the
+    // requests:
+    //  1. native Qdrant — `api-key` header (QDRANT_API_KEY below);
+    //  2. a reverse proxy in front of Qdrant — HTTP Basic (QDRANT_USERNAME/PASSWORD).
+    // Native Qdrant auth. Sent by the REST client as the `api-key` header; never
+    // combine with Basic — Qdrant sees a non-Bearer `Authorization` and rejects the
+    // request with 401 even though the api key is valid.
+    QDRANT_API_KEY: z.string().optional(),
+    // Basic auth for a proxy in front of Qdrant. Both must be set together, or neither.
     QDRANT_USERNAME: z.string().optional(),
     QDRANT_PASSWORD: z.string().optional(),
     // Per-request timeout for the Qdrant REST client (client default is 300_000 ms —
@@ -99,6 +106,23 @@ const configSchema = z
         code: z.ZodIssueCode.custom,
         path: ['QDRANT_USERNAME'],
         message: 'QDRANT_USERNAME is required when QDRANT_PASSWORD is set',
+      });
+    }
+
+    // Native Qdrant auth and proxy Basic auth are mutually exclusive: sending both an
+    // `api-key` header and `Authorization: Basic` makes Qdrant reject the request with
+    // 401 ("Must provide an API key or an Authorization bearer token"), because the
+    // Authorization header it sees is not a Bearer token. Fail fast instead of shipping
+    // a request that can only be refused.
+    if (cfg.QDRANT_API_KEY && (cfg.QDRANT_USERNAME || cfg.QDRANT_PASSWORD)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['QDRANT_API_KEY'],
+        message:
+          'QDRANT_API_KEY and QDRANT_USERNAME/QDRANT_PASSWORD are mutually exclusive: ' +
+          'sending api-key together with Authorization: Basic breaks Qdrant ' +
+          'authentication. Set QDRANT_API_KEY for native Qdrant auth, or the ' +
+          'username/password pair for a proxy that speaks HTTP Basic — never both',
       });
     }
 

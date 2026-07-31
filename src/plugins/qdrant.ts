@@ -123,14 +123,44 @@ async function logServerVersion(client: QdrantClient, log: FastifyBaseLogger): P
 }
 
 /**
- * Build the Qdrant client options. The external Qdrant sits behind a reverse proxy that
- * speaks HTTP Basic (native Qdrant only understands the `api-key` header), so the
- * credentials go out as an `Authorization` header. Without both credentials no auth
- * header is added at all.
- *
- * NEVER log the returned object — it carries the password in `headers.Authorization`.
+ * Which authentication scheme the client uses. Safe to log — it names the mode, never
+ * the credential.
  */
-function buildClientParams(): QdrantClientParams {
+export type QdrantAuthMode = 'api-key' | 'basic' | 'none';
+
+/**
+ * Pick the authentication scheme. The two are mutually exclusive (config validation
+ * rejects having both): native Qdrant reads the `api-key` header and answers 401 as
+ * soon as it sees an `Authorization` header that is not a Bearer token, so Basic must
+ * not tag along.
+ */
+function resolveAuthMode(): QdrantAuthMode {
+  if (config.QDRANT_API_KEY) {
+    return 'api-key';
+  }
+  if (config.QDRANT_USERNAME && config.QDRANT_PASSWORD) {
+    return 'basic';
+  }
+  return 'none';
+}
+
+/**
+ * Build the Qdrant client options for the chosen scheme:
+ *  - `api-key` → the client's own `apiKey` param; it sets the `api-key` header itself
+ *    and NO `Authorization` header is added;
+ *  - `basic`   → `Authorization: Basic …` for a reverse proxy in front of Qdrant;
+ *  - `none`    → no credentials at all.
+ *
+ * On `apiKey` the client derives `this._https = https ?? typeof apiKey === 'string'`,
+ * but a `url` immediately overrides the scheme from the URL itself, so an `https://`
+ * QDRANT_URL is unaffected and the `https` param stays untouched (we never pass it).
+ * The only leftover is a `console.warn` about an insecure connection when QDRANT_URL
+ * is plain `http://` — accurate, and harmless for local development.
+ *
+ * NEVER log the returned object — it carries the api key in `apiKey` and the password
+ * in `headers.Authorization`.
+ */
+function buildClientParams(mode: QdrantAuthMode): QdrantClientParams {
   const params: QdrantClientParams = {
     url: config.QDRANT_URL,
     timeout: config.QDRANT_TIMEOUT_MS,
@@ -140,11 +170,15 @@ function buildClientParams(): QdrantClientParams {
     checkCompatibility: false,
   };
 
-  const user = config.QDRANT_USERNAME;
-  const pass = config.QDRANT_PASSWORD;
-  if (user && pass) {
+  if (mode === 'api-key') {
+    params.apiKey = config.QDRANT_API_KEY;
+    return params;
+  }
+
+  if (mode === 'basic') {
+    const credentials = `${config.QDRANT_USERNAME}:${config.QDRANT_PASSWORD}`;
     params.headers = {
-      Authorization: `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`,
+      Authorization: `Basic ${Buffer.from(credentials).toString('base64')}`,
     };
   }
 
@@ -158,15 +192,16 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
   // undici Agent, so the only reachable seam is `tls.connect` (see qdrant-tls.ts).
   installQdrantTls(config, fastify.log);
 
-  const params = buildClientParams();
+  const authMode = resolveAuthMode();
+  const params = buildClientParams(authMode);
   const client = new QdrantClient(params);
 
-  // Log MODES only — never the header value, the params object, cert paths or the
-  // key passphrase.
+  // Log MODES only — never the api key, the header value, the params object, cert
+  // paths or the key passphrase.
   fastify.log.info(
     {
       qdrantUrl: config.QDRANT_URL,
-      qdrantAuth: params.headers ? 'basic' : 'none',
+      qdrantAuth: authMode,
       qdrantTimeoutMs: config.QDRANT_TIMEOUT_MS,
       ...describeQdrantTls(config),
     },

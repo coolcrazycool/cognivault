@@ -410,15 +410,22 @@ describe('qdrantPlugin', () => {
   });
 
   describe('client construction', () => {
-    const QDRANT_ENV_KEYS = ['QDRANT_USERNAME', 'QDRANT_PASSWORD', 'QDRANT_TIMEOUT_MS'] as const;
+    const QDRANT_ENV_KEYS = [
+      'QDRANT_API_KEY',
+      'QDRANT_USERNAME',
+      'QDRANT_PASSWORD',
+      'QDRANT_TIMEOUT_MS',
+    ] as const;
 
     const USERNAME = 'qdrant-reader';
     const PASSWORD = 'sup3r-s3cr3t-p@ss';
+    const API_KEY = 'qdr4nt-@pi-k3y-v3ry-s3cr3t';
 
     interface ClientParams {
       url?: string;
       timeout?: number;
       checkCompatibility?: boolean;
+      apiKey?: string;
       headers?: Record<string, string>;
     }
 
@@ -473,6 +480,18 @@ describe('qdrantPlugin', () => {
       }
     });
 
+    it('passes the api key to the client and sends no Authorization header', async () => {
+      const { close, params } = await start({ QDRANT_API_KEY: API_KEY });
+
+      // The client sets the `api-key` header itself — we must not add one ourselves.
+      expect(params.apiKey).toBe(API_KEY);
+      expect(params.headers?.Authorization).toBeUndefined();
+      // `https` stays untouched: the scheme comes from the URL.
+      expect((params as { https?: boolean }).https).toBeUndefined();
+
+      await close();
+    });
+
     it('sends a Basic Authorization header when both credentials are set', async () => {
       const { close, params } = await start({
         QDRANT_USERNAME: USERNAME,
@@ -485,16 +504,31 @@ describe('qdrantPlugin', () => {
         'utf8',
       );
       expect(decoded).toBe(`${USERNAME}:${PASSWORD}`);
+      // Basic auth must not smuggle an api key alongside it.
+      expect(params.apiKey).toBeUndefined();
 
       await close();
     });
 
-    it('sends no Authorization header when credentials are absent', async () => {
+    it('sends neither an api key nor an Authorization header when nothing is set', async () => {
       const { close, params } = await start({});
 
+      expect(params.apiKey).toBeUndefined();
       expect(params.headers?.Authorization).toBeUndefined();
 
       await close();
+    });
+
+    it('refuses to boot when the api key and Basic credentials are both set', async () => {
+      for (const key of QDRANT_ENV_KEYS) {
+        delete process.env[key];
+      }
+      process.env.QDRANT_API_KEY = API_KEY;
+      process.env.QDRANT_USERNAME = USERNAME;
+      process.env.QDRANT_PASSWORD = PASSWORD;
+
+      vi.resetModules();
+      await expect(import('../../config.js')).rejects.toThrow(/mutually exclusive/);
     });
 
     it('disables the built-in compatibility check and forwards the timeout', async () => {
@@ -510,6 +544,18 @@ describe('qdrantPlugin', () => {
       const { close, params } = await start({});
 
       expect(params.timeout).toBe(30_000);
+
+      await close();
+    });
+
+    it('never leaks the api key into the logs and reports qdrantAuth "api-key"', async () => {
+      const { close, logCalls } = await start({ QDRANT_API_KEY: API_KEY });
+
+      expect(JSON.stringify(logCalls)).not.toContain(API_KEY);
+      const authLog = logCalls.find(
+        (args) => (args[0] as { qdrantAuth?: string } | undefined)?.qdrantAuth === 'api-key',
+      );
+      expect(authLog).toBeDefined();
 
       await close();
     });

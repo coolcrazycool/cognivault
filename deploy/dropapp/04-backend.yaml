@@ -85,21 +85,45 @@ spec:
                   name: cognivault-gigachat-certs
                   key: key.passphrase
                   optional: true
-            # Basic-auth внешнего Qdrant (QDRANT_URL в ConfigMap). Секрет
-            # vectordb-creds заводит платформа DropApp. Задавать ОБА ключа или
-            # НИ ОДНОГО: при одном приложение падает на валидации конфига.
-            # При откате на внутрикластерный Qdrant (99-qdrant-inhouse.yaml)
-            # этот блок убрать вместе со сменой QDRANT_URL.
-            - name: QDRANT_USERNAME
-              valueFrom:
-                secretKeyRef:
-                  name: vectordb-creds
-                  key: username
-            - name: QDRANT_PASSWORD
+            # ── Аутентификация внешнего Qdrant (QDRANT_URL в ConfigMap) ────
+            # Секрет vectordb-creds (ключи username/password) заводит платформа
+            # DropApp. Вариантов аутентификации ДВА, и включать их ОДНОВРЕМЕННО
+            # НЕЛЬЗЯ — приложение падает на валидации конфига, а Qdrant всё равно
+            # отверг бы такой запрос: он видит непустой `Authorization`, который
+            # не Bearer, и отвечает 401 даже при верном api-key.
+            #
+            # ВАРИАНТ 1 (основной, действующий): родная аутентификация Qdrant.
+            # Клиент отправляет ключ заголовком `api-key`. Признак того, что нужен
+            # именно он, — 401 с телом от САМОГО Qdrant:
+            #   {"status":{"error":"Unauthorized: Must provide an API key or an
+            #    Authorization bearer token"}}
+            # Ключ лежит в vectordb-creds под именем password (поле username при
+            # этой схеме не используется вовсе).
+            - name: QDRANT_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: vectordb-creds
                   key: password
+            #
+            # ВАРИАНТ 2 (альтернатива, выключен): HTTP Basic. Нужен, ТОЛЬКО если
+            # перед Qdrant стоит реверс-прокси со своей Basic-аутентификацией —
+            # признак: 401 отдаёт прокси (HTML-страница логина, заголовок
+            # WWW-Authenticate: Basic, никакого упоминания api key в теле).
+            # Чтобы переключиться: закомментировать QDRANT_API_KEY выше и
+            # раскомментировать обе строки ниже — задавать ОБА ключа или НИ ОДНОГО.
+            # - name: QDRANT_USERNAME
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: vectordb-creds
+            #       key: username
+            # - name: QDRANT_PASSWORD
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: vectordb-creds
+            #       key: password
+            #
+            # При откате на внутрикластерный Qdrant (99-qdrant-inhouse.yaml,
+            # аутентификации нет) весь этот блок убрать вместе со сменой QDRANT_URL.
             # Пароль приватного ключа, которым бэкенд предъявляется прокси перед
             # внешним Qdrant (QDRANT_CERT_PATH / QDRANT_KEY_PATH в ConfigMap).
             # Ключ переиспользуется от GigaChat, поэтому и пароль тот же секрет.

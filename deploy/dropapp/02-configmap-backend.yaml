@@ -20,9 +20,20 @@ data:
   # ── Векторное хранилище (ВНЕШНИЙ Qdrant в DropApp) ────────────────────
   # Приложение подключается на старте и создаёт коллекцию `cognivault` — Qdrant
   # должен быть доступен ДО выкатки, иначе под уходит в CrashLoop (startupProbe
-  # даёт ~150 с ретраев). Перед Qdrant стоит реверс-прокси с HTTP Basic:
-  # QDRANT_USERNAME/QDRANT_PASSWORD приходят из секрета vectordb-creds
-  # (см. 04-backend.yaml) — здесь их быть не должно.
+  # даёт ~150 с ретраев).
+  #
+  # АУТЕНТИФИКАЦИЯ. Вариантов два, и они ВЗАИМОИСКЛЮЧАЮЩИЕ:
+  #   1) родная аутентификация Qdrant — заголовок `api-key`, значение из
+  #      QDRANT_API_KEY. Это наш случай: внешний Qdrant отвечает 401 с телом
+  #      {"status":{"error":"Unauthorized: Must provide an API key or an
+  #      Authorization bearer token"}} — текст самого Qdrant, не прокси;
+  #   2) HTTP Basic (QDRANT_USERNAME/QDRANT_PASSWORD) — нужен, только если перед
+  #      Qdrant стоит реверс-прокси со своей Basic-аутентификацией.
+  # Включать оба сразу НЕЛЬЗЯ: приложение падает на валидации конфига, а Qdrant
+  # всё равно отверг бы запрос — он видит непустой `Authorization`, который не
+  # Bearer, и отвечает 401 даже при верном api-key.
+  # Сами значения СЕКРЕТНЫ и в ConfigMap не кладутся: они приходят из секрета
+  # vectordb-creds через secretKeyRef (см. 04-backend.yaml).
   # Резервный хост, переключается вручную (клиентской балансировки нет):
   #   https://tsled-oasis0002.esrt.sber.ru:6433
   # Откат на внутрикластерный Qdrant (99-qdrant-inhouse.yaml): "http://qdrant:6333".
