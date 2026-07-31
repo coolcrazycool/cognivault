@@ -1256,20 +1256,87 @@
     bubble.appendChild(wrap);
   }
 
+  /* ---- 👍/👎 answer feedback (wave 5.4) ----
+   * Sits right under the assistant bubble, next to the sources strip. A click
+   * POSTs {chat_id, message_index, vote} to /api/feedback (the server appends it
+   * to the per-user rag_log.jsonl); the vote is then reflected on the button and
+   * both buttons are disabled. State lives ONLY in the DOM — nothing is cached
+   * or persisted client-side, so a page reload simply shows fresh buttons.
+   * `messageIndex` is the position in state.messages / history.messages, which
+   * is exactly what the chat route logs as `message_index`. */
+  function renderFeedback(bubble, chatId, messageIndex) {
+    if (!bubble || !chatId) return;
+    if (!(messageIndex >= 0)) return;
+    if (bubble.querySelector(".fb")) return; // idempotent per bubble
+
+    const wrap = el("div", "fb");
+    wrap.style.cssText = "display:flex;gap:8px;margin-top:10px";
+    const mk = (glyph, label) => {
+      const b = el("button", "linkbtn", glyph);
+      b.type = "button";
+      b.title = label;
+      b.setAttribute("aria-label", label);
+      b.setAttribute("aria-pressed", "false");
+      return b;
+    };
+    const up = mk("👍", "Хороший ответ");
+    const down = mk("👎", "Плохой ответ");
+    const buttons = [up, down];
+    let sending = false;
+
+    const vote = async (btn, value) => {
+      if (sending || btn.getAttribute("aria-pressed") === "true") return;
+      sending = true;
+      buttons.forEach((b) => { b.disabled = true; });
+      try {
+        await apiSend("/api/feedback", "POST", {
+          chat_id: chatId,
+          message_index: messageIndex,
+          vote: value,
+        });
+        btn.setAttribute("aria-pressed", "true");
+        btn.style.borderColor = "var(--accent)";
+        btn.style.color = "var(--accent)";
+        buttons.forEach((b) => { if (b !== btn) b.style.opacity = ".35"; });
+      } catch (e) {
+        if (!e.handled) toast("warn", "Не удалось отправить оценку", e.message);
+        sending = false;
+        buttons.forEach((b) => { b.disabled = false; });
+      }
+    };
+    up.addEventListener("click", () => vote(up, "up"));
+    down.addEventListener("click", () => vote(down, "down"));
+
+    wrap.appendChild(up);
+    wrap.appendChild(down);
+    bubble.appendChild(wrap);
+  }
+
   /* ---- inline citation linkifier ----
    * Turns `[Источник N]`, `[Источник 1, 2]`, `[Источники 1, 2, 3]` inside a
    * rendered answer into hyperlinks. Only numbers whose source carries a safe
-   * http(s) `url` become links; others stay plain text. Runs over text nodes
-   * via a TreeWalker that skips <a>/<code>/<pre>, so code and existing links are
-   * never touched. Applied once on final render (done / abort / history), not
-   * per streaming token. hrefs are set via DOM property, never string-built. */
+   * http(s) `url` become links; numbers of link-less sources stay plain text.
+   * Numbers the model invented (not in the source list at all) also stay plain
+   * text but get a `cite-bad` class and are reported once per message. Runs over
+   * text nodes via a TreeWalker that skips <a>/<code>/<pre>, so code and existing
+   * links are never touched. Applied once on final render (done / abort /
+   * history), not per streaming token. hrefs are set via DOM property, never
+   * string-built. */
   function linkifyCitations(container, sources) {
-    if (!container || !sources || !sources.length) return;
+    if (!container) return;
     const urlByN = new Map();
-    sources.forEach((s) => {
-      if (s && s.n != null && s.url && /^https?:\/\//i.test(s.url)) urlByN.set(Number(s.n), s.url);
+    const validN = new Set();
+    (sources || []).forEach((s) => {
+      if (!s || s.n == null) return;
+      const n = Number(s.n);
+      if (!Number.isFinite(n)) return;
+      validN.add(n);
+      if (s.url && /^https?:\/\//i.test(s.url)) urlByN.set(n, s.url);
     });
-    if (!urlByN.size) return;
+    // No early return on an empty source list: an answer WITHOUT sources that
+    // still cites "[Источник 1]" is the purest form of the bug we are hunting,
+    // so it must be flagged too. The TreeWalker below only visits text nodes
+    // that actually contain a citation, so this costs nothing otherwise.
 
     const hasCite = (t) => /\[\s*Источник(?:и|а)?\s+\d/.test(t);
     const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
@@ -1284,10 +1351,18 @@
     const targets = [];
     let node;
     while ((node = walker.nextNode())) targets.push(node);
-    targets.forEach((n) => replaceCitationsInText(n, urlByN));
+    const unknownN = new Set();
+    targets.forEach((n) => replaceCitationsInText(n, urlByN, validN, unknownN));
+    // The only console.* in this file: a citation pointing at a source that was
+    // never retrieved is an answer-quality bug we need to see while debugging,
+    // but it is not actionable for the user, so no toast — one warn per message.
+    if (unknownN.size) {
+      const list = Array.from(unknownN).sort((a, b) => a - b);
+      console.warn("[cognivault] citations reference unknown sources:", list, "available:", validN.size);
+    }
   }
 
-  function replaceCitationsInText(node, urlByN) {
+  function replaceCitationsInText(node, urlByN, validN, unknownN) {
     const text = node.nodeValue;
     // g1 = "[Источник " (bracket + word + spaces); g2 = numbers+separators; g3 = "]"
     const re = /(\[\s*Источник(?:и|а)?\s+)(\d+(?:\s*[,;]\s*\d+)*)(\s*\])/g;
@@ -1299,7 +1374,14 @@
       // split the numbers portion, keeping separators as text; wrap only digits
       m[2].split(/(\d+)/).forEach((part) => {
         if (!part) return;
-        const url = /^\d+$/.test(part) ? urlByN.get(Number(part)) : undefined;
+        if (!/^\d+$/.test(part)) { // separator (comma / semicolon / spaces)
+          frag.appendChild(document.createTextNode(part));
+          return;
+        }
+        const n = Number(part);
+        const known = validN.has(n);
+        if (!known) unknownN.add(n);
+        const url = known ? urlByN.get(n) : undefined;
         if (url) {
           const a = document.createElement("a");
           a.href = url; // DOM property — not string-interpolated
@@ -1312,8 +1394,14 @@
           ext.textContent = "↗";
           a.appendChild(ext);
           frag.appendChild(a);
-        } else {
+        } else if (known) {
           frag.appendChild(document.createTextNode(part));
+        } else {
+          // hallucinated number: plain text, but tagged so it can be styled later
+          const bad = document.createElement("span");
+          bad.className = "cite-bad";
+          bad.textContent = part;
+          frag.appendChild(bad);
         }
       });
       frag.appendChild(document.createTextNode(m[3]));
@@ -1328,7 +1416,7 @@
   function renderThread() {
     dom.thread.textContent = "";
     if (!state.messages.length) { renderWelcome(); return; }
-    state.messages.forEach((m) => {
+    state.messages.forEach((m, i) => {
       if (m.role === "user") {
         addMessageNode("user", m.content);
       } else {
@@ -1336,6 +1424,7 @@
         content.innerHTML = renderMarkdown(m.content || "");
         linkifyCitations(content, m.sources);
         renderSources(bubble, m.sources, m.context_chars);
+        renderFeedback(bubble, state.chatId, i);
       }
     });
     scrollStreamToBottom();
@@ -1444,6 +1533,7 @@
             content.innerHTML = renderMarkdown(answer);
             linkifyCitations(content, sourcesData);
             state.messages.push({ role: "assistant", content: answer, sources: sourcesData, context_chars: contextChars, rag: state.rag });
+            renderFeedback(bubble, state.chatId, state.messages.length - 1);
             break;
           case "error": {
             if (cursor.parentNode) cursor.remove();
@@ -1464,6 +1554,9 @@
           content.innerHTML = renderMarkdown(answer);
           linkifyCitations(content, sourcesData);
           state.messages.push({ role: "assistant", content: answer, sources: sourcesData, context_chars: contextChars, rag: state.rag });
+          // Оборванный ответ тоже логируется сервером (truncated=true) — значит
+          // его можно оценить.
+          renderFeedback(bubble, state.chatId, state.messages.length - 1);
         } else {
           bubble.parentNode && bubble.parentNode.remove();
         }
