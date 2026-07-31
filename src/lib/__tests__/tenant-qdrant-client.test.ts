@@ -155,6 +155,7 @@ describe('TenantQdrantClient', () => {
       });
 
       expect(mockClient.delete).toHaveBeenCalledWith('cognivault', {
+        wait: true,
         filter: {
           must: [
             { key: 'path', match: { value: '/old.md' } },
@@ -170,10 +171,18 @@ describe('TenantQdrantClient', () => {
       });
 
       expect(mockClient.delete).toHaveBeenCalledWith('cognivault', {
+        wait: true,
         filter: {
           must: [{ key: 'user_id', match: { value: USER_ID } }],
         },
       });
+    });
+
+    it('always passes wait: true so callers observe the delete before re-writing', async () => {
+      await tenant.delete({ filter: { must: [{ key: 'chunk_index', range: { gte: 0 } }] } });
+
+      const [, payload] = mockClient.delete.mock.calls[0] as [string, { wait?: boolean }];
+      expect(payload.wait).toBe(true);
     });
   });
 

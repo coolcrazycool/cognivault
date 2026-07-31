@@ -86,7 +86,10 @@ export class TenantQdrantClient {
 
   async delete(params: DeleteParams): Promise<unknown> {
     const { filter } = params;
+    // wait: true — callers (pipeline re-index, admin purge) must observe the delete
+    // before writing replacements, otherwise stale points can survive the operation.
     return this.client.delete(COLLECTION_NAME, {
+      wait: true,
       filter: this.buildFilter(filter),
     });
   }

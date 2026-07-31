@@ -1,5 +1,5 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import { config } from '../config.js';
 import { resolveDimensions } from '../lib/embedding.js';
@@ -14,7 +14,25 @@ declare module 'fastify' {
 
 export const COLLECTION_NAME = 'cognivault';
 
+/**
+ * Version of the `@qdrant/js-client-rest` dependency. Hardcoded on purpose:
+ * importing package.json would require JSON import assertions in ESM.
+ * Keep in sync with the version range in package.json.
+ */
+const QDRANT_CLIENT_VERSION = '1.17.0';
+
+/** Largest tolerated minor-version gap between client and server before warning. */
+const MAX_MINOR_SKEW = 1;
+
+type PayloadFieldSchema = Parameters<QdrantClient['createPayloadIndex']>[1]['field_schema'];
+
 const TEXT_INDEXES = ['text', 'title', 'section_path'] as const;
+
+const TEXT_INDEX_SCHEMA: PayloadFieldSchema = {
+  type: 'text',
+  tokenizer: 'multilingual',
+  lowercase: true,
+};
 
 const PAYLOAD_INDEXES: Array<{ field: string; type: 'keyword' | 'integer' }> = [
   { field: 'path', type: 'keyword' },
@@ -25,10 +43,89 @@ const PAYLOAD_INDEXES: Array<{ field: string; type: 'keyword' | 'integer' }> = [
   { field: 'chunk_index', type: 'integer' },
 ];
 
+/**
+ * Qdrant answers "index already exists" differently across versions (409 status or a
+ * plain message), so probe both shapes before deciding an error is benign.
+ */
+function isAlreadyExistsError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) {
+    return false;
+  }
+  const candidate = err as { message?: unknown; status?: unknown; statusCode?: unknown };
+  if (candidate.status === 409 || candidate.statusCode === 409) {
+    return true;
+  }
+  return typeof candidate.message === 'string' && /already exists/i.test(candidate.message);
+}
+
+/**
+ * Create a payload index if it is missing. Idempotent: "already exists" is silently
+ * ignored. Any other failure is logged but never thrown — a missing index degrades
+ * search quality, it must not prevent the service from starting.
+ */
+async function ensurePayloadIndex(
+  client: QdrantClient,
+  field: string,
+  fieldSchema: PayloadFieldSchema,
+  log: FastifyBaseLogger,
+): Promise<void> {
+  try {
+    await client.createPayloadIndex(COLLECTION_NAME, {
+      field_name: field,
+      field_schema: fieldSchema,
+    });
+  } catch (err: unknown) {
+    if (isAlreadyExistsError(err)) {
+      return;
+    }
+    log.error({ err, field }, 'Failed to create Qdrant payload index');
+  }
+}
+
+/** Parse "1.16.3" into { major: 1, minor: 16 }; undefined when unparseable. */
+function parseVersion(version: string): { major: number; minor: number } | undefined {
+  const match = /^(\d+)\.(\d+)/.exec(version);
+  if (!match) {
+    return undefined;
+  }
+  return { major: Number(match[1]), minor: Number(match[2]) };
+}
+
+/**
+ * Log the Qdrant server version at startup and warn on client/server skew.
+ * Never fatal — an unreachable version endpoint must not block startup.
+ */
+async function logServerVersion(client: QdrantClient, log: FastifyBaseLogger): Promise<void> {
+  try {
+    const info = await client.versionInfo();
+    const qdrantVersion = info.version;
+    log.info({ qdrantVersion, clientVersion: QDRANT_CLIENT_VERSION }, 'Connected to Qdrant');
+
+    const server = parseVersion(qdrantVersion);
+    const clientVer = parseVersion(QDRANT_CLIENT_VERSION);
+    if (!server || !clientVer) {
+      return;
+    }
+    if (
+      server.major !== clientVer.major ||
+      Math.abs(server.minor - clientVer.minor) > MAX_MINOR_SKEW
+    ) {
+      log.warn(
+        { qdrantVersion, clientVersion: QDRANT_CLIENT_VERSION },
+        'Qdrant server/client version skew — API incompatibilities are possible',
+      );
+    }
+  } catch (err: unknown) {
+    log.warn({ err }, 'Could not determine Qdrant server version');
+  }
+}
+
 async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
   const dimensions = resolveDimensions(config);
 
   const client = new QdrantClient({ url: config.QDRANT_URL });
+
+  await logServerVersion(client, fastify.log);
 
   // Check if collection exists; create if not (idempotent restarts)
   const { collections } = await client.getCollections();
@@ -59,41 +156,21 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
 
     // Create payload indexes for filtering
     for (const { field, type } of PAYLOAD_INDEXES) {
-      await client.createPayloadIndex(COLLECTION_NAME, {
-        field_name: field,
-        field_schema: type,
-      });
+      await ensurePayloadIndex(client, field, type, fastify.log);
     }
   }
 
   // Create full-text indexes for lexical search — idempotent (safe on restart)
   for (const field of TEXT_INDEXES) {
-    try {
-      await client.createPayloadIndex(COLLECTION_NAME, {
-        field_name: field,
-        field_schema: {
-          type: 'text',
-          tokenizer: 'multilingual',
-          lowercase: true,
-        },
-      });
-    } catch {
-      // Index already exists — safe to ignore on restart
-    }
+    await ensurePayloadIndex(client, field, TEXT_INDEX_SCHEMA, fastify.log);
   }
 
   // Create user_id keyword index — idempotent (safe on restart)
-  try {
-    await client.createPayloadIndex(COLLECTION_NAME, {
-      field_name: 'user_id',
-      field_schema: 'keyword',
-    });
-  } catch {
-    // Index already exists — safe to ignore
-  }
+  await ensurePayloadIndex(client, 'user_id', 'keyword', fastify.log);
 
   // Purge legacy vectors without user_id payload
   await client.delete(COLLECTION_NAME, {
+    wait: true,
     filter: {
       must: [{ is_empty: { key: 'user_id' } }],
     },
@@ -108,6 +185,7 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
   // Expose purge function for user removal cleanup
   fastify.decorate('purgeUserVectors', async (userId: string) => {
     await client.delete(COLLECTION_NAME, {
+      wait: true,
       filter: { must: [{ key: 'user_id', match: { value: userId } }] },
     });
   });

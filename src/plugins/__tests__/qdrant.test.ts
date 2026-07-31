@@ -12,6 +12,7 @@ const mockGetCollection = vi.fn();
 const mockCreateCollection = vi.fn();
 const mockCreatePayloadIndex = vi.fn();
 const mockDelete = vi.fn();
+const mockVersionInfo = vi.fn();
 
 vi.mock('@qdrant/js-client-rest', () => {
   class MockQdrantClient {
@@ -20,14 +21,40 @@ vi.mock('@qdrant/js-client-rest', () => {
     createCollection = mockCreateCollection;
     createPayloadIndex = mockCreatePayloadIndex;
     delete = mockDelete;
+    versionInfo = mockVersionInfo;
   }
   return { QdrantClient: MockQdrantClient };
 });
+
+/** Fields the plugin indexes when it has to create the collection from scratch. */
+const ALL_INDEXED_FIELDS = [
+  'path',
+  'tags',
+  'project',
+  'status',
+  'type',
+  'chunk_index',
+  'text',
+  'title',
+  'section_path',
+  'user_id',
+];
+
+/** Fields re-asserted idempotently on every start, even for an existing collection. */
+const IDEMPOTENT_INDEXED_FIELDS = ['text', 'title', 'section_path', 'user_id'];
+
+function indexedFieldNames(): string[] {
+  return mockCreatePayloadIndex.mock.calls.map((call) => call[1].field_name);
+}
 
 describe('qdrantPlugin', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockDelete.mockResolvedValue({});
+    mockVersionInfo.mockResolvedValue({
+      title: 'qdrant - vector search engine',
+      version: '1.16.3',
+    });
     // Existing-collection probe defaults to a matching vector size (openai 1536)
     mockGetCollection.mockResolvedValue({
       config: { params: { vectors: { size: 1536, distance: 'Cosine' } } },
@@ -83,16 +110,8 @@ describe('qdrantPlugin', () => {
     await app.register(qdrantPlugin);
     await app.ready();
 
-    const indexedFields = mockCreatePayloadIndex.mock.calls.map((call) => call[1].field_name);
-
-    expect(indexedFields).toContain('path');
-    expect(indexedFields).toContain('tags');
-    expect(indexedFields).toContain('project');
-    expect(indexedFields).toContain('status');
-    expect(indexedFields).toContain('type');
-    expect(indexedFields).toContain('chunk_index');
     // 6 keyword/integer indexes + 3 full-text indexes + 1 user_id keyword index
-    expect(mockCreatePayloadIndex).toHaveBeenCalledTimes(10);
+    expect(indexedFieldNames().sort()).toEqual([...ALL_INDEXED_FIELDS].sort());
 
     await app.close();
   });
@@ -135,6 +154,7 @@ describe('qdrantPlugin', () => {
     await app.ready();
 
     expect(mockDelete).toHaveBeenCalledWith('cognivault', {
+      wait: true,
       filter: {
         must: [{ is_empty: { key: 'user_id' } }],
       },
@@ -201,13 +221,7 @@ describe('qdrantPlugin', () => {
     // Keyword/integer indexes are NOT created (inside if (!exists) block)
     expect(mockCreateCollection).not.toHaveBeenCalled();
     // Text indexes + user_id index ARE created idempotently (outside if (!exists) block)
-    const indexedFields = mockCreatePayloadIndex.mock.calls.map((call) => call[1].field_name);
-    expect(indexedFields).toContain('text');
-    expect(indexedFields).toContain('title');
-    expect(indexedFields).toContain('section_path');
-    expect(indexedFields).toContain('user_id');
-    // 3 text indexes + 1 user_id index
-    expect(mockCreatePayloadIndex).toHaveBeenCalledTimes(4);
+    expect(indexedFieldNames().sort()).toEqual([...IDEMPOTENT_INDEXED_FIELDS].sort());
 
     await app.close();
   });
@@ -235,6 +249,156 @@ describe('qdrantPlugin', () => {
         lowercase: true,
       });
     }
+
+    await app.close();
+  });
+
+  describe('payload index error handling', () => {
+    it('logs an error and still starts when index creation fails for a real reason', async () => {
+      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      mockCreatePayloadIndex.mockRejectedValue(new Error('Connection refused'));
+
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+
+      const app = Fastify({ logger: false });
+      const errorSpy = vi.spyOn(app.log, 'error');
+
+      await app.register(qdrantPlugin);
+      await app.ready();
+
+      expect(app.createTenantQdrant).toBeDefined();
+      expect(errorSpy).toHaveBeenCalled();
+      const loggedFields = errorSpy.mock.calls.map(
+        (call) => (call[0] as { field?: string } | undefined)?.field,
+      );
+      expect(loggedFields).toContain('user_id');
+
+      await app.close();
+    });
+
+    it('stays silent when the index already exists', async () => {
+      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      mockCreatePayloadIndex.mockRejectedValue(
+        new Error('Index already exists for field "user_id"'),
+      );
+
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+
+      const app = Fastify({ logger: false });
+      const errorSpy = vi.spyOn(app.log, 'error');
+
+      await app.register(qdrantPlugin);
+      await app.ready();
+
+      expect(errorSpy).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('stays silent when the server answers 409 Conflict', async () => {
+      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      mockCreatePayloadIndex.mockRejectedValue(
+        Object.assign(new Error('Conflict'), { status: 409 }),
+      );
+
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+
+      const app = Fastify({ logger: false });
+      const errorSpy = vi.spyOn(app.log, 'error');
+
+      await app.register(qdrantPlugin);
+      await app.ready();
+
+      expect(errorSpy).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
+  describe('server version logging', () => {
+    it('logs the server version on startup', async () => {
+      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      mockCreatePayloadIndex.mockResolvedValue({});
+
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+
+      const app = Fastify({ logger: false });
+      const infoSpy = vi.spyOn(app.log, 'info');
+
+      await app.register(qdrantPlugin);
+      await app.ready();
+
+      const versionLog = infoSpy.mock.calls.find(
+        (call) => (call[0] as { qdrantVersion?: string } | undefined)?.qdrantVersion === '1.16.3',
+      );
+      expect(versionLog).toBeDefined();
+
+      await app.close();
+    });
+
+    it('warns on major version skew but still starts', async () => {
+      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      mockCreatePayloadIndex.mockResolvedValue({});
+      mockVersionInfo.mockResolvedValue({ title: 'qdrant', version: '2.0.0' });
+
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+
+      const app = Fastify({ logger: false });
+      const warnSpy = vi.spyOn(app.log, 'warn');
+
+      await app.register(qdrantPlugin);
+      await app.ready();
+
+      expect(warnSpy).toHaveBeenCalled();
+      expect(app.createTenantQdrant).toBeDefined();
+
+      await app.close();
+    });
+
+    it('starts even when the version probe fails', async () => {
+      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      mockCreatePayloadIndex.mockResolvedValue({});
+      mockVersionInfo.mockRejectedValue(new Error('Connection refused'));
+
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+
+      const app = Fastify({ logger: false });
+      const warnSpy = vi.spyOn(app.log, 'warn');
+
+      await app.register(qdrantPlugin);
+      await app.ready();
+
+      expect(warnSpy).toHaveBeenCalled();
+      expect(app.createTenantQdrant).toBeDefined();
+
+      await app.close();
+    });
+  });
+
+  it('purges user vectors with wait: true', async () => {
+    mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+    mockCreatePayloadIndex.mockResolvedValue({});
+
+    const Fastify = (await import('fastify')).default;
+    const { default: qdrantPlugin } = await import('../qdrant.js');
+
+    const app = Fastify({ logger: false });
+    await app.register(qdrantPlugin);
+    await app.ready();
+
+    mockDelete.mockClear();
+    await app.purgeUserVectors('user-42');
+
+    expect(mockDelete).toHaveBeenCalledWith('cognivault', {
+      wait: true,
+      filter: { must: [{ key: 'user_id', match: { value: 'user-42' } }] },
+    });
 
     await app.close();
   });
