@@ -113,6 +113,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "grader_keep_top": 2,
         "rerank_candidates": 20,
     },
+    # Prompt overrides. ``None`` (NOT the prompt text) is the default on purpose:
+    # it means "use the built-in prompt from the code". Storing the full text as
+    # the default would freeze every install that ever saved settings on the
+    # edition of the prompt that happened to be current that day — later prompt
+    # improvements would never reach them. Only a deliberate user edit persists
+    # text here; clearing the field writes ``None`` again and re-joins the
+    # built-in default.
+    "prompts": {"system": None, "context_reminder": None},
     "env": {
         "pip_index_url": "https://sberosc.sigma.sbrf.ru/repo/pypi/simple",
         "pip_token": "",

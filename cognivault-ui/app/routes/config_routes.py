@@ -8,21 +8,141 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
-from .. import cognivault, history, settings
-from ..config import PATHS, ConfigError, load_config, save_config
-from ..deps import get_token, resolve_paths
+from .. import cognivault, history, rag, rag_pipeline, settings
+from ..config import (
+    DEFAULT_CONFIG,
+    PATHS,
+    AppPaths,
+    ConfigError,
+    deep_merge,
+    load_config,
+    save_config,
+)
+from ..deps import ApiError, get_token, resolve_paths
 
 router = APIRouter(prefix="/api")
 
+# Warning shown (never enforced) when the system prompt drops the citation rule:
+# the `[Источник N]` format is what the UI turns into clickable source links and
+# what the hallucination check keys off. "Answer without citations" is a
+# legitimate choice, so this informs rather than blocks.
+_CITATION_MARKER = "Источник"
+_CITATION_WARNING = (
+    f"В системном промпте нет упоминания «{_CITATION_MARKER}» — ссылки на "
+    "источники и проверка галлюцинаций работать не будут."
+)
+
+
+def _module_text(module: Any, *names: str) -> str:
+    """First non-empty module attribute among ``names``, else ``""``.
+
+    The prompt constants live in ``app.rag`` / ``app.rag_pipeline`` and are being
+    parameterised in parallel; looking them up by name at call time (public name
+    first, private fallback) keeps this endpoint working across the rename.
+    """
+    for name in names:
+        value = getattr(module, name, None)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _default_prompts() -> dict[str, str]:
+    """Built-in prompt texts — what ``None`` in the config resolves to."""
+    return {
+        "system": _module_text(rag, "SYSTEM_PROMPT", "_SYSTEM_PROMPT"),
+        "context_reminder": _module_text(
+            rag, "CONTEXT_REMINDER", "_CONTEXT_REMINDER"
+        ),
+    }
+
+
+def _readonly_prompts() -> dict[str, str]:
+    """Pipeline prompts the user cannot edit (their JSON contract is parsed).
+
+    Only the constant TAILS are exposed: the full prompt is assembled per request
+    from the question, the history and the candidate fragments.
+    """
+    return {
+        "condense": _module_text(
+            rag_pipeline, "CONDENSE_TASKS", "_CONDENSE_TASKS"
+        ),
+        "grader": _module_text(rag_pipeline, "GRADE_SCALE", "_GRADE_SCALE"),
+    }
+
+
+def _effective_prompts(cfg: dict[str, Any]) -> dict[str, str]:
+    """Prompt texts actually used: the user's override, else the built-in one."""
+    defaults = _default_prompts()
+    stored = cfg.get("prompts") if isinstance(cfg.get("prompts"), dict) else {}
+    out: dict[str, str] = {}
+    for key, fallback in defaults.items():
+        value = stored.get(key)
+        out[key] = value if isinstance(value, str) and value.strip() else fallback
+    return out
+
+
+def _baseline_config() -> dict[str, Any]:
+    """What a "reset to default" lands on.
+
+    Server mode: the administrator's env-driven config (the user's overrides are
+    what gets discarded). Local mode: the shipped ``DEFAULT_CONFIG``, since the
+    file on disk IS the user's own state.
+    """
+    return settings.server_config() if settings.is_server() else DEFAULT_CONFIG
+
+
+def _section(cfg: dict[str, Any], name: str) -> dict[str, Any]:
+    """The user-editable leaves of ``cfg[name]``, in allowlist order."""
+    src = cfg.get(name) if isinstance(cfg.get(name), dict) else {}
+    return {key: src.get(key) for key in settings.editable_leaves(name)}
+
+
+def _warnings(prompts: dict[str, str]) -> list[str]:
+    """Non-blocking advisories about the effective config."""
+    if _CITATION_MARKER not in prompts.get("system", ""):
+        return [_CITATION_WARNING]
+    return []
+
+
+def _config_extras(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Contract fields shared by both modes: prompts, defaults, locked, warnings."""
+    prompts = _effective_prompts(cfg)
+    baseline = _baseline_config()
+    return {
+        "prompts": prompts,
+        "defaults": {
+            "prompts": _default_prompts(),
+            "gigachat": {
+                "model": baseline.get("gigachat", {}).get("model"),
+                "temperature": baseline.get("gigachat", {}).get("temperature"),
+                "max_tokens": baseline.get("gigachat", {}).get("max_tokens"),
+                "model_context_tokens": baseline.get("gigachat", {}).get(
+                    "model_context_tokens"
+                ),
+            },
+            "rag": _section(baseline, "rag"),
+        },
+        "readonly": {"prompts": _readonly_prompts()},
+        "locked": list(settings.ADMIN_LOCKED_KEYS),
+        "warnings": _warnings(prompts),
+    }
+
 
 def _public_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Safe, admin-set-only subset of the config for server mode.
+    """Secret-free view of the effective config for server mode.
 
-    No token, no cert paths, no passphrase, no base_urls — only what the UI needs
-    to render (model params + RAG display knobs).
+    No token, no cert paths, no passphrase, no base_urls — model params, the
+    user-editable RAG knobs, the effective prompt texts, plus the metadata the
+    UI needs to render the form (``defaults`` for reset, ``readonly`` prompts,
+    ``locked`` admin paths, non-blocking ``warnings``).
+
+    Every path in :data:`app.settings.USER_EDITABLE_KEYS` must be readable back
+    here — a key the user can PUT but never GET is a setting that silently
+    evaporates on reload. ``model_context_tokens`` is the one extra: read-only
+    for the user (it is in ``locked``) but needed to bound ``max_tokens``.
     """
     gc = cfg.get("gigachat", {})
-    rc = cfg.get("rag", {})
     return {
         "mode": "server",
         "gigachat": {
@@ -31,15 +151,15 @@ def _public_config(cfg: dict[str, Any]) -> dict[str, Any]:
             "max_tokens": gc.get("max_tokens"),
             "model_context_tokens": gc.get("model_context_tokens"),
         },
-        "rag": {
-            "mode": rc.get("mode"),
-            "max_context_chars": rc.get("max_context_chars"),
-            "file_full_chars": rc.get("file_full_chars"),
-            "section_max_chars": rc.get("section_max_chars"),
-            "max_expanded_files": rc.get("max_expanded_files"),
-            "limit": rc.get("limit"),
-        },
+        "rag": _section(cfg, "rag"),
+        "ui": _section(cfg, "ui"),
+        **_config_extras(cfg),
     }
+
+
+def _local_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Full local config (the local user IS the admin) plus the shared extras."""
+    return {**cfg, "mode": "local", **_config_extras(cfg)}
 
 
 def _error(status: int, code: str, message: str, detail: str | None = None) -> JSONResponse:
@@ -49,32 +169,72 @@ def _error(status: int, code: str, message: str, detail: str | None = None) -> J
     return JSONResponse(status_code=status, content=body)
 
 
+def _optional_paths(request: Request) -> AppPaths | None:
+    """Per-user paths when the caller presents a token, else ``None``.
+
+    ``GET /api/config`` stays public (the SPA reads it before the user has typed
+    a token), so a missing bearer degrades to the admin-only view instead of 401.
+    """
+    try:
+        return resolve_paths(request)
+    except ApiError:
+        return None
+
+
 @router.get("/config")
-async def get_config() -> dict[str, Any]:
+async def get_config(request: Request) -> dict[str, Any]:
     """Return the config for the UI.
 
     Public in both modes (no auth). SERVER mode returns a SAFE subset (no
-    secrets); LOCAL mode returns the full effective config plus ``mode: local``.
+    secrets) with the caller's own overrides applied when a bearer token is
+    present; LOCAL mode returns the full effective config plus ``mode: local``.
     """
     if settings.is_server():
-        return _public_config(settings.server_config())
-    return {**load_config(), "mode": "local"}
+        return _public_config(settings.effective_config_for(_optional_paths(request)))
+    return _local_config(load_config())
 
 
 @router.put("/config")
 async def put_config(
-    partial: dict[str, Any], _token: str = Depends(get_token)
+    request: Request, partial: dict[str, Any], _token: str = Depends(get_token)
 ) -> Any:
-    """Deep-merge a partial config over the stored file and persist atomically.
+    """Persist a partial config for the CALLER and return the new effective view.
 
-    Forbidden in server mode — settings are administrator-provided via env.
+    Server mode writes only the allowlisted keys
+    (:data:`app.settings.USER_EDITABLE_KEYS`) into the caller's own
+    ``config.json``; admin-owned keys are dropped and reported back in
+    ``ignored``. Local mode keeps its historical behaviour — the single user is
+    the administrator, so the whole body is written to the global file — but the
+    editable values go through the same validation.
     """
-    if settings.is_server():
-        return _error(403, "MODE_FORBIDDEN", "настройки заданы администратором")
+    paths = resolve_paths(request)
+    filtered, ignored = settings.filter_user_overrides(partial)
+
     try:
-        return save_config(partial)
+        normalized = settings.validate_user_overrides(
+            filtered, settings.effective_config_for(paths)
+        )
+    except settings.ConfigValueError as exc:
+        return _error(
+            400,
+            "CONFIG_INVALID",
+            f"недопустимое значение «{exc.key}»: {exc.expected}",
+            detail=repr(exc.value),
+        )
+
+    to_save = normalized if settings.is_server() else deep_merge(partial, normalized)
+    try:
+        saved = save_config(to_save, paths)
     except ConfigError as exc:
         return _error(400, "CONFIG_INVALID", str(exc))
+
+    if settings.is_server():
+        body = _public_config(settings.effective_config_for(paths))
+        body["ignored"] = ignored
+        return body
+    body = _local_config(saved)
+    body["ignored"] = []
+    return body
 
 
 @router.get("/status")

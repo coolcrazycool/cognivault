@@ -17,7 +17,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .config import DEFAULT_CONFIG, load_config
+from .config import (
+    DEFAULT_CONFIG,
+    AppPaths,
+    _read_raw_config,
+    deep_merge,
+    load_config,
+)
 
 _VALID_MODES = ("local", "server")
 
@@ -214,12 +220,283 @@ def server_config() -> dict[str, Any]:
         },
         "gigachat": gigachat,
         "rag": rag,
+        # Admin baseline for the prompts: ``None`` = "use the built-in text".
+        # Prompts are user-editable only (no env knob), but the section must
+        # exist here so the shape matches ``load_config``.
+        "prompts": copy.deepcopy(DEFAULT_CONFIG["prompts"]),
         "ui": {"theme": "auto"},
     }
 
 
+# --------------------------------------------------------------------------- #
+# User-editable keys (server mode) — allowlist, filtering, validation
+# --------------------------------------------------------------------------- #
+#
+# In server mode the administrator owns the deployment-wide config (env) and the
+# user owns a small set of behaviour knobs, stored per tenant in
+# ``<UI_DATA_DIR>/users/<bucket>/config.json``. Anything not listed here stays
+# admin-only: base URLs, certificate paths/passphrase, TLS verification, the
+# CogniVault token, the ``env`` mirror settings, and
+# ``gigachat.model_context_tokens`` (a property of the DEPLOYED model — a wrong
+# value silently breaks history trimming).
+
+USER_EDITABLE_KEYS: tuple[str, ...] = (
+    "gigachat.temperature",
+    "gigachat.max_tokens",
+    "gigachat.model",
+    "rag.default_on",
+    "rag.limit",
+    "rag.min_score",
+    "rag.max_context_chars",
+    "rag.file_full_chars",
+    "rag.section_max_chars",
+    "rag.max_expanded_files",
+    "rag.condense_enabled",
+    "rag.grader_enabled",
+    "rag.grader_threshold",
+    "rag.grader_keep_top",
+    "rag.rerank_candidates",
+    "prompts.system",
+    "prompts.context_reminder",
+    "ui.theme",
+)
+
+# Admin-owned paths, surfaced to the UI as ``locked`` so it can render them
+# read-only instead of guessing. Not an enforcement list (the allowlist above is
+# the enforcement) — a documentation contract for the client.
+ADMIN_LOCKED_KEYS: tuple[str, ...] = (
+    "cognivault.base_url",
+    "cognivault.token",
+    "gigachat.base_url",
+    "gigachat.cert_path",
+    "gigachat.key_path",
+    "gigachat.key_passphrase",
+    "gigachat.verify_ssl",
+    "gigachat.model_context_tokens",
+    "rag.mode",
+    "rag.source",
+    "rag.token_budget",
+    "env.pip_index_url",
+    "env.pip_token",
+)
+
+THEMES: tuple[str, ...] = ("auto", "light", "dark")
+
+_MAX_PROMPT_CHARS = 20000
+_MAX_MODEL_CHARS = 200
+
+
+def editable_leaves(section: str) -> tuple[str, ...]:
+    """Leaf keys of ``section`` that a user may edit, in allowlist order."""
+    return tuple(
+        path.split(".", 1)[1]
+        for path in USER_EDITABLE_KEYS
+        if path.startswith(f"{section}.")
+    )
+
+
+def filter_user_overrides(
+    partial: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Split a partial config into its allowlisted part and the ignored paths.
+
+    Returns ``(filtered, ignored_paths)``. ``filtered`` keeps only the paths in
+    :data:`USER_EDITABLE_KEYS`; everything else — unknown sections, scalars at
+    the top level, admin-owned leaves — is dropped and reported by dotted path
+    so the caller can tell the user what was not saved (rather than silently
+    swallowing it).
+    """
+    allowed: dict[str, set[str]] = {}
+    for path in USER_EDITABLE_KEYS:
+        section, _, leaf = path.partition(".")
+        allowed.setdefault(section, set()).add(leaf)
+
+    filtered: dict[str, Any] = {}
+    ignored: list[str] = []
+    if not isinstance(partial, dict):
+        return filtered, ignored
+
+    for section, value in partial.items():
+        if not isinstance(value, dict):
+            # A scalar at the top level (``version``, a stray key) — nothing to
+            # merge into a section, so it is reported by its bare name.
+            ignored.append(str(section))
+            continue
+        leaves = allowed.get(str(section), frozenset())
+        for leaf, leaf_value in value.items():
+            if str(leaf) in leaves:
+                filtered.setdefault(str(section), {})[str(leaf)] = leaf_value
+            else:
+                ignored.append(f"{section}.{leaf}")
+    return filtered, ignored
+
+
+class ConfigValueError(ValueError):
+    """A user-supplied config VALUE is out of range / of the wrong type.
+
+    Distinct from :class:`app.config.ConfigError`, which only guards the SHAPE
+    of a partial config and is relied upon by the local-mode write path.
+    """
+
+    def __init__(self, key: str, expected: str, value: Any) -> None:
+        super().__init__(f"{key}: ожидается {expected}")
+        self.key = key
+        self.expected = expected
+        self.value = value
+
+
+def _int_in(key: str, value: Any, low: int, high: int) -> int:
+    """Strict integer check (``bool`` is NOT an int here) within ``[low, high]``."""
+    expected = f"целое число от {low} до {high}"
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigValueError(key, expected, value)
+    if not low <= value <= high:
+        raise ConfigValueError(key, expected, value)
+    return value
+
+
+def _float_in(key: str, value: Any, low: float, high: float) -> float:
+    """Numeric check (``bool`` rejected) within ``[low, high]``, returned as float."""
+    expected = f"число от {low} до {high}"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigValueError(key, expected, value)
+    if not low <= float(value) <= high:
+        raise ConfigValueError(key, expected, value)
+    return float(value)
+
+
+def _strict_bool(key: str, value: Any) -> bool:
+    """Reject ``0``/``1``/``"true"`` — only a real JSON boolean passes."""
+    if not isinstance(value, bool):
+        raise ConfigValueError(key, "true или false", value)
+    return value
+
+
+def _prompt_text(key: str, value: Any) -> str | None:
+    """Normalise a prompt override: blank/``None`` → ``None`` (reset to default)."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigValueError(
+            key, f"строка до {_MAX_PROMPT_CHARS} символов или null", value
+        )
+    if len(value) > _MAX_PROMPT_CHARS:
+        raise ConfigValueError(
+            key, f"строка до {_MAX_PROMPT_CHARS} символов или null", value
+        )
+    # An empty textarea means "back to the built-in prompt", not "empty prompt".
+    return value if value.strip() else None
+
+
+def validate_user_overrides(
+    partial: dict[str, Any], effective: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Validate + normalise the VALUES of an allowlisted partial config.
+
+    ``effective`` supplies the context needed for relative bounds — currently
+    only ``gigachat.model_context_tokens``, the ceiling for ``max_tokens``.
+    Returns a normalised copy (blank prompts collapsed to ``None``, numerics
+    coerced to their canonical type). Raises :class:`ConfigValueError` on the
+    first offending key.
+    """
+    effective = effective if effective is not None else effective_config()
+    ctx_tokens = effective.get("gigachat", {}).get("model_context_tokens", 32768)
+    if isinstance(ctx_tokens, bool) or not isinstance(ctx_tokens, int) or ctx_tokens < 1:
+        ctx_tokens = int(DEFAULT_CONFIG["gigachat"]["model_context_tokens"])
+
+    out: dict[str, Any] = copy.deepcopy(partial)
+
+    gigachat = out.get("gigachat")
+    if isinstance(gigachat, dict):
+        if "temperature" in gigachat:
+            gigachat["temperature"] = _float_in(
+                "gigachat.temperature", gigachat["temperature"], 0.0, 2.0
+            )
+        if "max_tokens" in gigachat:
+            gigachat["max_tokens"] = _int_in(
+                "gigachat.max_tokens", gigachat["max_tokens"], 1, ctx_tokens
+            )
+        if "model" in gigachat:
+            model = gigachat["model"]
+            if (
+                not isinstance(model, str)
+                or not model.strip()
+                or len(model) > _MAX_MODEL_CHARS
+            ):
+                raise ConfigValueError(
+                    "gigachat.model",
+                    f"непустая строка до {_MAX_MODEL_CHARS} символов",
+                    model,
+                )
+            gigachat["model"] = model.strip()
+
+    rag = out.get("rag")
+    if isinstance(rag, dict):
+        for key in ("default_on", "condense_enabled", "grader_enabled"):
+            if key in rag:
+                rag[key] = _strict_bool(f"rag.{key}", rag[key])
+        for key, low, high in (
+            ("limit", 1, 100),
+            ("rerank_candidates", 1, 100),
+            ("grader_threshold", 1, 5),
+            ("grader_keep_top", 0, 10),
+            ("max_expanded_files", 0, 10),
+            ("max_context_chars", 500, 200000),
+            ("file_full_chars", 100, 100000),
+            ("section_max_chars", 100, 100000),
+        ):
+            if key in rag:
+                rag[key] = _int_in(f"rag.{key}", rag[key], low, high)
+        if "min_score" in rag and rag["min_score"] is not None:
+            rag["min_score"] = _float_in("rag.min_score", rag["min_score"], 0.0, 1.0)
+
+    prompts = out.get("prompts")
+    if isinstance(prompts, dict):
+        for key in ("system", "context_reminder"):
+            if key in prompts:
+                prompts[key] = _prompt_text(f"prompts.{key}", prompts[key])
+
+    ui = out.get("ui")
+    if isinstance(ui, dict) and "theme" in ui:
+        if ui["theme"] not in THEMES:
+            raise ConfigValueError(
+                "ui.theme", f"одно из {', '.join(THEMES)}", ui["theme"]
+            )
+
+    return out
+
+
+def user_overrides(paths: AppPaths) -> dict[str, Any]:
+    """Allowlisted per-user overrides, read RAW (no defaults) from ``paths``.
+
+    Reading raw is load-bearing: a defaults-merged read would carry every
+    unset key along and clobber the administrator's env values on merge.
+    """
+    filtered, _ = filter_user_overrides(_read_raw_config(paths))
+    return filtered
+
+
+def effective_config_for(paths: AppPaths | None = None) -> dict[str, Any]:
+    """Active config for one caller: admin env + that user's overrides.
+
+    * server mode: :func:`server_config` with the tenant's allowlisted overrides
+      deep-merged on top (``paths=None`` → the admin config alone, e.g. for an
+      unauthenticated ``GET /api/config``);
+    * local mode: the single config file — the local user IS the administrator.
+    """
+    if not is_server():
+        return load_config(paths)
+    base = server_config()
+    if paths is None:
+        return base
+    return deep_merge(base, user_overrides(paths))
+
+
 def effective_config() -> dict[str, Any]:
-    """Return the active config: env-driven in server mode, file-driven locally."""
-    if is_server():
-        return server_config()
-    return load_config()
+    """Return the active config: env-driven in server mode, file-driven locally.
+
+    Request-agnostic wrapper around :func:`effective_config_for` — in server
+    mode it yields the ADMIN config with no per-user overrides. Callers that
+    have a request should prefer ``effective_config_for(resolve_paths(request))``.
+    """
+    return effective_config_for(None)
