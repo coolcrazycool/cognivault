@@ -7,6 +7,13 @@ const configSchema = z
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
     VAULT_PATH: z.string().optional(),
     QDRANT_URL: z.string().url().default('http://localhost:6333'),
+    // External Qdrant sits behind a reverse proxy with Basic auth (native Qdrant only
+    // speaks the `api-key` header). Both must be set together, or neither.
+    QDRANT_USERNAME: z.string().optional(),
+    QDRANT_PASSWORD: z.string().optional(),
+    // Per-request timeout for the Qdrant REST client (client default is 300_000 ms —
+    // far too long for a hop over the corporate network).
+    QDRANT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
     COGNIVAULT_DATA_DIR: z.string().default('./.cognivault'),
     POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
     STABILITY_DELAY_MS: z.coerce.number().int().positive().default(2000),
@@ -28,6 +35,12 @@ const configSchema = z
       .url()
       .default('https://gigachat-ift.sberdevices.delta.sbrf.ru/v1'),
     GIGACHAT_MODEL: z.string().default('EmbeddingsGigaR'),
+    // EmbeddingsGigaR is asymmetric: search QUERIES carry a task instruction that
+    // documents never get. `{query}` is substituted with the query text; a template
+    // without the placeholder is prepended; an empty string disables the instruction.
+    GIGACHAT_QUERY_INSTRUCTION: z
+      .string()
+      .default('Дан вопрос, необходимо найти абзац текста с ответом \nвопрос: {query}'),
     GIGACHAT_CERT_PATH: z.string().optional(),
     GIGACHAT_KEY_PATH: z.string().optional(),
     GIGACHAT_KEY_PASSPHRASE: z.string().optional(),
@@ -55,6 +68,22 @@ const configSchema = z
     OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
   })
   .superRefine((cfg, ctx) => {
+    // Half-configured Basic auth silently produces unauthenticated requests — fail fast.
+    if (cfg.QDRANT_USERNAME && !cfg.QDRANT_PASSWORD) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['QDRANT_PASSWORD'],
+        message: 'QDRANT_PASSWORD is required when QDRANT_USERNAME is set',
+      });
+    }
+    if (cfg.QDRANT_PASSWORD && !cfg.QDRANT_USERNAME) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['QDRANT_USERNAME'],
+        message: 'QDRANT_USERNAME is required when QDRANT_PASSWORD is set',
+      });
+    }
+
     if (cfg.EMBEDDING_PROVIDER === 'gigachat') {
       if (!cfg.GIGACHAT_CERT_PATH) {
         ctx.addIssue({

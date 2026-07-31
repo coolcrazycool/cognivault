@@ -12,8 +12,10 @@
 #
 # If the mesh uses ALLOW_ANY (the Istio default), you do NOT need this file.
 #
-# NOTE: Qdrant now runs in-cluster (08-qdrant.yaml), so it needs NO ServiceEntry —
-# only GigaChat (external, in the delta segment) is whitelisted here.
+# NOTE: Qdrant is now EXTERNAL (DropApp, tsled-oasis000{1,2}.esrt.sber.ru:6433),
+# so it needs a ServiceEntry too — the in-cluster Deployment (08-qdrant.yaml) is
+# no longer used. Both Qdrant hosts are whitelisted: only one is configured in
+# QDRANT_URL at a time, the other is a manual standby.
 # ─────────────────────────────────────────────────────────────────────────
 apiVersion: networking.istio.io/v1beta1
 kind: ServiceEntry
@@ -27,6 +29,27 @@ spec:
   ports:
     - number: 443
       name: https
+      protocol: TLS
+  resolution: DNS
+  location: MESH_EXTERNAL
+---
+# External Qdrant (DropApp). Same reasoning as GigaChat: the app speaks HTTPS
+# itself, so `protocol: TLS` keeps the sidecar in SNI-passthrough mode instead of
+# re-terminating. Do NOT add a DestinationRule with TLS origination here.
+# Both nodes are listed — QDRANT_URL points at one, the other is a manual standby.
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: qdrant-external-egress
+  labels:
+    app.kubernetes.io/name: cognivault
+spec:
+  hosts:
+    - tsled-oasis0001.esrt.sber.ru
+    - tsled-oasis0002.esrt.sber.ru
+  ports:
+    - number: 6433
+      name: https-qdrant
       protocol: TLS
   resolution: DNS
   location: MESH_EXTERNAL

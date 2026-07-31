@@ -15,16 +15,28 @@ data:
   # carries its own vaultPath; setting a global VAULT_PATH would change /ready
   # semantics. Probes therefore hit /health, not /ready (see the Deployment).
 
-  # ── Vector store (in-cluster Qdrant — see 08-qdrant.yaml) ─────────────
-  # In-cluster Qdrant Service DNS. The app connects at startup and creates the
-  # `cognivault` collection — Qdrant MUST be up first or the pod crash-loops
-  # (startupProbe gives it ~150s of retries). No API key field in the client.
-  QDRANT_URL: "http://qdrant:6333"
+  # ── Vector store (EXTERNAL Qdrant in DropApp) ─────────────────────────
+  # The app connects at startup and creates the `cognivault` collection — Qdrant
+  # MUST be reachable first or the pod crash-loops (startupProbe gives ~150s of
+  # retries). The external instance sits behind a reverse proxy with HTTP Basic
+  # auth: QDRANT_USERNAME/QDRANT_PASSWORD come from the `vectordb-creds` secret
+  # (see the Deployment) — never put them here.
+  # Standby host, switch by hand (there is no client-side load balancing):
+  #   https://tsled-oasis0002.esrt.sber.ru:6433
+  # Rollback to the in-cluster Qdrant (08-qdrant.yaml): "http://qdrant:6333".
+  QDRANT_URL: "https://tsled-oasis0001.esrt.sber.ru:6433"
+  # Per-request timeout in ms (client default is 300000 — far too long).
+  QDRANT_TIMEOUT_MS: "30000"
 
   # ── Embeddings: GigaChat ──────────────────────────────────────────────
   EMBEDDING_PROVIDER: "gigachat"
   GIGACHAT_BASE_URL: "https://gigachat-ift.sberdevices.delta.sbrf.ru/v1"
   GIGACHAT_MODEL: "EmbeddingsGigaR"
+  # EmbeddingsGigaR is an ASYMMETRIC model: the search QUERY carries a task instruction
+  # that documents never get (so no re-index is needed when this changes). "{query}" is
+  # substituted with the query text; a template without the placeholder is prepended;
+  # an empty value disables the instruction. Note the literal newline (\n) before "вопрос:".
+  GIGACHAT_QUERY_INSTRUCTION: "Дан вопрос, необходимо найти абзац текста с ответом \nвопрос: {query}"
   # Vector size of EmbeddingsGigaR (from the proven local docker-compose.override).
   # A wrong number forces a fresh Qdrant collection + full re-index later.
   EMBEDDING_DIMENSIONS: "2560"
@@ -43,8 +55,9 @@ data:
   GIGACHAT_MAX_REQUEST_BYTES: "120000"
   GIGACHAT_MAX_BATCH_ITEMS: "64"
   GIGACHAT_MAX_REQUEST_TOKENS: "2048"
-  # Local used 2048. cl100k undercounts Russian ~20% vs GigaChat; stays under the
-  # 4096/input cap. Lower further if "Tokens limit exceeded" reappears.
-  GIGACHAT_MAX_EMBEDDING_TOKENS: "2048"
+  # Real model context is 4096 tokens/input. cl100k undercounts Russian by ~20% vs
+  # GigaChat's tokenizer, so 3300 cl100k ≈ 4000 GigaChat tokens — uses the full context
+  # while keeping headroom. Lower it again if "Tokens limit exceeded" reappears.
+  GIGACHAT_MAX_EMBEDDING_TOKENS: "3300"
   GIGACHAT_MAX_RETRIES: "5"
   GIGACHAT_RETRY_BASE_DELAY_MS: "1000"

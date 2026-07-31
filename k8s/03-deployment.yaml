@@ -68,6 +68,21 @@ spec:
                   name: cognivault-gigachat-certs
                   key: key.passphrase
                   optional: true
+            # Basic auth for the EXTERNAL Qdrant (QDRANT_URL in the ConfigMap).
+            # The `vectordb-creds` secret is provisioned by the DropApp platform.
+            # Set BOTH keys or NEITHER — with only one the app fails config
+            # validation at startup. Rolling back to the in-cluster Qdrant
+            # (08-qdrant.yaml)? Drop this block along with the QDRANT_URL change.
+            - name: QDRANT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: vectordb-creds
+                  key: username
+            - name: QDRANT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vectordb-creds
+                  key: password
           volumeMounts:
             - name: data
               mountPath: /data

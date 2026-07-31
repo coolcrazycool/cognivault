@@ -1,9 +1,9 @@
 # Раскатка CogniVault в OpenShift (проект `ci05490208-oasis-cognivault`)
 
 Манифесты для развёртывания CogniVault с GigaChat‑эмбеддингами в OpenShift
-(Managed DropApp, среда функционального тестирования). Qdrant разворачивается
-рядом в кластере, доступ через Ingress, образы (приложение и Qdrant) идут через
-SberOSC (сегмент sigma).
+(Managed DropApp, среда функционального тестирования). Qdrant — **внешний**
+(DropApp, Basic auth, см. раздел «Внешний Qdrant»); доступ к приложению через
+Ingress, образ идёт через SberOSC (сегмент sigma).
 
 ## Что разворачиваем
 
@@ -12,11 +12,11 @@ SberOSC (сегмент sigma).
 | `00-configmap.yaml` | ConfigMap | Несекретные переменные окружения (порт, Qdrant URL, GigaChat) |
 | `01-secret.example.yaml` | Secret (шаблон) | mTLS‑сертификаты GigaChat — **не применять как есть** |
 | `02-pvc.yaml` | PVC (RWO, 5Gi) | `/data`: `users.json`, SQLite‑индексы, волты |
-| `08-qdrant.yaml` | StatefulSet + Service + PVC | Qdrant в кластере (образ из SberOSC) |
+| `08-qdrant.yaml` | StatefulSet + Service + PVC | Qdrant в кластере — **больше не используется** (перешли на внешний), оставлен как откат |
 | `03-deployment.yaml` | Deployment | Под приложения (1 реплика) |
 | `04-service.yaml` | Service | ClusterIP :3000 |
 | `05-ingress.yaml` | Ingress | Внешний доступ (подставить host) |
-| `06-serviceentry-egress.yaml` | ServiceEntry (опц.) | Разрешить egress к GigaChat, если mesh его блокирует |
+| `06-serviceentry-egress.yaml` | ServiceEntry (опц.) | Разрешить egress к GigaChat и внешнему Qdrant, если mesh их блокирует |
 | `07-build.yaml` | ImageStream + BuildConfig | Сборка образа силами кластера (путь B) |
 
 ## Предпосылки
@@ -91,36 +91,158 @@ oc create secret generic cognivault-gigachat-certs \
 Остаётся только `05-ingress.yaml`:
 - `host` — домен, выданный проекту (обычно `cognivault-<namespace>.apps.<домен>`).
 
-Qdrant в кластере — внешний URL не нужен (`QDRANT_URL: http://qdrant:6333`).
+Qdrant — **внешний** (DropApp), см. раздел «Внешний Qdrant» ниже.
+
+---
+
+## Внешний Qdrant (Basic auth + TLS)
+
+Приложение ходит во внешний Qdrant в DropApp:
+
+- `QDRANT_URL: "https://tsled-oasis0001.esrt.sber.ru:6433"` (в `00-configmap.yaml`);
+- резерв — `https://tsled-oasis0002.esrt.sber.ru:6433`. Клиент `QdrantClient` принимает
+  **ровно один** URL, клиентской балансировки нет: переключение — правка `QDRANT_URL`
+  + `kubectl rollout restart deploy/cognivault`;
+- перед Qdrant стоит **реверс-прокси с HTTP Basic** (сам Qdrant умеет только заголовок
+  `api-key`). Приложение шлёт `Authorization: Basic base64(username:password)`;
+- креды берутся из секрета **`vectordb-creds`** (ключи `username` / `password`) через
+  `secretKeyRef` → `QDRANT_USERNAME` / `QDRANT_PASSWORD`. Задавать **оба или ни одного**:
+  при одном приложение падает на валидации конфига с внятным сообщением. Пароль нигде
+  не логируется — в логах есть только `qdrantAuth: "basic" | "none"`;
+- `QDRANT_TIMEOUT_MS` (по умолчанию `30000`) — таймаут запроса; дефолт клиента 300 с
+  слишком велик для внешнего хопа;
+- если mesh режет egress (`REGISTRY_ONLY`) — примените `06-serviceentry-egress.yaml`,
+  там теперь есть ServiceEntry на **оба** хоста Qdrant (порт 6433, `protocol: TLS`,
+  SNI passthrough; DestinationRule с origination TLS добавлять НЕЛЬЗЯ — TLS терминирует
+  само приложение).
+
+### TLS: сертификат внутреннего УЦ
+
+Qdrant отдаёт сертификат внутреннего УЦ Сбера, которого нет в бандле Node. Настроить
+доверие **из кода нельзя**: `fetch` в Node 22 ходит через undici, публичного `Agent`
+для подмены CA нет, а `NODE_EXTRA_CA_CERTS` читается **только при старте процесса**.
+Поэтому переменной `QDRANT_CA_PATH` в конфиге нет — вопрос решается на уровне пода.
+
+**Штатный путь — смонтировать CA и указать `NODE_EXTRA_CA_CERTS`:**
+
+```bash
+kubectl create secret generic sber-ca -n ci05490208-oasis-cognivault \
+  --from-file=sber-ca.pem=./certs/sber-ca.pem
+```
+
+```yaml
+# в Deployment cognivault
+          env:
+            - name: NODE_EXTRA_CA_CERTS
+              value: /certs-ca/sber-ca.pem
+          volumeMounts:
+            - name: sber-ca
+              mountPath: /certs-ca
+              readOnly: true
+      volumes:
+        - name: sber-ca
+          secret:
+            secretName: sber-ca
+```
+
+**Временный костыль — `NODE_TLS_REJECT_UNAUTHORIZED=0`:**
+
+```yaml
+          env:
+            - name: NODE_TLS_REJECT_UNAUTHORIZED
+              value: "0"
+```
+
+> ⚠️ Это **глобальный** тумблер процесса: он отключает проверку сертификата не только
+> для Qdrant, но и **для GigaChat** — MITM становится незаметен. Сейчас в проме уже стоит
+> `GIGACHAT_VERIFY_SSL: "false"`, так что регрессии по факту нет, но осознавать это надо.
+> Как только появится CA-бандл — убрать переменную и перейти на `NODE_EXTRA_CA_CERTS`
+> (и заодно вернуть `GIGACHAT_VERIFY_SSL: "true"` + `GIGACHAT_CA_PATH`).
+
+### Проверка связности из подов (curl в образах нет)
+
+Достаём креды из секрета в локальные переменные (не светим их в аргументах внутри пода):
+
+```bash
+NS=ci05490208-oasis-cognivault
+QU=$(kubectl get secret vectordb-creds -n $NS -o jsonpath='{.data.username}' | base64 -d)
+QP=$(kubectl get secret vectordb-creds -n $NS -o jsonpath='{.data.password}' | base64 -d)
+QAUTH=$(printf '%s:%s' "$QU" "$QP" | base64 | tr -d '\n')
+```
+
+**Бэкенд-под (`node:22-slim`) — есть `node`.** Берёт `QDRANT_URL`/креды прямо из env пода,
+то есть проверяет ровно ту конфигурацию, с которой работает приложение:
+
+```bash
+kubectl exec -n $NS deploy/cognivault -- node -e '
+const a = Buffer.from(`${process.env.QDRANT_USERNAME}:${process.env.QDRANT_PASSWORD}`).toString("base64");
+fetch(process.env.QDRANT_URL, { headers: { Authorization: `Basic ${a}` } })
+  .then(r => r.text().then(t => console.log(r.status, t.slice(0, 120))))
+  .catch(e => console.log("ERR", e.message, e.cause?.code ?? ""));'
+```
+
+**UI-под (`python:3.12-alpine`) — есть `python`:**
+
+```bash
+kubectl exec -n $NS deploy/cognivault-ui -- python -c "
+import urllib.request as u
+r = u.urlopen(u.Request('https://tsled-oasis0001.esrt.sber.ru:6433/',
+              headers={'Authorization': 'Basic $QAUTH'}), timeout=10)
+print(r.status, r.read()[:120].decode())"
+```
+
+**UI-под — busybox `wget`** (когда нужно проверить и вариант «без проверки сертификата»):
+
+```bash
+kubectl exec -n $NS deploy/cognivault-ui -- wget -q -O - --no-check-certificate \
+  --header="Authorization: Basic $QAUTH" \
+  https://tsled-oasis0001.esrt.sber.ru:6433/
+```
+
+Ожидаемый успешный ответ корня Qdrant:
+
+```json
+{"title":"qdrant - vector search engine","version":"1.16.x"}
+```
+
+Как читать результат:
+
+| Что видно | Что это значит |
+|-----------|----------------|
+| `{"title":"qdrant - vector search engine",…}` | всё хорошо: сеть, TLS и Basic-креды рабочие |
+| `401` / HTML-страница логина от прокси | неверные `username`/`password` в `vectordb-creds` |
+| `ERR … UNABLE_TO_VERIFY_LEAF_SIGNATURE` / `SELF_SIGNED_CERT_IN_CHAIN` | сеть есть, не хватает CA — см. `NODE_EXTRA_CA_CERTS` выше (тот же URL через `wget --no-check-certificate` при этом ответит корректно) |
+| `ERR … ENOTFOUND` | нет DNS до `*.esrt.sber.ru` |
+| `ERR … ECONNREFUSED` / зависание до таймаута | закрыт egress: примените `06-serviceentry-egress.yaml` / проверьте сетевые политики |
 
 ---
 
 ## Шаг 4. Применение манифестов
 
-Qdrant тянется из SberOSC, поэтому его поду нужен pull-secret `sberosc-pull`
+Образ приложения тянется из SberOSC, поэтому поду нужен pull-secret `sberosc-pull`
 (если ещё не создан на пути B сборки — создайте):
 
 ```bash
 oc project ci05490208-oasis-cognivault
 
-# pull-secret для образа Qdrant из SberOSC (если ещё не создан)
+# pull-secret для образа из SberOSC (если ещё не создан)
 oc create secret docker-registry sberosc-pull -n ci05490208-oasis-cognivault \
   --docker-server=sberosc.sigma.sbrf.ru \
   --docker-username=token --docker-password=<ВАШ_SBEROSC_ТОКЕН>
 
 oc apply -f k8s/00-configmap.yaml
 oc apply -f k8s/02-pvc.yaml
-oc apply -f k8s/08-qdrant.yaml      # Qdrant поднять ПЕРВЫМ (приложение ждёт его на старте)
-oc rollout status statefulset/qdrant
 oc apply -f k8s/03-deployment.yaml
 oc apply -f k8s/04-service.yaml
 oc apply -f k8s/05-ingress.yaml
-# опционально, если egress к GigaChat закрыт:
+# опционально, если egress к GigaChat/Qdrant закрыт:
 # oc apply -f k8s/06-serviceentry-egress.yaml
 ```
 
 > Не применяйте `01-secret.example.yaml` — секрет уже создан в Шаге 2.
-> Первая загрузка образа Qdrant из SberOSC запускает сканирование и может идти долго.
+> `08-qdrant.yaml` применять НЕ нужно: Qdrant внешний. Секрет `vectordb-creds`
+> (`username`/`password`) заводит платформа DropApp — проверьте, что он есть в namespace:
+> `oc get secret vectordb-creds`.
 
 ---
 
@@ -194,7 +316,8 @@ retrieved = requests.post(
 | Симптом | Причина | Что делать |
 |--------|---------|-----------|
 | CrashLoop, лог `EMBEDDING_DIMENSIONS` | не задана/нечисловая размерность | задать число в ConfigMap, `oc rollout restart deploy/cognivault` |
-| CrashLoop, ошибка подключения к Qdrant | под `qdrant` не поднялся / образ не тянется | `oc get statefulset/qdrant`, `oc logs sts/qdrant`; проверить секрет `sberosc-pull` и статус сканирования в SberOSC |
+| CrashLoop, ошибка подключения к Qdrant | внешний Qdrant недоступен: DNS/egress/TLS/креды | прогнать проверку связности из раздела «Внешний Qdrant» и смотреть таблицу «как читать результат» |
+| CrashLoop, `QDRANT_PASSWORD is required when QDRANT_USERNAME is set` | задан только один ключ Basic auth | проверить оба `secretKeyRef` на `vectordb-creds` (`username`, `password`) |
 | `UNABLE_TO_VERIFY_LEAF_SIGNATURE` | нет CA‑бандла GigaChat | добавить `ca.crt` в секрет + `GIGACHAT_CA_PATH`, либо временно `GIGACHAT_VERIFY_SSL=false` |
 | `413 Request size exceeded` | внутренний шлюз режет тело | снизить `GIGACHAT_MAX_REQUEST_BYTES`/`MAX_BATCH_ITEMS` |
 | `Tokens limit exceeded ... (max 4096)` | cl100k недосчитывает русские токены | снизить `GIGACHAT_MAX_EMBEDDING_TOKENS` (напр. 2500) |
@@ -206,8 +329,8 @@ retrieved = requests.post(
 
 - **Одна реплика.** PVC — ReadWriteOnce, единственный писатель SQLite/`users.json`.
   Не масштабировать `replicas > 1`.
-- **Qdrant поднимать первым** — приложение падает, если Qdrant недоступен на старте
-  (startupProbe даёт ~150с ретраев). Qdrant тоже одна реплика (RWO PVC).
+- **Внешний Qdrant должен быть доступен на старте** — приложение падает, если не может
+  подключиться (startupProbe даёт ~150с ретраев). Проверять связность до раскатки.
 - **Смена размерности/модели эмбеддинга** требует новой коллекции Qdrant + полной
   переиндексации (приложение падает на несовпадении размерности при старте).
 - **OpenShift SCC:** `runAsUser` не фиксируем — restricted‑v2 назначает случайный UID
