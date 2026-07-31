@@ -66,9 +66,10 @@ spec:
           # `latest` и кеширует вердикт скана по digest.
           #
           # Пин НЕ совпадает с пином UI в 05-ui.yaml — и это нормально: образы
-          # собираются независимо, из своих путей. sha-895f591 добавляет TLS до
-          # внешнего Qdrant (клиентский сертификат + CA), UI с тех пор не менялся.
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-895f591
+          # собираются независимо, из своих путей. sha-9f9da6f добавляет mTLS до
+          # внешнего Qdrant и получение JWT у IAM Platform V Vector DB; UI с тех
+          # пор не менялся.
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-9f9da6f
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
