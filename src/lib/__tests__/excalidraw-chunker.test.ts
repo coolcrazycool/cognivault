@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { ChunkParseError, isChunkParseError } from '../chunk-errors.js';
 import { chunkExcalidraw } from '../excalidraw-chunker.js';
 
 // Helper: build a minimal Excalidraw JSON string
@@ -165,23 +166,35 @@ describe('chunkExcalidraw - short element merging', () => {
 });
 
 describe('chunkExcalidraw - error handling', () => {
-  it('returns zero chunks for invalid JSON without throwing', () => {
-    expect(() => chunkExcalidraw('not valid json {{{', 'MyDrawing')).not.toThrow();
-    expect(chunkExcalidraw('not valid json {{{', 'MyDrawing')).toEqual([]);
+  // A broken parse must be distinguishable from "this drawing has no text": the pipeline
+  // deletes every vector of a file that yields zero chunks.
+  it('throws ChunkParseError for invalid JSON', () => {
+    expect(() => chunkExcalidraw('not valid json {{{', 'MyDrawing')).toThrow(ChunkParseError);
+    try {
+      chunkExcalidraw('not valid json {{{', 'MyDrawing');
+    } catch (err) {
+      expect(isChunkParseError(err)).toBe(true);
+      expect((err as ChunkParseError).filename).toBe('MyDrawing');
+      expect((err as ChunkParseError).cause).toBeInstanceOf(Error);
+    }
   });
 
-  it('returns zero chunks for empty string without throwing', () => {
+  it('throws ChunkParseError when the document is not an object', () => {
+    expect(() => chunkExcalidraw('"just a string"', 'MyDrawing')).toThrow(ChunkParseError);
+  });
+
+  it('throws ChunkParseError when elements is not an array', () => {
+    const file = JSON.stringify({ type: 'excalidraw', version: 2, elements: 'not-an-array' });
+    expect(() => chunkExcalidraw(file, 'MyDrawing')).toThrow(ChunkParseError);
+  });
+
+  it('returns zero chunks for empty string without throwing (valid-empty file)', () => {
     expect(() => chunkExcalidraw('', 'MyDrawing')).not.toThrow();
     expect(chunkExcalidraw('', 'MyDrawing')).toEqual([]);
   });
 
   it('returns zero chunks when elements field is missing', () => {
     const file = JSON.stringify({ type: 'excalidraw', version: 2 });
-    expect(chunkExcalidraw(file, 'MyDrawing')).toEqual([]);
-  });
-
-  it('returns zero chunks when elements is not an array', () => {
-    const file = JSON.stringify({ type: 'excalidraw', version: 2, elements: 'not-an-array' });
     expect(chunkExcalidraw(file, 'MyDrawing')).toEqual([]);
   });
 });

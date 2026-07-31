@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { chunkCanvas } from '../canvas-chunker.js';
+import { ChunkParseError, isChunkParseError } from '../chunk-errors.js';
 
 describe('chunkCanvas - text node extraction', () => {
   it('produces one chunk per text node', () => {
@@ -155,23 +156,35 @@ describe('chunkCanvas - empty and whitespace handling', () => {
 });
 
 describe('chunkCanvas - error handling', () => {
-  it('returns zero chunks for invalid JSON without throwing', () => {
-    expect(() => chunkCanvas('not valid json {{{', 'MyCanvas')).not.toThrow();
-    expect(chunkCanvas('not valid json {{{', 'MyCanvas')).toEqual([]);
+  // A broken parse must be distinguishable from "this canvas has no text": the pipeline
+  // deletes every vector of a file that yields zero chunks.
+  it('throws ChunkParseError for invalid JSON', () => {
+    expect(() => chunkCanvas('not valid json {{{', 'MyCanvas')).toThrow(ChunkParseError);
+    try {
+      chunkCanvas('not valid json {{{', 'MyCanvas');
+    } catch (err) {
+      expect(isChunkParseError(err)).toBe(true);
+      expect((err as ChunkParseError).filename).toBe('MyCanvas');
+      expect((err as ChunkParseError).cause).toBeInstanceOf(Error);
+    }
   });
 
-  it('returns zero chunks for empty string without throwing', () => {
+  it('throws ChunkParseError when the document is not an object', () => {
+    expect(() => chunkCanvas('[1, 2, 3]', 'MyCanvas')).toThrow(ChunkParseError);
+  });
+
+  it('throws ChunkParseError when nodes is not an array', () => {
+    const canvas = JSON.stringify({ nodes: 'not-an-array' });
+    expect(() => chunkCanvas(canvas, 'MyCanvas')).toThrow(ChunkParseError);
+  });
+
+  it('returns zero chunks for empty string without throwing (valid-empty file)', () => {
     expect(() => chunkCanvas('', 'MyCanvas')).not.toThrow();
     expect(chunkCanvas('', 'MyCanvas')).toEqual([]);
   });
 
-  it('returns zero chunks when nodes field is missing', () => {
+  it('returns zero chunks when nodes field is missing (freshly created canvas)', () => {
     const canvas = JSON.stringify({ edges: [] });
-    expect(chunkCanvas(canvas, 'MyCanvas')).toEqual([]);
-  });
-
-  it('returns zero chunks when nodes is not an array', () => {
-    const canvas = JSON.stringify({ nodes: 'not-an-array' });
     expect(chunkCanvas(canvas, 'MyCanvas')).toEqual([]);
   });
 });

@@ -3,6 +3,7 @@
 // Very short adjacent text elements (<5 tokens each) are merged into a single chunk.
 
 import { getEncoding } from 'js-tiktoken';
+import { ChunkParseError } from './chunk-errors.js';
 
 // Initialize encoder once at module level (matches chunker.ts)
 const enc = getEncoding('cl100k_base');
@@ -20,16 +21,8 @@ interface ExcalidrawElement {
   isDeleted?: boolean;
 }
 
-interface ExcalidrawFile {
-  type: string;
-  version: number;
-  elements: ExcalidrawElement[];
-}
-
-function isExcalidrawFile(value: unknown): value is ExcalidrawFile {
-  if (typeof value !== 'object' || value === null) return false;
-  const obj = value as Record<string, unknown>;
-  return Array.isArray(obj.elements);
+function isExcalidrawObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 // ── Chunk shape (same as MarkdownChunk) ──
@@ -55,24 +48,53 @@ function countTokens(text: string): number {
  *
  * Only elements with type='text', isDeleted != true, and non-empty text are indexed.
  * Adjacent very short elements (<5 tokens each) are merged with a newline separator.
- * Invalid JSON returns an empty array without throwing.
+ *
+ * Valid-but-empty input yields zero chunks: a blank file, or an object with no
+ * `elements` key. Structurally broken input — unparsable JSON, a non-object
+ * document, or an `elements` key that is not an array — throws
+ * {@link ChunkParseError} so the pipeline does not mistake it for an empty file
+ * and delete the file's vectors.
  */
 export function chunkExcalidraw(content: string, drawingName: string): ExcalidrawChunk[] {
+  if (content.trim().length === 0) {
+    return [];
+  }
+
   let parsed: unknown;
 
   try {
     parsed = JSON.parse(content);
-  } catch {
+  } catch (err: unknown) {
+    throw new ChunkParseError(`Invalid JSON in drawing "${drawingName}"`, drawingName, {
+      cause: err,
+    });
+  }
+
+  if (!isExcalidrawObject(parsed)) {
+    throw new ChunkParseError(
+      `Drawing "${drawingName}" is not an Excalidraw document`,
+      drawingName,
+      {},
+    );
+  }
+
+  if (parsed.elements === undefined) {
+    // Drawing with no elements yet — valid, simply nothing to index.
     return [];
   }
 
-  if (!isExcalidrawFile(parsed)) {
-    return [];
+  if (!Array.isArray(parsed.elements)) {
+    throw new ChunkParseError(
+      `Drawing "${drawingName}" has a non-array "elements" field`,
+      drawingName,
+      {},
+    );
   }
 
   // Filter qualifying text elements
   const textElements: string[] = [];
-  for (const el of parsed.elements) {
+  for (const el of parsed.elements as ExcalidrawElement[]) {
+    if (typeof el !== 'object' || el === null) continue;
     if (el.type !== 'text') continue;
     if (el.isDeleted === true) continue;
     if (!el.text) continue;

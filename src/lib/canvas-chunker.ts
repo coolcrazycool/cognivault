@@ -1,6 +1,8 @@
 // Canvas JSON text node extractor
 // Parses Obsidian .canvas files (JSON Canvas 1.0 spec) and extracts text nodes as chunks.
 
+import { ChunkParseError } from './chunk-errors.js';
+
 // ── Type guards ──
 
 interface CanvasNode {
@@ -13,15 +15,8 @@ interface CanvasNode {
   text?: string;
 }
 
-interface CanvasFile {
-  nodes: CanvasNode[];
-  edges?: unknown[];
-}
-
-function isCanvasFile(value: unknown): value is CanvasFile {
-  if (typeof value !== 'object' || value === null) return false;
-  const obj = value as Record<string, unknown>;
-  return Array.isArray(obj.nodes);
+function isCanvasObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 // ── Chunk shape (same as MarkdownChunk) ──
@@ -39,25 +34,53 @@ export interface CanvasChunk {
  *
  * Only nodes with type='text' and non-empty text are indexed.
  * File, link, and group nodes are skipped.
- * Invalid JSON returns an empty array without throwing.
+ *
+ * Valid-but-empty input yields zero chunks: a blank file, or an object without a
+ * `nodes` key (a freshly created canvas). Structurally broken input — unparsable
+ * JSON, a non-object document, or a `nodes` key that is not an array — throws
+ * {@link ChunkParseError} so the pipeline does not mistake it for an empty file
+ * and delete the file's vectors.
  */
 export function chunkCanvas(content: string, canvasName: string): CanvasChunk[] {
+  if (content.trim().length === 0) {
+    return [];
+  }
+
   let parsed: unknown;
 
   try {
     parsed = JSON.parse(content);
-  } catch {
+  } catch (err: unknown) {
+    throw new ChunkParseError(`Invalid JSON in canvas "${canvasName}"`, canvasName, { cause: err });
+  }
+
+  if (!isCanvasObject(parsed)) {
+    throw new ChunkParseError(
+      `Canvas "${canvasName}" is not a JSON Canvas document`,
+      canvasName,
+      {},
+    );
+  }
+
+  if (parsed.nodes === undefined) {
+    // Canvas with no nodes yet — valid, simply nothing to index.
     return [];
   }
 
-  if (!isCanvasFile(parsed)) {
-    return [];
+  if (!Array.isArray(parsed.nodes)) {
+    throw new ChunkParseError(
+      `Canvas "${canvasName}" has a non-array "nodes" field`,
+      canvasName,
+      {},
+    );
   }
 
+  const nodes = parsed.nodes as CanvasNode[];
   const chunks: CanvasChunk[] = [];
   let nodeNumber = 0;
 
-  for (const node of parsed.nodes) {
+  for (const node of nodes) {
+    if (typeof node !== 'object' || node === null) continue;
     if (node.type !== 'text') continue;
     if (!node.text) continue;
 

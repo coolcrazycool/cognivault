@@ -1,6 +1,7 @@
 import { getEncoding } from 'js-tiktoken';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import type { TextItem } from 'pdfjs-dist/types/src/display/api.js';
+import { ChunkParseError } from './chunk-errors.js';
 
 // Disable worker for server-side usage
 pdfjsLib.GlobalWorkerOptions.workerSrc = '';
@@ -106,7 +107,8 @@ function splitPageAtParagraphs(text: string): string[] {
  * - Pages with fewer than MIN_PAGE_TOKENS tokens are skipped (scanned headers/footers)
  * - Pages exceeding MAX_CHUNK_TOKENS are split at paragraph boundaries
  * - sectionPath format: "filename > Page N"
- * - Returns empty array for corrupt/empty PDFs without throwing
+ * - A PDF that parses but has no extractable text yields zero chunks
+ * - A PDF that cannot be parsed at all throws {@link ChunkParseError}
  */
 export async function chunkPdf(
   buffer: Buffer,
@@ -117,9 +119,10 @@ export async function chunkPdf(
   try {
     const result = await extractPdfPages(buffer);
     pages = result.pages;
-  } catch {
-    // Corrupt or empty PDF — return zero chunks
-    return [];
+  } catch (err: unknown) {
+    // Corrupt/unreadable PDF — must not be confused with "no text in this PDF",
+    // which would make the pipeline delete every vector of the file.
+    throw new ChunkParseError(`Failed to parse PDF "${filename}"`, filename, { cause: err });
   }
 
   const chunks: Array<{ text: string; sectionPath: string; chunkIndex: number }> = [];

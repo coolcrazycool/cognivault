@@ -9,6 +9,7 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => {
 });
 
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { ChunkParseError } from '../chunk-errors.js';
 import { chunkPdf, extractPdfPages } from '../pdf-chunker.js';
 
 // Helper to create a mock page with given text content
@@ -160,14 +161,19 @@ describe('chunkPdf', () => {
     }
   });
 
-  it('returns zero chunks for empty buffer or corrupt PDF', async () => {
+  it('throws ChunkParseError for an empty buffer or corrupt PDF', async () => {
     const mockGetDocument = vi.mocked(pdfjs.getDocument);
     mockGetDocument.mockReturnValue({
       promise: Promise.reject(new Error('Invalid PDF structure')),
     } as unknown as ReturnType<typeof pdfjs.getDocument>);
     const buffer = Buffer.from('');
-    const chunks = await chunkPdf(buffer, 'corrupt.pdf');
-    expect(chunks).toHaveLength(0);
+
+    // Returning [] here would make the pipeline delete every vector of the file.
+    await expect(chunkPdf(buffer, 'corrupt.pdf')).rejects.toThrow(ChunkParseError);
+    await expect(chunkPdf(buffer, 'corrupt.pdf')).rejects.toMatchObject({
+      filename: 'corrupt.pdf',
+      cause: expect.objectContaining({ message: 'Invalid PDF structure' }),
+    });
   });
 
   it('returns correct text content in each chunk', async () => {
