@@ -16,10 +16,14 @@ from ..confluence import store as confluence_store
 from ..deps import cv_context, resolve_paths
 from ..gigachat import GigaChatCertMissing, GigaChatError, GigaConfig
 from ..sse import format_sse, sse_error
+from ..tokens import estimate_messages_tokens, trim_history
 
 log = logging.getLogger("cognivault-ui.chat")
 
 router = APIRouter(prefix="/api")
+
+# Запас поверх system + max_tokens: разметка чата, служебные токены модели.
+_TRIM_RESERVE_TOKENS = 500
 
 _SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -37,6 +41,37 @@ def _error(status: int, code: str, message: str, detail: str | None = None) -> J
     if detail is not None:
         body["error"]["detail"] = detail
     return JSONResponse(status_code=status, content=body)
+
+
+def _fit_to_context(
+    send: list[dict[str, Any]], giga_dict: dict[str, Any]
+) -> tuple[list[dict[str, Any]], int]:
+    """Урезать историю в ``send`` под контекстное окно модели.
+
+    Бюджет истории ``= model_context_tokens - max_tokens - <system> - 500``.
+    Системный префикс (в RAG-режиме он уже содержит фрагменты базы, поэтому
+    отдельно считать «токены контекста» не нужно) не режется — его стоимость
+    вычитается из бюджета. Остальное отдаётся :func:`trim_history`.
+
+    Возвращает ``(список для модели, число отброшенных сообщений)``.
+    """
+    head = 0
+    while head < len(send) and send[head].get("role") == "system":
+        head += 1
+    system_prefix = send[:head]
+    convo = send[head:]
+
+    model_ctx = int(giga_dict.get("model_context_tokens", 32768) or 32768)
+    max_tokens = int(giga_dict.get("max_tokens", 4096) or 4096)
+    budget = (
+        model_ctx
+        - max_tokens
+        - estimate_messages_tokens(system_prefix)
+        - _TRIM_RESERVE_TOKENS
+    )
+
+    convo, dropped = trim_history(convo, max(0, budget))
+    return [*system_prefix, *convo], dropped
 
 
 def _last_user_content(messages: list[dict[str, Any]]) -> str:
@@ -145,6 +180,14 @@ async def chat(request: Request) -> Any:
                     # Replace any prior system message for predictable behavior.
                     send = [m for m in outgoing if m.get("role") != "system"]
                     send.insert(0, system_message)
+
+            # Урезаем ТОЛЬКО то, что уходит в модель: `outgoing`/`user_messages`
+            # (RAG-эвристика и persistence) остаются нетронутыми.
+            send, dropped = _fit_to_context(send, giga_dict)
+            if dropped:
+                log.info(
+                    "chat %s: history trimmed, dropped %d message(s)", chat_id, dropped
+                )
 
             async for delta in gigachat.stream_chat(send, gcfg):
                 full_text += delta
