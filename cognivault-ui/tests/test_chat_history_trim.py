@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app import settings  # noqa: E402
 from app.config import AppPaths  # noqa: E402
 from app.main import create_app  # noqa: E402
+from app.rag import RagContext  # noqa: E402
 from app.routes import chat_routes  # noqa: E402
 from app.tokens import estimate_messages_tokens, estimate_tokens, trim_history  # noqa: E402
 
@@ -180,11 +181,16 @@ def _install_chat_stubs(monkeypatch, tmp_path, *, rag: bool):
         captured.append([dict(m) for m in messages])
         yield "ответ"
 
-    async def fake_build_rag_context(*args, **kwargs):
-        return {"role": "system", "content": "фрагменты базы"}, [
-            {"n": 1, "title": "T", "path": "a.md", "section_path": "", "score": 0.9,
-             "depth": "chunk"}
-        ], None, 3
+    async def fake_build_rag_context(query, *args, **kwargs):
+        return RagContext(
+            system_message={"role": "system", "content": "правила ответа"},
+            user_message={"role": "user", "content": f"Источники:\n\nВопрос: {query}"},
+            sources=[
+                {"n": 1, "title": "T", "path": "a.md", "section_path": "",
+                 "score": 0.9, "depth": "chunk"}
+            ],
+            context_chars=3,
+        )
 
     monkeypatch.setattr(chat_routes, "resolve_paths", lambda request: _paths(tmp_path))
     monkeypatch.setattr(chat_routes.gigachat, "stream_chat", fake_stream_chat)
@@ -215,7 +221,9 @@ def test_chat_trims_long_history_before_sending(monkeypatch, tmp_path):
 
     assert sent[0]["role"] == "system"
     assert len(sent) < len(messages) + 1
-    assert sent[-1] == {"role": "user", "content": "финальный вопрос"}
+    # Последним идёт user-сообщение с контекстом, вопрос внутри него.
+    assert sent[-1]["role"] == "user"
+    assert sent[-1]["content"].endswith("Вопрос: финальный вопрос")
     # Парность истории между system и последним вопросом сохранена.
     roles = [m["role"] for m in sent[1:-1]]
     assert roles == ["user", "assistant"] * (len(roles) // 2)

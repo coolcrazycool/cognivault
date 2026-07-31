@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import settings  # noqa: E402
+from app import rag, settings  # noqa: E402
 from app.config import AppPaths  # noqa: E402
 from app.confluence import store, sync  # noqa: E402
 from app.main import create_app  # noqa: E402
@@ -351,10 +351,13 @@ def test_chat_sources_carry_confluence_url(tmp_path, monkeypatch):
         {"n": 2, "title": "Local", "path": "notes/local.md",
          "section_path": "", "score": 0.8, "depth": "chunk"},
     ]
-    system_message = {"role": "system", "content": "ctx"}
-
-    async def fake_build_rag_context(*args, **kwargs):
-        return system_message, sources, None, 3
+    async def fake_build_rag_context(query, *args, **kwargs):
+        return rag.RagContext(
+            system_message={"role": "system", "content": "правила"},
+            user_message={"role": "user", "content": f"Источники:\n\nВопрос: {query}"},
+            sources=sources,
+            context_chars=3,
+        )
 
     async def fake_stream_chat(messages, gcfg):
         yield "ответ"
