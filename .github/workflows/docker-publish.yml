@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - feat/gigachat-integration
+      - emdash/k8s-gigachat-integration-yce22
     paths-ignore:
       - '**.md'
       - '.planning/**'
