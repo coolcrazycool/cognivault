@@ -111,6 +111,10 @@ async function buildTestApp(): Promise<FastifyInstance> {
     ),
   );
 
+  // Real pipeline event bus — the reindex service subscribes to per-file failures
+  const { default: pipelineEventsPlugin } = await import('../../../plugins/pipeline-events.js');
+  await app.register(pipelineEventsPlugin);
+
   // Register error handler first
   const { default: errorHandler } = await import('../../../plugins/error-handler.js');
   await app.register(errorHandler);
@@ -279,6 +283,8 @@ describe('admin reindex routes', () => {
       expect(typeof body.filesProcessed).toBe('number');
       expect(typeof body.totalFiles).toBe('number');
       expect(Array.isArray(body.errors)).toBe(true);
+      // errors[] is capped at 100 messages, so the true failure count is reported separately
+      expect(typeof body.errorCount).toBe('number');
       expect(body.startedAt).toBeDefined();
     });
 

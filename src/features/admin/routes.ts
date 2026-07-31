@@ -73,6 +73,7 @@ export async function adminRoutes(fastify: FastifyInstance): Promise<void> {
         filesProcessed: job.filesProcessed,
         totalFiles: job.totalFiles,
         errors: job.errors,
+        errorCount: job.errorCount,
         startedAt: job.startedAt,
         completedAt: job.completedAt,
       });

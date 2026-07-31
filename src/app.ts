@@ -15,6 +15,7 @@ import errorHandler from './plugins/error-handler.js';
 import indexerPlugin from './plugins/indexer.js';
 import metricsPlugin from './plugins/metrics.js';
 import pipelinePlugin from './plugins/pipeline.js';
+import pipelineEventsPlugin from './plugins/pipeline-events.js';
 import qdrantPlugin from './plugins/qdrant.js';
 import registryPlugin from './plugins/registry.js';
 import swaggerPlugin from './plugins/swagger.js';
@@ -113,6 +114,8 @@ export async function buildApp(opts?: BuildAppOptions): Promise<FastifyInstance>
   await app.register(qdrantPlugin);
   await app.register(embeddingPlugin);
   await app.register(dbPlugin);
+  // Event bus must exist before the pipeline that emits on it
+  await app.register(pipelineEventsPlugin);
   await app.register(pipelinePlugin);
   await app.register(indexerPlugin);
   await app.register(syncPlugin);

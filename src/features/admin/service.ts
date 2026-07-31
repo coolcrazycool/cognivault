@@ -5,18 +5,36 @@ import type { FastifyInstance } from 'fastify';
 import type * as schema from '../../db/schema.js';
 import { indexedFiles } from '../../db/schema.js';
 import type { TenantQdrantClient } from '../../lib/tenant-qdrant-client.js';
+import type { FileFailedEvent } from '../../plugins/pipeline-events.js';
 
 // ── Types ──
 
 export interface ReindexJob {
   id: string;
   scope: 'full' | 'path' | 'folder';
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'completed_with_errors' | 'failed';
   filesProcessed: number;
   totalFiles: number;
   errors: string[];
+  /** Total number of failures observed, including those beyond MAX_JOB_ERRORS. */
+  errorCount: number;
   startedAt: string;
   completedAt?: string;
+}
+
+/** Cap on retained error strings per job — beyond this only errorCount grows. */
+const MAX_JOB_ERRORS = 100;
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Record a job failure, keeping the retained list bounded. */
+function recordJobError(job: ReindexJob, message: string): void {
+  job.errorCount += 1;
+  if (job.errors.length < MAX_JOB_ERRORS) {
+    job.errors.push(message);
+  }
 }
 
 export class ReindexService {
@@ -59,6 +77,7 @@ export class ReindexService {
       filesProcessed: 0,
       totalFiles: 0,
       errors: [],
+      errorCount: 0,
       startedAt: new Date().toISOString(),
     };
 
@@ -70,30 +89,61 @@ export class ReindexService {
       job.filesProcessed += processed;
     };
 
+    // Per-file pipeline failures are what make a job "completed with errors" instead of
+    // silently reporting success — only this user's failures count towards this job.
+    const pipelineEvents = this.fastify.pipelineEvents;
+    const onFileFailed = (event: FileFailedEvent): void => {
+      if (event.userId !== userId) {
+        return;
+      }
+      recordJobError(job, `${event.path}: ${event.error}`);
+    };
+
     // Listen for scan completion to record totalFiles and mark job done
     const onScanComplete = async (filesScanned: number, _eventsEmitted: number): Promise<void> => {
-      job.totalFiles = filesScanned;
-      if (job.filesProcessed > filesScanned) {
-        job.filesProcessed = filesScanned;
+      try {
+        job.totalFiles = filesScanned;
+        if (job.filesProcessed > filesScanned) {
+          job.filesProcessed = filesScanned;
+        }
+        // Wait for all queued pipeline tasks to finish before marking completed
+        const entry = this.fastify.indexers.get(userId);
+        if (entry) {
+          await entry.queue.onIdle();
+        }
+        job.status = job.errorCount > 0 ? 'completed_with_errors' : 'completed';
+      } catch (err: unknown) {
+        recordJobError(job, errorMessage(err));
+        job.status = 'failed';
+      } finally {
+        job.completedAt = new Date().toISOString();
+        detachListeners();
       }
-      // Wait for all queued pipeline tasks to finish before marking completed
-      const entry = this.fastify.indexers.get(userId);
-      if (entry) {
-        await entry.queue.onIdle();
-      }
-      job.status = 'completed';
-      job.completedAt = new Date().toISOString();
+    };
+
+    function detachListeners(): void {
+      pipelineEvents.removeListener('file-failed', onFileFailed);
       indexerEntry?.indexer.removeListener('changes', onChanges);
       indexerEntry?.indexer.removeListener('scanComplete', onScanComplete);
-    };
+    }
 
     indexerEntry?.indexer.on('changes', onChanges);
     indexerEntry?.indexer.on('scanComplete', onScanComplete);
+    pipelineEvents.on('file-failed', onFileFailed);
 
-    // Clear all existing vectors for this user so stale data doesn't persist
-    await userQdrant.delete({
-      filter: { must: [{ key: 'chunk_index', range: { gte: 0 } }] },
-    });
+    // Clear all existing vectors for this user so stale data doesn't persist.
+    // A failed purge must terminate the job — otherwise it hangs in 'running' forever.
+    try {
+      await userQdrant.delete({
+        filter: { must: [{ key: 'chunk_index', range: { gte: 0 } }] },
+      });
+    } catch (err: unknown) {
+      detachListeners();
+      recordJobError(job, `Failed to purge existing vectors: ${errorMessage(err)}`);
+      job.status = 'failed';
+      job.completedAt = new Date().toISOString();
+      throw err;
+    }
 
     // restart(true) clears DB so every file is treated as 'created' and re-embedded
     indexerEntry?.indexer.restart(true);
@@ -113,6 +163,7 @@ export class ReindexService {
       filesProcessed: 0,
       totalFiles: 1,
       errors: [],
+      errorCount: 0,
       startedAt: new Date().toISOString(),
     };
 
@@ -136,7 +187,7 @@ export class ReindexService {
       job.completedAt = new Date().toISOString();
     } catch (err: unknown) {
       job.status = 'failed';
-      job.errors.push(err instanceof Error ? err.message : String(err));
+      recordJobError(job, errorMessage(err));
       job.completedAt = new Date().toISOString();
     }
 
@@ -155,6 +206,7 @@ export class ReindexService {
       filesProcessed: 0,
       totalFiles: 0,
       errors: [],
+      errorCount: 0,
       startedAt: new Date().toISOString(),
     };
 
@@ -186,7 +238,7 @@ export class ReindexService {
       job.completedAt = new Date().toISOString();
     } catch (err: unknown) {
       job.status = 'failed';
-      job.errors.push(err instanceof Error ? err.message : String(err));
+      recordJobError(job, errorMessage(err));
       job.completedAt = new Date().toISOString();
     }
 

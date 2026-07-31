@@ -47,6 +47,8 @@ export const ReindexStatusResponseSchema = Type.Object({
   filesProcessed: Type.Integer(),
   totalFiles: Type.Integer(),
   errors: Type.Array(Type.String()),
+  // Total failures observed; `errors` retains only the first 100 messages.
+  errorCount: Type.Integer(),
   startedAt: Type.String(),
   completedAt: Type.Optional(Type.String()),
 });

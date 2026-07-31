@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { PipelineEventEmitter, PipelineEventMap } from '../../../plugins/pipeline-events.js';
 
 // Set env vars before any module imports that trigger config parsing
 process.env.VAULT_PATH = '/tmp/test-vault';
@@ -67,10 +69,34 @@ indexersMap.set(TEST_USER_ID, {
   vault: { vaultRootPath: '/tmp/test-vault', readContent: vi.fn() },
 });
 
+const pipelineEvents: PipelineEventEmitter = new EventEmitter<PipelineEventMap>();
+
 const mockFastify = {
   indexers: indexersMap,
   processFileChanges: mockProcessFileChanges,
+  pipelineEvents,
 } as unknown as FastifyInstance;
+
+/**
+ * Reach into the service's in-memory job map — createJob rejects before returning the
+ * job when the purge fails, so there is no id to look up via getJob().
+ */
+function registeredJobs(
+  service: object,
+): Map<string, { status: string; errors: string[]; completedAt?: string }> {
+  return (
+    service as unknown as {
+      jobs: Map<string, { status: string; errors: string[]; completedAt?: string }>;
+    }
+  ).jobs;
+}
+
+/** Pull the scanComplete handler the service registered on the indexer. */
+function capturedScanComplete(): (filesScanned: number, eventsEmitted: number) => Promise<void> {
+  const call = mockOn.mock.calls.find((c) => c[0] === 'scanComplete');
+  expect(call).toBeDefined();
+  return call![1] as (filesScanned: number, eventsEmitted: number) => Promise<void>;
+}
 
 describe('ReindexService', () => {
   let ReindexService: typeof import('../service.js').ReindexService;
@@ -81,6 +107,8 @@ describe('ReindexService', () => {
     mockDbAll.mockReturnValue([]);
     mockDbGet.mockReturnValue(undefined);
     mockOnIdle.mockResolvedValue(undefined);
+    mockUserQdrantDelete.mockResolvedValue(undefined);
+    pipelineEvents.removeAllListeners();
     const mod = await import('../service.js');
     ReindexService = mod.ReindexService;
   });
@@ -244,6 +272,116 @@ describe('ReindexService', () => {
 
       // Now status should be 'completed'
       expect(job.status).toBe('completed');
+    });
+  });
+
+  describe('full job failure reporting', () => {
+    it('marks the job completed_with_errors when the pipeline reports a failed file', async () => {
+      const service = new ReindexService(mockFastify);
+      const job = await service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
+
+      pipelineEvents.emit('file-failed', {
+        userId: TEST_USER_ID,
+        path: 'notes/broken.md',
+        error: 'embedding failed',
+      });
+
+      await capturedScanComplete()(2, 2);
+
+      expect(job.status).toBe('completed_with_errors');
+      expect(job.errors).toEqual(['notes/broken.md: embedding failed']);
+      expect(job.errorCount).toBe(1);
+    });
+
+    it('ignores failures reported for a different user', async () => {
+      const service = new ReindexService(mockFastify);
+      const job = await service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
+
+      pipelineEvents.emit('file-failed', {
+        userId: 'someone-else',
+        path: 'notes/other.md',
+        error: 'boom',
+      });
+
+      await capturedScanComplete()(1, 1);
+
+      expect(job.status).toBe('completed');
+      expect(job.errors).toEqual([]);
+    });
+
+    it('marks the job completed when no failures are reported', async () => {
+      const service = new ReindexService(mockFastify);
+      const job = await service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
+
+      await capturedScanComplete()(3, 3);
+
+      expect(job.status).toBe('completed');
+      expect(job.errors).toEqual([]);
+    });
+
+    it('unsubscribes from file-failed once the job finishes', async () => {
+      const service = new ReindexService(mockFastify);
+      const job = await service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
+
+      await capturedScanComplete()(1, 1);
+      expect(pipelineEvents.listenerCount('file-failed')).toBe(0);
+
+      // Late failures must not mutate a finished job
+      pipelineEvents.emit('file-failed', {
+        userId: TEST_USER_ID,
+        path: 'notes/late.md',
+        error: 'too late',
+      });
+      expect(job.errors).toEqual([]);
+    });
+
+    it('fails the job (never leaves it running) when the vector purge throws', async () => {
+      mockUserQdrantDelete.mockRejectedValue(new Error('Qdrant unreachable'));
+
+      const service = new ReindexService(mockFastify);
+
+      await expect(
+        service.createJob(
+          'full',
+          undefined,
+          mockUserDb as never,
+          mockUserQdrant as never,
+          TEST_USER_ID,
+        ),
+      ).rejects.toThrow('Qdrant unreachable');
+
+      // The job was registered before the purge — it must not be stuck in 'running'
+      const jobs = [...registeredJobs(service).values()];
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]!.status).toBe('failed');
+      expect(jobs[0]!.errors[0]).toMatch(/Qdrant unreachable/);
+      expect(jobs[0]!.completedAt).toBeDefined();
+      expect(pipelineEvents.listenerCount('file-failed')).toBe(0);
+      expect(mockRestart).not.toHaveBeenCalled();
     });
   });
 
