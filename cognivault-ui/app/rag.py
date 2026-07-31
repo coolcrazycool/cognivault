@@ -34,7 +34,11 @@ _CONTEXT_GROUP_ORDER = (
 
 # Rules only — the retrieved text lives in the final user message (see
 # `_render_context_message`), never here.
-_SYSTEM_PROMPT = """Ты — ассистент по базе знаний пользователя. Отвечаешь на вопросы строго на основе
+#
+# Public name on purpose: the config API serves this text as the *default* the
+# UI shows in the "prompts" editor, and a stored `None` means "keep using it",
+# so later improvements here reach users who already saved their settings.
+SYSTEM_PROMPT = """Ты — ассистент по базе знаний пользователя. Отвечаешь на вопросы строго на основе
 предоставленных фрагментов документации.
 
 Задачи:
@@ -52,9 +56,16 @@ _SYSTEM_PROMPT = """Ты — ассистент по базе знаний по�
 - Отвечай на русском языке, кратко и по делу."""
 
 # Repeated right before the question: the tail of a long context is the part the
-# model attends to best.
-_CONTEXT_REMINDER = """Напоминание: отвечай только по источникам выше, ставь [Источник N] после каждого
+# model attends to best. Public for the same reason as `SYSTEM_PROMPT`.
+CONTEXT_REMINDER = """Напоминание: отвечай только по источникам выше, ставь [Источник N] после каждого
 утверждения; если ответа в источниках нет — скажи об этом."""
+
+# Backwards-compatible aliases (the private names predate the config API).
+_SYSTEM_PROMPT = SYSTEM_PROMPT
+_CONTEXT_REMINDER = CONTEXT_REMINDER
+
+# Keys of the ``prompts`` config section, in the order the UI shows them.
+PROMPT_KEYS = ("system", "context_reminder")
 
 _RETRIEVAL_UNAVAILABLE = "Поиск по базе недоступен — отвечаю без контекста"
 
@@ -326,27 +337,52 @@ def _block(header: str, text: str) -> str:
     return f"{header}\n{text}\n\n"
 
 
+def _resolve_prompt(prompts: dict[str, Any] | None, key: str, default: str) -> str:
+    """Pick the user's override for ``key``, or the built-in default.
+
+    A missing key, ``None``, a non-string value and an empty/whitespace-only
+    string all mean *"use the default"*: the config stores ``None`` for "never
+    customised", and a user who clears the field in the UI sends back an empty
+    string — both must land on the shipped prompt so later improvements to it
+    still reach them.
+    """
+    if not isinstance(prompts, dict):
+        return default
+    value = prompts.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return default
+    return value.strip()
+
+
 def _render_context_message(
-    blocks: list[str], query: str
+    blocks: list[str], query: str, reminder: str | None = None
 ) -> tuple[dict[str, Any], int]:
     """Render the final user turn from rendered ``blocks`` and the question.
 
     Order is load-bearing: sources first, then the reminder, then the question
     last — models follow the instruction closest to the end of the prompt.
+    A custom ``reminder`` only replaces the text of the middle section; the
+    section order and the «Источники:» / «Вопрос:» headers stay fixed.
 
     Returns ``(message, context_chars)`` where ``context_chars`` measures only
     the sources block (not the boilerplate).
     """
     context_block = "".join(blocks).rstrip()
-    content = (
-        f"Источники:\n\n{context_block}\n\n{_CONTEXT_REMINDER}\n\nВопрос: {query}"
-    )
+    text = reminder if reminder is not None else CONTEXT_REMINDER
+    content = f"Источники:\n\n{context_block}\n\n{text}\n\nВопрос: {query}"
     return {"role": "user", "content": content}, len(context_block)
 
 
-def _system_message() -> dict[str, Any]:
-    """Rules-only system turn (no retrieved text)."""
-    return {"role": "system", "content": _SYSTEM_PROMPT}
+def _system_message(prompt: str | None = None) -> dict[str, Any]:
+    """Rules-only system turn (no retrieved text).
+
+    ``prompt`` is the user's override; ``None`` means the built-in
+    :data:`SYSTEM_PROMPT`.
+    """
+    return {
+        "role": "system",
+        "content": prompt if prompt is not None else SYSTEM_PROMPT,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -360,6 +396,7 @@ async def _build_auto(
     gcfg: dict[str, Any],
     messages: list[dict[str, Any]] | None,
     cv: dict[str, Any] | None,
+    prompts: dict[str, Any] | None = None,
 ) -> RagContext:
     min_score = rcfg.get("min_score")
     file_full_chars = int(rcfg.get("file_full_chars", 6000))
@@ -552,9 +589,13 @@ async def _build_auto(
             grades=grades_meta,
         )
 
-    user_message, context_chars = _render_context_message(blocks, rq)
+    user_message, context_chars = _render_context_message(
+        blocks, rq, _resolve_prompt(prompts, "context_reminder", CONTEXT_REMINDER)
+    )
     return RagContext(
-        system_message=_system_message(),
+        system_message=_system_message(
+            _resolve_prompt(prompts, "system", SYSTEM_PROMPT)
+        ),
         user_message=user_message,
         sources=sources,
         context_chars=context_chars,
@@ -571,7 +612,10 @@ async def _build_auto(
 
 
 async def _build_legacy(
-    query: str, rcfg: dict[str, Any], cv: dict[str, Any] | None
+    query: str,
+    rcfg: dict[str, Any],
+    cv: dict[str, Any] | None,
+    prompts: dict[str, Any] | None = None,
 ) -> RagContext:
     source = str(rcfg.get("source", "semantic"))
     limit = int(rcfg.get("limit", 5))
@@ -631,9 +675,13 @@ async def _build_legacy(
     if not sources:
         return RagContext()
 
-    user_message, context_chars = _render_context_message(blocks, query)
+    user_message, context_chars = _render_context_message(
+        blocks, query, _resolve_prompt(prompts, "context_reminder", CONTEXT_REMINDER)
+    )
     return RagContext(
-        system_message=_system_message(),
+        system_message=_system_message(
+            _resolve_prompt(prompts, "system", SYSTEM_PROMPT)
+        ),
         user_message=user_message,
         sources=sources,
         context_chars=context_chars,
@@ -651,6 +699,7 @@ async def build_rag_context(
     cvcfg: dict[str, Any] | None,
     gcfg: dict[str, Any] | None = None,
     messages: list[dict[str, Any]] | None = None,
+    prompts: dict[str, Any] | None = None,
 ) -> RagContext:
     """Assemble the RAG messages + sources for ``query``.
 
@@ -671,8 +720,14 @@ async def build_rag_context(
     local mode it is ``None``, meaning "read the config file" (historical
     behaviour). Passing it through fixes the latent bug where the retrieval
     sub-builders re-read the file instead of honouring the caller's context.
+
+    ``prompts`` is the user's ``{"system": ..., "context_reminder": ...}`` config
+    section (pass it by name — the positional part of this signature is frozen).
+    A missing key, ``None`` or a blank string falls back to :data:`SYSTEM_PROMPT`
+    / :data:`CONTEXT_REMINDER`, so an untouched (or cleared) setting keeps
+    tracking the shipped prompt.
     """
     mode = str(rcfg.get("mode", "auto"))
     if mode == "auto":
-        return await _build_auto(query, rcfg, gcfg or {}, messages, cvcfg)
-    return await _build_legacy(query, rcfg, cvcfg)
+        return await _build_auto(query, rcfg, gcfg or {}, messages, cvcfg, prompts)
+    return await _build_legacy(query, rcfg, cvcfg, prompts)

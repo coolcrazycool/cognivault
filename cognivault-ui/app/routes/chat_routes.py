@@ -13,6 +13,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import gigachat, history, rag, rag_log, settings
+from ..config import AppPaths
 from ..confluence import store as confluence_store
 from ..deps import cv_context, resolve_paths
 from ..gigachat import GigaChatCertMissing, GigaChatError, GigaConfig
@@ -41,6 +42,20 @@ _SSE_HEADERS = {
 # грейдер не оставил ни одного пригодного фрагмента, GigaChat в этом ходе не
 # вызывался — значит подставить его `last_finish_reason` нечем, код наш.
 _NO_CONTEXT_FINISH_REASON = "no_context"
+
+
+def _effective_config(paths: AppPaths) -> dict[str, Any]:
+    """Активный конфиг ЭТОГО пользователя.
+
+    Предпочитаем пер-пользовательский ``settings.effective_config_for(paths)``;
+    пока/если его нет — мягко откатываемся на глобальный
+    ``settings.effective_config()``. Обращение через :func:`getattr`, чтобы
+    маршрут не ломался на сборке без новой функции.
+    """
+    per_user = getattr(settings, "effective_config_for", None)
+    if callable(per_user):
+        return per_user(paths)
+    return settings.effective_config()
 
 
 def _new_chat_id() -> str:
@@ -170,8 +185,14 @@ async def chat(request: Request) -> Any:
     except Exception:  # noqa: BLE001 — link enrichment is best-effort
         url_index = {}
 
-    cfg = settings.effective_config()
+    cfg = _effective_config(paths)
     gcfg = GigaConfig.from_dict(cfg.get("gigachat", {}))
+
+    # Настраиваемые тексты промптов ответа: `None`/пусто в любом поле означает
+    # «взять встроенный дефолт» — разбирается в `rag._resolve_prompt`.
+    prompts = cfg.get("prompts")
+    if not isinstance(prompts, dict):
+        prompts = None
 
     # Per-request overrides.
     if "temperature" in body and body["temperature"] is not None:
@@ -233,7 +254,7 @@ async def chat(request: Request) -> Any:
             if use_rag:
                 query = _last_user_content(outgoing)
                 ctx = await rag.build_rag_context(
-                    query, rcfg, cv, giga_dict, outgoing
+                    query, rcfg, cv, giga_dict, outgoing, prompts=prompts
                 )
                 sources = ctx.sources
                 context_chars = ctx.context_chars

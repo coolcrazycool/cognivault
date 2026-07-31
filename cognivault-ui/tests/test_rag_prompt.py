@@ -112,11 +112,15 @@ def _install_retrieval(monkeypatch, hits: list[dict], contents: dict | None = No
     return calls
 
 
-def _build(query: str, hits: list[dict], **rcfg) -> rag.RagContext:
+def _build(
+    query: str, hits: list[dict], *, prompts: dict | None = None, **rcfg
+) -> rag.RagContext:
     """Синхронная обёртка над ``build_rag_context`` в auto-режиме."""
     cfg = {"mode": "auto", "max_expanded_files": 0}
     cfg.update(rcfg)
-    return asyncio.run(rag.build_rag_context(query, cfg, None, {}, None))
+    return asyncio.run(
+        rag.build_rag_context(query, cfg, None, {}, None, prompts=prompts)
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -161,10 +165,12 @@ def test_system_message_holds_rules_only(monkeypatch):
 
     assert isinstance(ctx, rag.RagContext)
     system = ctx.system_message["content"]
-    # Правила на месте.
-    assert "[Источник N]" in system
-    assert "Не выдумывай источники" in system
-    assert "markdown-таблицы" in system
+    # Без переопределения в конфиге system — ровно встроенный промпт…
+    assert system == rag.SYSTEM_PROMPT
+    # …и правила в нём на месте (проверяем сам дефолт, а не «любой» промпт).
+    assert "[Источник N]" in rag.SYSTEM_PROMPT
+    assert "Не выдумывай источники" in rag.SYSTEM_PROMPT
+    assert "markdown-таблицы" in rag.SYSTEM_PROMPT
     # А текста источников — нет.
     assert "секретный текст фрагмента" not in system
     assert "Источники:" not in system
@@ -239,6 +245,109 @@ def test_empty_section_path_has_no_dangling_separator(monkeypatch):
     ][0]
     assert header == "### Источник 1: Документ 1 — doc1.md"
     assert ">" not in header.rstrip()
+
+
+# --------------------------------------------------------------------------- #
+# Настраиваемые промпты (секция конфига ``prompts``)
+# --------------------------------------------------------------------------- #
+
+_CUSTOM_SYSTEM = "Ты лаконичный ассистент. Отвечай ровно одним предложением."
+_CUSTOM_REMINDER = "Помни: одно предложение, без воды."
+
+
+def test_custom_system_prompt_reaches_system_message(monkeypatch):
+    hits = [_hit(1)]
+    _install_retrieval(monkeypatch, hits)
+    ctx = _build(
+        "что известно про кластер и его настройку",
+        hits,
+        prompts={"system": _CUSTOM_SYSTEM},
+    )
+
+    assert ctx.system_message["content"] == _CUSTOM_SYSTEM
+    # Дефолт полностью вытеснен, а не дописан рядом.
+    assert rag.SYSTEM_PROMPT not in ctx.system_message["content"]
+    # Кастомный промпт без «[Источник N]» — это нормально и не ломает сборку.
+    assert "[Источник N]" not in ctx.system_message["content"]
+    assert ctx.user_message["content"].startswith("Источники:")
+
+
+@pytest.mark.parametrize(
+    "prompts",
+    [
+        None,
+        {},
+        {"system": None},
+        {"system": ""},
+        {"system": "   \n\t "},
+        {"context_reminder": _CUSTOM_REMINDER},  # чужой ключ не трогает system
+    ],
+    ids=["none", "empty", "explicit-none", "empty-str", "blank-str", "other-key"],
+)
+def test_system_prompt_falls_back_to_default(monkeypatch, prompts):
+    """``None``/отсутствие/пустая строка → встроенный дефолт."""
+    hits = [_hit(1)]
+    _install_retrieval(monkeypatch, hits)
+    ctx = _build("что известно про кластер и его настройку", hits, prompts=prompts)
+
+    assert ctx.system_message["content"] == rag.SYSTEM_PROMPT
+
+
+def test_custom_reminder_sits_between_sources_and_question(monkeypatch):
+    hits = [_hit(1), _hit(2)]
+    _install_retrieval(monkeypatch, hits)
+    query = "какие сервисы описаны в документации проекта"
+    ctx = _build(query, hits, prompts={"context_reminder": _CUSTOM_REMINDER})
+
+    content = ctx.user_message["content"]
+    # Порядок секций не изменился: Источники → Напоминание → Вопрос.
+    i_sources = content.index("Источники:")
+    i_last_block = content.rindex("### Источник 2:")
+    i_reminder = content.index(_CUSTOM_REMINDER)
+    i_question = content.index("Вопрос:")
+    assert i_sources < i_last_block < i_reminder < i_question
+    assert content.startswith("Источники:")
+    assert content.endswith(f"Вопрос: {query}")
+    # Дефолтное напоминание вытеснено.
+    assert rag.CONTEXT_REMINDER not in content
+    # Системный промпт при этом остался дефолтным.
+    assert ctx.system_message["content"] == rag.SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize(
+    "prompts",
+    [None, {}, {"context_reminder": None}, {"context_reminder": "  "}],
+    ids=["none", "empty", "explicit-none", "blank-str"],
+)
+def test_reminder_falls_back_to_default(monkeypatch, prompts):
+    hits = [_hit(1)]
+    _install_retrieval(monkeypatch, hits)
+    ctx = _build("какие сервисы описаны в документации", hits, prompts=prompts)
+
+    assert rag.CONTEXT_REMINDER in ctx.user_message["content"]
+
+
+def test_both_prompts_customised_in_legacy_mode(monkeypatch):
+    """Переопределения доезжают и по старому (не ``auto``) пути."""
+    hits = [_hit(1)]
+    _install_retrieval(monkeypatch, hits)
+    ctx = _build(
+        "какие сервисы описаны в документации",
+        hits,
+        mode="legacy",
+        source="hybrid",
+        prompts={"system": _CUSTOM_SYSTEM, "context_reminder": _CUSTOM_REMINDER},
+    )
+
+    assert ctx.system_message["content"] == _CUSTOM_SYSTEM
+    assert _CUSTOM_REMINDER in ctx.user_message["content"]
+    assert rag.CONTEXT_REMINDER not in ctx.user_message["content"]
+
+
+def test_private_prompt_aliases_still_point_at_defaults():
+    """Старые приватные имена — алиасы публичных (на них завязан config API)."""
+    assert rag._SYSTEM_PROMPT is rag.SYSTEM_PROMPT
+    assert rag._CONTEXT_REMINDER is rag.CONTEXT_REMINDER
 
 
 # --------------------------------------------------------------------------- #
@@ -353,8 +462,8 @@ def test_chat_sends_system_history_and_context_message(monkeypatch, tmp_path):
     sent = captured[0]
 
     assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"]
-    # system — только правила.
-    assert "[Источник N]" in sent[0]["content"]
+    # system — только правила (по умолчанию — встроенный промпт).
+    assert sent[0]["content"] == rag.SYSTEM_PROMPT
     assert "### Источник" not in sent[0]["content"]
     # История сохранена как есть.
     assert sent[1]["content"] == "первый вопрос пользователя"
@@ -364,6 +473,71 @@ def test_chat_sends_system_history_and_context_message(monkeypatch, tmp_path):
     assert last.startswith("Источники:")
     assert last.endswith("Вопрос: второй вопрос пользователя")
     assert [m for m in sent[:-1] if m["content"] == "второй вопрос пользователя"] == []
+
+
+def _install_config(monkeypatch, prompts: dict) -> None:
+    """Подсунуть маршруту конфиг с секцией ``prompts``.
+
+    Патчим ОБА пути чтения конфига: пер-пользовательский
+    ``settings.effective_config_for(paths)`` (его предпочитает маршрут) и
+    глобальный ``settings.effective_config()`` — тест не должен зависеть от
+    того, какой из них доступен в сборке.
+    """
+    cfg = {**settings.effective_config(), "prompts": prompts}
+    monkeypatch.setattr(settings, "effective_config", lambda: cfg)
+    monkeypatch.setattr(
+        settings, "effective_config_for", lambda paths: cfg, raising=False
+    )
+
+
+def test_chat_uses_configured_prompts(monkeypatch, tmp_path):
+    """Кастомные промпты из конфига доезжают до ``gigachat.stream_chat``."""
+    hits = [_hit(1), _hit(2)]
+    captured = _install_chat(monkeypatch, tmp_path, hits)
+    _install_config(
+        monkeypatch,
+        {"system": _CUSTOM_SYSTEM, "context_reminder": _CUSTOM_REMINDER},
+    )
+
+    with TestClient(create_app()) as client:
+        resp = client.post(
+            "/api/chat",
+            json={
+                "messages": [{"role": "user", "content": "вопрос про кластер"}],
+                "rag": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    sent = captured[0]
+    assert sent[0]["role"] == "system"
+    assert sent[0]["content"] == _CUSTOM_SYSTEM
+    assert rag.SYSTEM_PROMPT not in sent[0]["content"]
+    last = sent[-1]["content"]
+    assert last.startswith("Источники:")
+    assert last.index(_CUSTOM_REMINDER) < last.index("Вопрос:")
+    assert rag.CONTEXT_REMINDER not in last
+
+
+def test_chat_falls_back_to_default_prompts(monkeypatch, tmp_path):
+    """Пустые/``None``-поля в конфиге → встроенные дефолты, а не пустой system."""
+    hits = [_hit(1)]
+    captured = _install_chat(monkeypatch, tmp_path, hits)
+    _install_config(monkeypatch, {"system": "  ", "context_reminder": None})
+
+    with TestClient(create_app()) as client:
+        resp = client.post(
+            "/api/chat",
+            json={
+                "messages": [{"role": "user", "content": "вопрос про кластер"}],
+                "rag": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    sent = captured[0]
+    assert sent[0]["content"] == rag.SYSTEM_PROMPT
+    assert rag.CONTEXT_REMINDER in sent[-1]["content"]
 
 
 def test_chat_without_rag_keeps_plain_history(monkeypatch, tmp_path):
