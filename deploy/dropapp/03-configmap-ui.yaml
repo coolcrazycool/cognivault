@@ -1,0 +1,63 @@
+# Несекретная конфигурация фронтенда (cognivault-ui, FastAPI + SPA).
+# UI ходит в бэкенд по внутреннему Service (COGNIVAULT_BASE_URL) и в GigaChat —
+# напрямую, тем же mTLS-сертификатом, что и бэкенд.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cognivault-ui-config
+  labels:
+    app.kubernetes.io/name: cognivault-ui
+    app.kubernetes.io/component: ui
+data:
+  # ── Режим и адрес бэкенда ─────────────────────────────────────────────
+  COGNIVAULT_UI_MODE: "server"
+  # Обязательно должен указывать на существующий Service — он создаётся в
+  # 04-backend.yaml (kind: Service, name: cognivault, port 3000).
+  COGNIVAULT_BASE_URL: "http://cognivault:3000"
+  UI_PORT: "8787"
+  # ВНИМАНИЕ: /data у UI — emptyDir (квота 1 PVC, он отдан бэкенду).
+  # История чатов и rag_log.jsonl НЕ переживают перезапуск пода.
+  UI_DATA_DIR: "/data"
+
+  # ── GigaChat (генерация ответа) ───────────────────────────────────────
+  GIGACHAT_BASE_URL: "https://gigachat-ift.sberdevices.delta.sbrf.ru/v1"
+  GIGACHAT_MODEL: "GigaChat-3-Ultra-preview"
+  # Тот же секрет cognivault-gigachat-certs, смонтированный в /certs.
+  GIGACHAT_CERT_PATH: "/certs/client_crt.crt"
+  GIGACHAT_KEY_PATH: "/certs/client_key.key"
+  GIGACHAT_VERIFY_SSL: "false"
+  GIGACHAT_TEMPERATURE: "0.2"
+  GIGACHAT_MAX_TOKENS: "4096"
+  GIGACHAT_MODEL_CONTEXT_TOKENS: "32768"
+
+  # ── RAG-конвейер ──────────────────────────────────────────────────────
+  RAG_MODE: "auto"
+  RAG_MAX_CONTEXT_CHARS: "24000"
+  RAG_FILE_FULL_CHARS: "6000"
+  RAG_SECTION_MAX_CHARS: "4000"
+  RAG_MAX_EXPANDED_FILES: "2"
+  RAG_LIMIT: "10"
+  RAG_SOURCE: "hybrid"
+  # Волна 2: два скрытых вызова GigaChat (интент + condense, батч-грейдер).
+  RAG_CONDENSE_ENABLED: "true"
+  RAG_GRADER_ENABLED: "true"
+  RAG_GRADER_THRESHOLD: "4"
+  RAG_GRADER_KEEP_TOP: "2"
+  RAG_RERANK_CANDIDATES: "20"
+
+  # ── Источник Confluence ───────────────────────────────────────────────
+  # Проверка TLS сервера СНЯТА — временный режим, пока нет бандла внутреннего УЦ.
+  CONFLUENCE_VERIFY_SSL: "false"
+  #
+  # CONFLUENCE_CA_PATH намеренно НЕ задан.
+  # В старом cognivault-ui.yaml он стоял как "/certs/sber-ca.pem", но по этому пути
+  # ничего не смонтировано: /certs — это секрет cognivault-gigachat-certs, файла
+  # sber-ca.pem в нём нет. При CONFLUENCE_VERIFY_SSL=false значение всё равно
+  # игнорируется, так что ключ был просто вводящим в заблуждение мусором.
+  # Чтобы включить проверку по внутреннему УЦ:
+  #   1) создать Secret `sber-ca` (см. 00-secrets.example.yaml);
+  #   2) раскомментировать блок sber-ca в 05-ui.yaml (volume + volumeMount /certs-ca);
+  #   3) раскомментировать строку ниже и поменять CONFLUENCE_VERIFY_SSL выше на "true".
+  # Путь /certs-ca (а не /certs) — чтобы не конфликтовать с монтированием
+  # секрета сертификатов GigaChat в /certs.
+  # CONFLUENCE_CA_PATH: "/certs-ca/sber-ca.pem"

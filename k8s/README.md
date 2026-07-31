@@ -1,3 +1,13 @@
+> ## ⚠️ НАБОР УСТАРЕЛ
+>
+> Актуальный набор манифестов — **[`deploy/dropapp/`](../deploy/dropapp/README.md)**.
+> Он полный (бэкенд + UI + Service + Ingress + egress), с актуальными пинами образов
+> `sha-f8a989d`. Разворачивайте окружение по нему.
+>
+> Файлы в `k8s/` оставлены **для истории и отката**; в них нет манифестов UI, а образ
+> бэкенда запинен на старый тег. Ничего отсюда не применяйте, не сверившись
+> с `deploy/dropapp/`.
+
 # Раскатка CogniVault в OpenShift (проект `ci05490208-oasis-cognivault`)
 
 Манифесты для развёртывания CogniVault с GigaChat‑эмбеддингами в OpenShift
@@ -84,9 +94,11 @@ oc create secret generic cognivault-gigachat-certs \
 
 ## Шаг 3. Правки конфигурации перед применением
 
-`00-configmap.yaml` уже заполнен проверенными значениями из локального
-`docker-compose.override` (`EMBEDDING_DIMENSIONS: 2560`, `GIGACHAT_MODEL: EmbeddingsGigaR`,
-`GIGACHAT_VERIFY_SSL: "false"`, `MAX_EMBEDDING_TOKENS: 2048`) — менять по умолчанию нечего.
+`00-configmap.yaml` уже заполнен проверенными значениями (`EMBEDDING_DIMENSIONS: 2560`,
+`GIGACHAT_MODEL: EmbeddingsGigaR`, `GIGACHAT_VERIFY_SSL: "false"`,
+`GIGACHAT_MAX_EMBEDDING_TOKENS: "3300"`) — менять по умолчанию нечего.
+(3300 cl100k ≈ 4000 токенов GigaChat при контексте модели 4096; прежнее значение
+2048 было занижено и просто не использовало контекст.)
 
 Остаётся только `05-ingress.yaml`:
 - `host` — домен, выданный проекту (обычно `cognivault-<namespace>.apps.<домен>`).
@@ -333,5 +345,8 @@ retrieved = requests.post(
   подключиться (startupProbe даёт ~150с ретраев). Проверять связность до раскатки.
 - **Смена размерности/модели эмбеддинга** требует новой коллекции Qdrant + полной
   переиндексации (приложение падает на несовпадении размерности при старте).
-- **OpenShift SCC:** `runAsUser` не фиксируем — restricted‑v2 назначает случайный UID
-  и fsGroup, который chown‑ит PVC. Манифест уже совместим с restricted‑v2.
+- **PodSecurity:** UID **фиксируется жёстко** — в `03-deployment.yaml` стоит
+  `runAsNonRoot: true`, `runAsUser: 1000`, `runAsGroup: 1000`, `fsGroup: 1000`
+  (пользователь `node` в образе — uid 1000; числовое значение нужно, чтобы
+  `runAsNonRoot` проверялся и на ванильном Kubernetes). Кластер здесь ванильный,
+  а не OpenShift с restricted‑v2, поэтому «случайный UID из SCC» к нему неприменим.

@@ -1,0 +1,241 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# ⚠️ ФАЙЛ УСТАРЕЛ. Актуальный набор манифестов — deploy/dropapp/
+# (см. deploy/dropapp/README.md): полный, с UI, Service, Ingress и актуальными
+# пинами образов sha-f8a989d. Здесь образ старый и нет Service/Ingress.
+# Файл оставлен для истории и отката — не применять, не сверившись с deploy/dropapp/.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cognivault-config
+data:
+  PORT: "3000"
+  HOST: "0.0.0.0"
+  LOG_LEVEL: "info"
+  COGNIVAULT_DATA_DIR: "/data"
+  # Внешний Qdrant в DropApp за реверс-прокси с Basic-аутентификацией (креды —
+  # из секрета vectordb-creds, см. Deployment ниже). Резервный хост (переключать
+  # вручную, клиентского балансировщика нет):
+  #   https://tsled-oasis0002.esrt.sber.ru:6433
+  # Откат на внутрикластерный Qdrant — вернуть "http://qdrant:6333".
+  QDRANT_URL: "https://tsled-oasis0001.esrt.sber.ru:6433"
+  # Таймаут запроса к Qdrant, мс (по умолчанию в клиенте 300000 — слишком много).
+  QDRANT_TIMEOUT_MS: "30000"
+  EMBEDDING_PROVIDER: "gigachat"
+  GIGACHAT_BASE_URL: "https://gigachat-ift.sberdevices.delta.sbrf.ru/v1"
+  GIGACHAT_MODEL: "EmbeddingsGigaR"
+  # EmbeddingsGigaR is asymmetric: the search QUERY carries this instruction, documents
+  # never do. "{query}" is substituted; without the placeholder the string is prepended;
+  # an empty value disables it. Note the literal newline (\n) before "вопрос:".
+  GIGACHAT_QUERY_INSTRUCTION: "Дан вопрос, необходимо найти абзац текста с ответом \nвопрос: {query}"
+  EMBEDDING_DIMENSIONS: "2560"
+  GIGACHAT_CERT_PATH: "/certs/client_crt.crt"
+  GIGACHAT_KEY_PATH: "/certs/client_key.key"
+  GIGACHAT_VERIFY_SSL: "false"
+  GIGACHAT_MAX_REQUEST_BYTES: "120000"
+  GIGACHAT_MAX_BATCH_ITEMS: "64"
+  GIGACHAT_MAX_REQUEST_TOKENS: "2048"
+  # Real model context is 4096 tokens/input; cl100k undercounts Russian by ~20%,
+  # so 3300 cl100k ≈ 4000 GigaChat tokens — full headroom without wasting context.
+  GIGACHAT_MAX_EMBEDDING_TOKENS: "3300"
+  GIGACHAT_MAX_RETRIES: "5"
+  GIGACHAT_RETRY_BASE_DELAY_MS: "1000"
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# БОЛЬШЕ НЕ ИСПОЛЬЗУЕТСЯ. Приложение ходит во ВНЕШНИЙ Qdrant
+# (QDRANT_URL в ConfigMap выше). Манифест оставлен как быстрый откат: вернуть
+# QDRANT_URL: "http://qdrant:6333" — и этот Deployment снова в деле.
+# Можно удалить под, чтобы не занимать квоту: kubectl delete deploy qdrant
+# ═══════════════════════════════════════════════════════════════════════════
+# Qdrant как Deployment с emptyDir — БЕЗ PVC (в namespace квота 1 PVC и тома
+# не биндятся). ВНИМАНИЕ: векторы Qdrant не переживут перезапуск пода — для
+# функционального теста ок; для постоянства нужен PVC (поднять квоту у платформы).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qdrant
+  labels:
+    app.kubernetes.io/name: qdrant
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qdrant
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qdrant
+    spec:
+      imagePullSecrets:
+        - name: sberosc-pull
+      securityContext:
+        # Namespace enforces restricted PodSecurity (non-root). Qdrant image runs
+        # as root by default → run it as uid 1000; fsGroup makes the emptyDir writable.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: qdrant
+          # v1.3.0 — единственная версия, прошедшая скан SberOSC («Разрешён»).
+          # Старая, но для семантического поиска cognivault совместима (классический
+          # search API). /readyz в ней нет → проба по TCP.
+          image: sberosc.sigma.sbrf.ru/docker.io/qdrant/qdrant:v1.3.0
+          env:
+            # Non-root can't create /qdrant/snapshots (root-owned); keep it inside
+            # the writable storage volume.
+            - name: QDRANT__STORAGE__SNAPSHOTS_PATH
+              value: /qdrant/storage/snapshots
+          ports:
+            - name: http
+              containerPort: 6333
+            - name: grpc
+              containerPort: 6334
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+          volumeMounts:
+            - name: storage
+              mountPath: /qdrant/storage
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: storage
+          emptyDir: {}
+---
+# cognivault — /data на PVC cognivault-data (единственный PVC в namespace):
+# users.json (ключи), SQLite-индекс и волты ТЕПЕРЬ переживают перезапуск пода.
+# Векторы живут во ВНЕШНЕМ Qdrant (QDRANT_URL) и рестарт пода переживают; при
+# откате на in-cluster Deployment выше (emptyDir) после его рестарта понадобится
+# переиндексация: POST /api/admin/reindex. Переключение emptyDir→PVC обнуляет
+# текущий /data один раз — пользователей завести заново, дальше данные стойкие.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cognivault
+  labels:
+    app.kubernetes.io/name: cognivault
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cognivault
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cognivault
+    spec:
+      imagePullSecrets:
+        - name: sberosc-pull
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cognivault
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-b997ed5
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: cognivault-config
+          env:
+            - name: GIGACHAT_KEY_PASSPHRASE
+              valueFrom:
+                secretKeyRef:
+                  name: cognivault-gigachat-certs
+                  key: key.passphrase
+                  optional: true
+            # Basic-аутентификация внешнего Qdrant. Секрет vectordb-creds заводит
+            # платформа DropApp; задавать оба ключа или ни одного — при одном
+            # приложение падает на валидации конфига.
+            - name: QDRANT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: vectordb-creds
+                  key: username
+            - name: QDRANT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vectordb-creds
+                  key: password
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: gigachat-certs
+              mountPath: /certs
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: cognivault-data
+        - name: gigachat-certs
+          secret:
+            secretName: cognivault-gigachat-certs
+---
+# Единственный PVC в namespace — под данные CogniVault (реестр cv-токенов, вольты,
+# SQLite-индекс). RWO + strategy:Recreate + fsGroup:1000 → корректно монтируется
+# под uid 1000. Если нет дефолтного StorageClass — раскомментируйте storageClassName
+# и подставьте класс из `kubectl get storageclass`.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cognivault-data
+  labels:
+    app.kubernetes.io/name: cognivault
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName: <класс из kubectl get storageclass>

@@ -1,0 +1,193 @@
+# Бэкенд CogniVault: Deployment + ClusterIP Service.
+#
+# Service обязателен: на него смотрит COGNIVAULT_BASE_URL="http://cognivault:3000"
+# из ConfigMap UI. Без Service морда не найдёт API.
+#
+# Наружу бэкенд НЕ выставляется: снаружи доступен только UI (06-ingress.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cognivault
+  labels:
+    app.kubernetes.io/name: cognivault
+    app.kubernetes.io/component: api
+spec:
+  # Строго 1 реплика: PVC /data — ReadWriteOnce, а users.json и SQLite-индексы
+  # имеют ровно одного писателя. Не масштабировать без перехода на RWX и
+  # дизайна, безопасного для нескольких писателей.
+  replicas: 1
+  strategy:
+    # Recreate (не RollingUpdate), чтобы старый под отпустил RWO-PVC до старта нового.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cognivault
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cognivault
+        app.kubernetes.io/component: api
+      annotations:
+        # Скрейп Prometheus (безвреден, если кластер это игнорирует).
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Нужен, чтобы стянуть образ через прокси SberOSC (user: token).
+      imagePullSecrets:
+        - name: sberosc-pull
+      securityContext:
+        # Namespace с restricted PodSecurity. Пользователь node в образе — uid 1000;
+        # указываем числом, иначе runAsNonRoot не проверяется. fsGroup делает PVC
+        # записываемым для этого uid.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cognivault
+          # ── ОБРАЗ ────────────────────────────────────────────────────────
+          # Собирается в GitHub Actions и публикуется в ghcr.io/coolcrazycool/cognivault
+          # (пакет должен быть PUBLIC), сюда тянется ЧЕРЕЗ прокси SberOSC.
+          # Тег всегда конкретный, иммутабельный sha-<gitsha>: SberOSC не проксирует
+          # `latest` и кеширует вердикт скана по digest.
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-f8a989d
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: cognivault-config
+          env:
+            # Пароль приватного ключа — только если ключ зашифрован.
+            # optional: true → если ключа key.passphrase в секрете нет, под стартует.
+            - name: GIGACHAT_KEY_PASSPHRASE
+              valueFrom:
+                secretKeyRef:
+                  name: cognivault-gigachat-certs
+                  key: key.passphrase
+                  optional: true
+            # Basic-auth внешнего Qdrant (QDRANT_URL в ConfigMap). Секрет
+            # vectordb-creds заводит платформа DropApp. Задавать ОБА ключа или
+            # НИ ОДНОГО: при одном приложение падает на валидации конфига.
+            # При откате на внутрикластерный Qdrant (99-qdrant-inhouse.yaml)
+            # этот блок убрать вместе со сменой QDRANT_URL.
+            - name: QDRANT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: vectordb-creds
+                  key: username
+            - name: QDRANT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vectordb-creds
+                  key: password
+            # ── CA внутреннего УЦ для внешнего Qdrant (опционально) ────────
+            # Раскомментировать, если внешний Qdrant предъявляет сертификат
+            # внутреннего УЦ Сбера и проверка связности (README, шаг 3) даёт
+            # UNABLE_TO_VERIFY_LEAF_SIGNATURE / SELF_SIGNED_CERT_IN_CHAIN.
+            #
+            # Настроить доверие ИЗ КОДА нельзя: fetch в Node 22 идёт через undici,
+            # публичного Agent для подмены CA нет, а NODE_EXTRA_CA_CERTS Node
+            # читает ТОЛЬКО при старте процесса. Поэтому переменной QDRANT_CA_PATH
+            # в конфиге приложения нет — вопрос решается на уровне пода.
+            #
+            # Нужен Secret `sber-ca` с ключом sber-ca.pem (00-secrets.example.yaml).
+            # Вместе с этим блоком раскомментируйте volumeMount `sber-ca` и volume
+            # `sber-ca` ниже.
+            # - name: NODE_EXTRA_CA_CERTS
+            #   value: /certs-ca/sber-ca.pem
+            #
+            # КОСТЫЛЬ на крайний случай — вместо NODE_EXTRA_CA_CERTS:
+            # - name: NODE_TLS_REJECT_UNAUTHORIZED
+            #   value: "0"
+            # ⚠️ Это ГЛОБАЛЬНЫЙ тумблер процесса: он снимает проверку сертификата
+            # не только для Qdrant, но и для GigaChat — MITM станет незаметен.
+            # Сейчас в конфиге и так GIGACHAT_VERIFY_SSL="false", поэтому
+            # фактической регрессии нет, но осознавать это надо. Как только
+            # появится CA-бандл — перейти на NODE_EXTRA_CA_CERTS и вернуть
+            # GIGACHAT_VERIFY_SSL="true" + GIGACHAT_CA_PATH.
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: gigachat-certs
+              mountPath: /certs
+              readOnly: true
+            # - name: sber-ca
+            #   mountPath: /certs-ca
+            #   readOnly: true
+          # И liveness, и readiness бьют в /health. /ready отдаёт 503, пока не задан
+          # VAULT_PATH (мультитенантный режим) — для проб он НЕ годится.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            # Запас на подключение к Qdrant и миграции по пользователям при старте.
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            # false осознанно: приложение пишет во временные файлы вне /data
+            # (кеш, временные файлы SQLite). readOnlyRootFilesystem: true
+            # потребовал бы отдельных emptyDir на /tmp и рабочий каталог.
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: cognivault-data
+        - name: gigachat-certs
+          secret:
+            secretName: cognivault-gigachat-certs
+            # 0400 — приватный ключ читает только владелец процесса (uid 1000).
+            defaultMode: 0400
+        # - name: sber-ca
+        #   secret:
+        #     secretName: sber-ca
+        #     defaultMode: 0444
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cognivault
+  labels:
+    app.kubernetes.io/name: cognivault
+    app.kubernetes.io/component: api
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "3000"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: cognivault
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

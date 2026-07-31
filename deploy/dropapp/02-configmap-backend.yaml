@@ -1,0 +1,74 @@
+# Несекретная конфигурация бэкенда (cognivault). Секреты — только через
+# secretKeyRef в 04-backend.yaml (сертификаты GigaChat, креды Qdrant).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cognivault-config
+  labels:
+    app.kubernetes.io/name: cognivault
+    app.kubernetes.io/component: api
+data:
+  # ── Сервер ────────────────────────────────────────────────────────────
+  PORT: "3000"
+  HOST: "0.0.0.0"
+  LOG_LEVEL: "info"
+  COGNIVAULT_DATA_DIR: "/data"
+  # VAULT_PATH намеренно НЕ задан: в мультитенантном режиме у каждого
+  # пользователя свой vaultPath. Глобальный VAULT_PATH меняет семантику /ready,
+  # поэтому пробы бьют в /health, а не в /ready (см. 04-backend.yaml).
+
+  # ── Векторное хранилище (ВНЕШНИЙ Qdrant в DropApp) ────────────────────
+  # Приложение подключается на старте и создаёт коллекцию `cognivault` — Qdrant
+  # должен быть доступен ДО выкатки, иначе под уходит в CrashLoop (startupProbe
+  # даёт ~150 с ретраев). Перед Qdrant стоит реверс-прокси с HTTP Basic:
+  # QDRANT_USERNAME/QDRANT_PASSWORD приходят из секрета vectordb-creds
+  # (см. 04-backend.yaml) — здесь их быть не должно.
+  # Резервный хост, переключается вручную (клиентской балансировки нет):
+  #   https://tsled-oasis0002.esrt.sber.ru:6433
+  # Откат на внутрикластерный Qdrant (99-qdrant-inhouse.yaml): "http://qdrant:6333".
+  QDRANT_URL: "https://tsled-oasis0001.esrt.sber.ru:6433"
+  # Таймаут одного запроса, мс. Дефолт клиента 300000 — для внешнего хопа много.
+  QDRANT_TIMEOUT_MS: "30000"
+
+  # ── Эмбеддинги: GigaChat ──────────────────────────────────────────────
+  EMBEDDING_PROVIDER: "gigachat"
+  GIGACHAT_BASE_URL: "https://gigachat-ift.sberdevices.delta.sbrf.ru/v1"
+  GIGACHAT_MODEL: "EmbeddingsGigaR"
+  # EmbeddingsGigaR АСИММЕТРИЧНА: инструкцию несёт только поисковый ЗАПРОС,
+  # документы — никогда (поэтому смена строки НЕ требует переиндексации).
+  # "{query}" подставляется текстом запроса; шаблон без плейсхолдера просто
+  # добавляется в начало; пустое значение отключает инструкцию.
+  # ВНИМАНИЕ: `\n` внутри ДВОЙНЫХ кавычек YAML разворачивается в настоящий
+  # перевод строки — строка побайтово совпадает с дефолтом в src/config.ts.
+  # В одинарных кавычках или без кавычек это сломается (будет литерал \n).
+  GIGACHAT_QUERY_INSTRUCTION: "Дан вопрос, необходимо найти абзац текста с ответом \nвопрос: {query}"
+  # Размерность вектора EmbeddingsGigaR. Неверное число → нужна новая коллекция
+  # Qdrant и полная переиндексация (на старте приложение падает на несовпадении).
+  EMBEDDING_DIMENSIONS: "2560"
+  # Пути к файлам из смонтированного секрета cognivault-gigachat-certs (/certs).
+  GIGACHAT_CERT_PATH: "/certs/client_crt.crt"
+  GIGACHAT_KEY_PATH: "/certs/client_key.key"
+  # Раскомментировать, когда в секрет добавлен ключ ca.pem:
+  # GIGACHAT_CA_PATH: "/certs/ca.pem"
+  # Временный escape hatch: проверка сертификата сервера GigaChat снята (как в
+  # эталонном локальном Giga_sigma). Когда появится CA-бандл — задать
+  # GIGACHAT_CA_PATH выше и вернуть "true".
+  GIGACHAT_VERIFY_SSL: "false"
+
+  # ── Тюнинг GigaChat (значения проверены на локальном контуре) ─────────
+  GIGACHAT_MAX_REQUEST_BYTES: "120000"
+  GIGACHAT_MAX_BATCH_ITEMS: "64"
+  # Лимит токенов на ОДИН HTTP-запрос (сумма по батчу).
+  # Да, он меньше GIGACHAT_MAX_EMBEDDING_TOKENS ("3300") — и это НЕ конфликт:
+  # чанки индексатора режутся примерно по 500 токенов, поэтому реальный вход
+  # никогда не упирается в 3300, а батчи бьются по 2048. Поднимать это значение
+  # нужно только если на длинных документах полезли ошибки
+  # «Tokens limit exceeded» — тогда 2048 → 3300 (и следить за 413 от шлюза).
+  GIGACHAT_MAX_REQUEST_TOKENS: "2048"
+  # Реальный контекст модели — 4096 токенов на вход. cl100k недосчитывает
+  # русские токены примерно на 20 % относительно токенизатора GigaChat, поэтому
+  # 3300 cl100k ≈ 4000 токенов GigaChat: контекст используется полностью, запас
+  # остаётся. Снизить (напр. до 2500), если снова полезет «Tokens limit exceeded».
+  GIGACHAT_MAX_EMBEDDING_TOKENS: "3300"
+  GIGACHAT_MAX_RETRIES: "5"
+  GIGACHAT_RETRY_BASE_DELAY_MS: "1000"

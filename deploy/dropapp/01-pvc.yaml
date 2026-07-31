@@ -1,0 +1,26 @@
+# Единственный PVC в namespace (квота платформы — 1 PVC). Под данные бэкенда:
+# /data/users.json (реестр cv-токенов), SQLite-индексы, папки-волты.
+#
+# RWO + strategy: Recreate + fsGroup: 1000 → том корректно монтируется под uid 1000
+# и старый под успевает его отпустить перед стартом нового.
+#
+# ВНИМАНИЕ: из-за квоты 1 PVC внутрикластерный Qdrant (99-qdrant-inhouse.yaml)
+# обязан жить на emptyDir, а /data у UI — тоже emptyDir. Это осознанный компромисс,
+# см. «Известные ограничения» в README.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cognivault-data
+  labels:
+    app.kubernetes.io/name: cognivault
+    app.kubernetes.io/component: api
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  # Оставлено пустым → используется StorageClass по умолчанию. Если дефолтного
+  # класса в кластере нет, раскомментируйте и подставьте класс из
+  # `oc get storageclass`.
+  # storageClassName: ""

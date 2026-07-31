@@ -1,0 +1,129 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# НЕ ПРИМЕНЯТЬ ПО УМОЛЧАНИЮ. Штатная конфигурация — ВНЕШНИЙ Qdrant в DropApp
+# (QDRANT_URL в 02-configmap-backend.yaml). Этот файл нужен только как ОТКАТ,
+# если внешний Qdrant недоступен и надо быстро поднять функциональный контур.
+#
+# Применять СТРОГО вместе с двумя правками:
+#   1) в 02-configmap-backend.yaml: QDRANT_URL: "http://qdrant:6333";
+#   2) в 04-backend.yaml: убрать env QDRANT_USERNAME/QDRANT_PASSWORD
+#      (внутрикластерный Qdrant без Basic-auth; задан ровно один ключ —
+#      приложение падает на валидации конфига, оба ключа против сервера без
+#      авторизации тоже не нужны).
+# Затем: oc rollout restart deploy/cognivault
+#
+# ⚠️ НЕ ВЫСТАВЛЯТЬ НАРУЖУ. У этого Qdrant НЕТ аутентификации: любой, кто дотянется
+# до Service/Ingress, читает и перезаписывает векторы. В кластере уже было правило
+# Ingress qdrant.apps.bcayrqks.k8s.delta.sbrf.ru → qdrant:6333 — оно удаляется
+# (см. README, шаг 7.1) и восстанавливать его не нужно.
+#
+# ⚠️ ХРАНИЛИЩЕ — emptyDir, НЕ PVC. В namespace квота ОДИН PVC, и он занят
+# cognivault-data. Значит векторы НЕ переживают перезапуск пода Qdrant: после
+# каждого рестарта нужен POST /api/admin/reindex. Для функционального теста
+# приемлемо, для постоянной работы — поднимать квоту у платформы.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant
+  labels:
+    app.kubernetes.io/name: qdrant
+    app.kubernetes.io/component: vector-store
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: qdrant
+  ports:
+    - name: http
+      port: 6333
+      targetPort: http
+    - name: grpc
+      port: 6334
+      targetPort: grpc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qdrant
+  labels:
+    app.kubernetes.io/name: qdrant
+    app.kubernetes.io/component: vector-store
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: qdrant
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: qdrant
+        app.kubernetes.io/component: vector-store
+    spec:
+      # Образ идёт через docker-прокси SberOSC — нужен тот же pull-secret.
+      imagePullSecrets:
+        - name: sberosc-pull
+      securityContext:
+        # Restricted PodSecurity: образ Qdrant по умолчанию стартует от root,
+        # поэтому запускаем от uid 1000; fsGroup делает emptyDir записываемым.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: qdrant
+          # v1.3.0 — единственная версия, прошедшая скан SberOSC («Разрешён»).
+          # Старая: /readyz и /livez появились только в ~1.5, поэтому пробы по TCP.
+          # ДЛЯ ВОЛНЫ 3 (BM25/sparse-векторы, гибридный поиск на стороне Qdrant)
+          # потребуется 1.16.3 — её нужно заранее провести через скан SberOSC.
+          image: sberosc.sigma.sbrf.ru/docker.io/qdrant/qdrant:v1.3.0
+          imagePullPolicy: IfNotPresent
+          env:
+            # Non-root не может создать root-овый /qdrant/snapshots — держим
+            # снапшоты внутри записываемого тома.
+            - name: QDRANT__STORAGE__SNAPSHOTS_PATH
+              value: /qdrant/storage/snapshots
+          ports:
+            - name: http
+              containerPort: 6333
+            - name: grpc
+              containerPort: 6334
+          startupProbe:
+            tcpSocket:
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: storage
+              mountPath: /qdrant/storage
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        # emptyDir, а не PVC — см. предупреждение о квоте вверху файла.
+        - name: storage
+          emptyDir: {}

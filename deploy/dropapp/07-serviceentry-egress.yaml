@@ -1,0 +1,66 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# ОПЦИОНАЛЬНО — применять, ТОЛЬКО если сервис-меш режет исходящий трафик по
+# умолчанию (Istio outboundTrafficPolicy = REGISTRY_ONLY). В namespace стоит
+# метка ревизии Istio (istio.io/rev=synapse-control-panel), поэтому сайдкар
+# может отклонять вызовы к неизвестным хостам. Если меш в режиме ALLOW_ANY
+# (дефолт Istio) или меша нет — файл безвреден, но и не нужен.
+#
+# Общее правило для всех трёх записей: приложение САМО поднимает TLS (для
+# GigaChat — ещё и с клиентским сертификатом). При `protocol: TLS` сайдкар делает
+# SNI-passthrough и НЕ терминирует соединение, поэтому клиентский сертификат
+# доходит до GigaChat целым. DestinationRule с origination TLS для этих хостов
+# добавлять НЕЛЬЗЯ — соединение сломается.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: gigachat-egress
+  labels:
+    app.kubernetes.io/name: cognivault
+spec:
+  hosts:
+    - gigachat-ift.sberdevices.delta.sbrf.ru
+  ports:
+    - number: 443
+      name: https
+      protocol: TLS
+  resolution: DNS
+  location: MESH_EXTERNAL
+---
+# Внешний Qdrant (DropApp). Перечислены ОБА узла: QDRANT_URL указывает на один,
+# второй — ручной резерв (клиентской балансировки нет). Порт 6433 — реверс-прокси
+# с HTTP Basic перед Qdrant.
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: qdrant-external-egress
+  labels:
+    app.kubernetes.io/name: cognivault
+spec:
+  hosts:
+    - tsled-oasis0001.esrt.sber.ru
+    - tsled-oasis0002.esrt.sber.ru
+  ports:
+    - number: 6433
+      name: https-qdrant
+      protocol: TLS
+  resolution: DNS
+  location: MESH_EXTERNAL
+---
+# Confluence — источник документов для UI. Нужен, только если включён источник
+# Confluence; на пустом окружении без него можно не применять.
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: confluence-egress
+  labels:
+    app.kubernetes.io/name: cognivault-ui
+spec:
+  hosts:
+    - confluence.sberbank.ru
+  ports:
+    - number: 443
+      name: https
+      protocol: TLS
+  resolution: DNS
+  location: MESH_EXTERNAL

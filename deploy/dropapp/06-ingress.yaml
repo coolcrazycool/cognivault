@@ -1,0 +1,56 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# ВНЕШНИЙ ВХОД. Наружу выставляется ТОЛЬКО UI; REST API остаётся внутренним
+# (ClusterIP), морда ходит в него по http://cognivault:3000.
+#
+# ⚠️ ЭТОТ ОБЪЕКТ УЖЕ СУЩЕСТВУЕТ В КЛАСТЕРЕ и создан не нами (платформой DropApp).
+# Он уже настроен правильно: host cognivault-ui.apps.bcayrqks.k8s.delta.sbrf.ru →
+# cognivault-ui:8787. При ШТАТНОМ ОБНОВЛЕНИИ его трогать НЕ НУЖНО.
+# Файл здесь для полноты набора — `oc apply` имеет смысл только при пересоздании
+# окружения с нуля (или чтобы вернуть объект к этому состоянию).
+# Сначала всегда смотрите, что реально в кластере:
+#     oc get ingress -n ci05490208-oasis-cognivault -o yaml
+#
+# ⚠️ ОТЛИЧИЕ ОТ ТЕКУЩЕГО СОСТОЯНИЯ КЛАСТЕРА: здесь ОДНО правило (UI).
+# В кластере у объекта есть ВТОРОЕ правило — host qdrant.apps.bcayrqks.k8s.delta.sbrf.ru
+# → qdrant:6333. Его нужно УДАЛИТЬ, причины:
+#   (а) у внутрикластерного Qdrant нет никакой аутентификации — сейчас векторы
+#       может читать и писать кто угодно, кто дотянется до этого хоста;
+#   (б) после переезда на внешний Qdrant Service `qdrant` вообще не существует,
+#       и правило висит впустую.
+# Как удалить (см. README, шаг 7):
+#     oc patch ingress oasis-cognivault-ingress -n ci05490208-oasis-cognivault \
+#       --type=json -p '[{"op":"remove","path":"/spec/rules/1"}]'
+#
+# ⚠️ TLS НЕ НАСТРОЕН. Вход работает по обычному HTTP: cv-токены
+# (Authorization: Bearer cv-…) и содержимое чатов идут по сети ОТКРЫТЫМ ТЕКСТОМ.
+# Когда появится сертификат — добавьте блок spec.tls (закомментирован ниже).
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  # Имя как у существующего в кластере объекта — чтобы `oc apply` обновлял его,
+  # а не плодил второй Ingress с тем же host (это привело бы к конфликту).
+  name: oasis-cognivault-ingress
+  labels:
+    app.kubernetes.io/name: cognivault-ui
+    app.kubernetes.io/component: ui
+spec:
+  # Кластер использует ingress-nginx (не роутер OpenShift), поэтому никаких
+  # аннотаций route.openshift.io/* здесь быть не должно.
+  ingressClassName: nginx
+  rules:
+    - host: cognivault-ui.apps.bcayrqks.k8s.delta.sbrf.ru
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cognivault-ui
+                port:
+                  number: 8787
+  # TLS отсутствует намеренно — сертификата под этот host сейчас нет.
+  # tls:
+  #   - hosts:
+  #       - cognivault-ui.apps.bcayrqks.k8s.delta.sbrf.ru
+  #     secretName: cognivault-ui-tls

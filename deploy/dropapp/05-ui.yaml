@@ -1,0 +1,130 @@
+# Фронтенд CogniVault (FastAPI + SPA): Deployment + ClusterIP Service.
+# Это единственный компонент, который выставляется наружу (06-ingress.yaml).
+#
+# ВНИМАНИЕ: /data смонтирован как emptyDir — БЕЗ PVC (квота namespace: 1 PVC,
+# он отдан бэкенду). История чатов и rag_log.jsonl НЕ переживают перезапуск или
+# перепланировку пода. Для постоянства нужен второй PVC (поднять квоту у
+# платформы), после чего заменить том `data` на persistentVolumeClaim —
+# изменений в коде не требуется, тот же mountPath /data.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cognivault-ui
+  labels:
+    app.kubernetes.io/name: cognivault-ui
+    app.kubernetes.io/component: ui
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cognivault-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cognivault-ui
+        app.kubernetes.io/component: ui
+    spec:
+      imagePullSecrets:
+        - name: sberosc-pull
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cognivault-ui
+          # Иммутабельный sha-тег: пиним именно sha, а не тег ветки, чтобы SberOSC
+          # сканировал НОВЫЙ digest, а не отдавал закешированный вердикт по старому
+          # образу. Источник — ghcr.io/coolcrazycool/cognivault-ui (пакет PUBLIC).
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-f8a989d
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8787
+          envFrom:
+            - configMapRef:
+                name: cognivault-ui-config
+          env:
+            # Общий с бэкендом секрет с mTLS-сертификатами GigaChat.
+            - name: GIGACHAT_KEY_PASSPHRASE
+              valueFrom:
+                secretKeyRef:
+                  name: cognivault-gigachat-certs
+                  key: key.passphrase
+                  optional: true
+          volumeMounts:
+            - name: gigachat-certs
+              mountPath: /certs
+              readOnly: true
+            - name: data
+              mountPath: /data
+            # CA внутреннего УЦ для TLS Confluence. Раскомментировать вместе с
+            # CONFLUENCE_CA_PATH в 03-configmap-ui.yaml и volume `sber-ca` ниже.
+            # Отдельный каталог /certs-ca, чтобы не перекрыть секрет GigaChat в /certs.
+            # - name: sber-ca
+            #   mountPath: /certs-ca
+            #   readOnly: true
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: gigachat-certs
+          secret:
+            secretName: cognivault-gigachat-certs
+            defaultMode: 0400
+        - name: data
+          emptyDir: {}
+        # - name: sber-ca
+        #   secret:
+        #     secretName: sber-ca
+        #     defaultMode: 0444
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cognivault-ui
+  labels:
+    app.kubernetes.io/name: cognivault-ui
+    app.kubernetes.io/component: ui
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: cognivault-ui
+  ports:
+    - name: http
+      port: 8787
+      targetPort: http
