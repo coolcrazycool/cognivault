@@ -49,15 +49,12 @@ data:
   # Проверка TLS сервера СНЯТА — временный режим, пока нет бандла внутреннего УЦ.
   CONFLUENCE_VERIFY_SSL: "false"
   #
-  # CONFLUENCE_CA_PATH намеренно НЕ задан.
-  # В старом cognivault-ui.yaml он стоял как "/certs/sber-ca.pem", но по этому пути
-  # ничего не смонтировано: /certs — это секрет cognivault-gigachat-certs, файла
-  # sber-ca.pem в нём нет. При CONFLUENCE_VERIFY_SSL=false значение всё равно
-  # игнорируется, так что ключ был просто вводящим в заблуждение мусором.
-  # Чтобы включить проверку по внутреннему УЦ:
-  #   1) создать Secret `sber-ca` (см. 00-secrets.example.yaml);
-  #   2) раскомментировать блок sber-ca в 05-ui.yaml (volume + volumeMount /certs-ca);
-  #   3) раскомментировать строку ниже и поменять CONFLUENCE_VERIFY_SSL выше на "true".
-  # Путь /certs-ca (а не /certs) — чтобы не конфликтовать с монтированием
-  # секрета сертификатов GigaChat в /certs.
-  # CONFLUENCE_CA_PATH: "/certs-ca/sber-ca.pem"
+  # CONFLUENCE_CA_PATH намеренно НЕ задан по умолчанию.
+  # В старом cognivault-ui.yaml он стоял как "/certs/sber-ca.pem" — по этому пути
+  # ничего не было смонтировано, ключ был мусором. Теперь бандл внутреннего УЦ
+  # лежит в том же секрете cognivault-gigachat-certs ключом cacert.pem, то есть
+  # доступен по /certs/cacert.pem (секрет уже смонтирован в /certs).
+  # Чтобы включить проверку: раскомментировать строку ниже и поменять
+  # CONFLUENCE_VERIFY_SSL выше на "true". Не включено по умолчанию — не проверено,
+  # что этот бандл покрывает цепочку хоста Confluence.
+  # CONFLUENCE_CA_PATH: "/certs/cacert.pem"

@@ -96,40 +96,38 @@ spec:
                 secretKeyRef:
                   name: vectordb-creds
                   key: password
-            # ── CA внутреннего УЦ для внешнего Qdrant (опционально) ────────
-            # Раскомментировать, если внешний Qdrant предъявляет сертификат
-            # внутреннего УЦ Сбера и проверка связности (README, шаг 3) даёт
-            # UNABLE_TO_VERIFY_LEAF_SIGNATURE / SELF_SIGNED_CERT_IN_CHAIN.
+            # Пароль приватного ключа, которым бэкенд предъявляется прокси перед
+            # внешним Qdrant (QDRANT_CERT_PATH / QDRANT_KEY_PATH в ConfigMap).
+            # Ключ переиспользуется от GigaChat, поэтому и пароль тот же секрет.
+            # optional: true → если ключа key.passphrase в секрете нет, под стартует.
+            - name: QDRANT_KEY_PASSPHRASE
+              valueFrom:
+                secretKeyRef:
+                  name: cognivault-gigachat-certs
+                  key: key.passphrase
+                  optional: true
+            # ── CA внутреннего УЦ ──────────────────────────────────────────
+            # Отдельного секрета и отдельного монтирования НЕТ: бандл лежит в
+            # cognivault-gigachat-certs ключом cacert.pem и доступен по пути
+            # /certs/cacert.pem. Путь задан ключом QDRANT_CA_PATH в
+            # 02-configmap-backend.yaml, ENV-переменной для этого не нужно.
+            # NODE_EXTRA_CA_CERTS не используется вовсе.
             #
-            # Настроить доверие ИЗ КОДА нельзя: fetch в Node 22 идёт через undici,
-            # публичного Agent для подмены CA нет, а NODE_EXTRA_CA_CERTS Node
-            # читает ТОЛЬКО при старте процесса. Поэтому переменной QDRANT_CA_PATH
-            # в конфиге приложения нет — вопрос решается на уровне пода.
-            #
-            # Нужен Secret `sber-ca` с ключом sber-ca.pem (00-secrets.example.yaml).
-            # Вместе с этим блоком раскомментируйте volumeMount `sber-ca` и volume
-            # `sber-ca` ниже.
-            # - name: NODE_EXTRA_CA_CERTS
-            #   value: /certs-ca/sber-ca.pem
-            #
-            # КОСТЫЛЬ на крайний случай — вместо NODE_EXTRA_CA_CERTS:
+            # АВАРИЙНЫЙ КОСТЫЛЬ, применять только если всё остальное не помогло:
             # - name: NODE_TLS_REJECT_UNAUTHORIZED
             #   value: "0"
-            # ⚠️ Это ГЛОБАЛЬНЫЙ тумблер процесса: он снимает проверку сертификата
-            # не только для Qdrant, но и для GigaChat — MITM станет незаметен.
-            # Сейчас в конфиге и так GIGACHAT_VERIFY_SSL="false", поэтому
-            # фактической регрессии нет, но осознавать это надо. Как только
-            # появится CA-бандл — перейти на NODE_EXTRA_CA_CERTS и вернуть
-            # GIGACHAT_VERIFY_SSL="true" + GIGACHAT_CA_PATH.
+            # ⚠️ Это ГЛОБАЛЬНЫЙ тумблер процесса: снимает проверку сертификата не
+            # только для Qdrant, но и для GigaChat — MITM станет незаметен.
+            # Штатная замена — QDRANT_VERIFY_SSL: "false" в ConfigMap: она гасит
+            # проверку ТОЛЬКО для host:port Qdrant. А правильное решение — CA-бандл
+            # в QDRANT_CA_PATH и QDRANT_VERIFY_SSL: "true".
           volumeMounts:
             - name: data
               mountPath: /data
+            # Клиентские сертификаты И CA-бандл (cacert.pem) — один секрет.
             - name: gigachat-certs
               mountPath: /certs
               readOnly: true
-            # - name: sber-ca
-            #   mountPath: /certs-ca
-            #   readOnly: true
           # И liveness, и readiness бьют в /health. /ready отдаёт 503, пока не задан
           # VAULT_PATH (мультитенантный режим) — для проб он НЕ годится.
           startupProbe:
@@ -177,12 +175,12 @@ spec:
         - name: gigachat-certs
           secret:
             secretName: cognivault-gigachat-certs
-            # 0400 — приватный ключ читает только владелец процесса (uid 1000).
-            defaultMode: 0400
-        # - name: sber-ca
-        #   secret:
-        #     secretName: sber-ca
-        #     defaultMode: 0444
+            # 0440, а НЕ 0400. Файлы секрета принадлежат root:fsGroup (root:1000),
+            # процесс работает под uid 1000 — при 0400 читать может только root,
+            # и приложение падает на старте, когда синхронно читает cacert.pem и
+            # client_key.key. 0440 даёт чтение группе 1000 и по-прежнему закрывает
+            # доступ всем остальным (дефолт 0644 читаем кем угодно в контейнере).
+            defaultMode: 0440
 ---
 apiVersion: v1
 kind: Service

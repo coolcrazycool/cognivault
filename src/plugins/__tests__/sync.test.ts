@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
-import { Counter, Gauge, Registry } from 'prom-client';
+import { type Counter, type Gauge, Registry } from 'prom-client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // ── Mocks ──

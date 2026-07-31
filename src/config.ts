@@ -14,6 +14,24 @@ const configSchema = z
     // Per-request timeout for the Qdrant REST client (client default is 300_000 ms —
     // far too long for a hop over the corporate network).
     QDRANT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+    // TLS to an EXTERNAL Qdrant. The REST client goes through the global `fetch`
+    // (undici) and exposes no TLS options, so these drive an origin-scoped undici
+    // dispatcher instead (src/lib/qdrant-tls.ts). Nothing set → stock `fetch`
+    // behaviour, system root store, no client certificate.
+    // CA bundle of the internal certificate authority (PEM). Setting it REPLACES the
+    // system root store — for the Qdrant origin only.
+    QDRANT_CA_PATH: z.string().optional(),
+    // Client certificate for proxies that demand mTLS. Both paths or neither.
+    QDRANT_CERT_PATH: z.string().optional(),
+    QDRANT_KEY_PATH: z.string().optional(),
+    QDRANT_KEY_PASSPHRASE: z.string().optional(),
+    // Verify the Qdrant server certificate. Disable only as a temporary escape hatch
+    // while the internal CA bundle is unavailable — unlike NODE_TLS_REJECT_UNAUTHORIZED
+    // this affects the Qdrant origin ONLY.
+    QDRANT_VERIFY_SSL: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((v) => v === 'true'),
     COGNIVAULT_DATA_DIR: z.string().default('./.cognivault'),
     POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
     STABILITY_DELAY_MS: z.coerce.number().int().positive().default(2000),
@@ -81,6 +99,22 @@ const configSchema = z
         code: z.ZodIssueCode.custom,
         path: ['QDRANT_USERNAME'],
         message: 'QDRANT_USERNAME is required when QDRANT_PASSWORD is set',
+      });
+    }
+
+    // A lone cert (or a lone key) is silently ignored by TLS — fail fast instead.
+    if (cfg.QDRANT_CERT_PATH && !cfg.QDRANT_KEY_PATH) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['QDRANT_KEY_PATH'],
+        message: 'QDRANT_KEY_PATH is required when QDRANT_CERT_PATH is set',
+      });
+    }
+    if (cfg.QDRANT_KEY_PATH && !cfg.QDRANT_CERT_PATH) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['QDRANT_CERT_PATH'],
+        message: 'QDRANT_CERT_PATH is required when QDRANT_KEY_PATH is set',
       });
     }
 

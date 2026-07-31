@@ -30,6 +30,36 @@ data:
   # Таймаут одного запроса, мс. Дефолт клиента 300000 — для внешнего хопа много.
   QDRANT_TIMEOUT_MS: "30000"
 
+  # ── TLS до внешнего Qdrant ────────────────────────────────────────────
+  # Qdrant-клиент своих TLS-опций НЕ имеет и создаёт собственный undici-Agent,
+  # поэтому приложение перехватывает tls.connect и подмешивает материал ниже
+  # ТОЛЬКО для пары host:port из QDRANT_URL. Остальной TLS-трафик (GigaChat,
+  # Confluence, OTLP) проходит нетронутым.
+  # NODE_EXTRA_CA_CERTS и NODE_TLS_REJECT_UNAUTHORIZED больше НЕ нужны.
+  #
+  # CA внутреннего УЦ. Бандл лежит в ТОМ ЖЕ секрете cognivault-gigachat-certs
+  # (ключ cacert.pem), что и клиентские сертификаты, — отдельный секрет и
+  # отдельное монтирование не нужны, /certs уже смонтирован.
+  # ВНИМАНИЕ: заданный CA ЗАМЕНЯЕТ системное хранилище корней (для Qdrant).
+  QDRANT_CA_PATH: "/certs/cacert.pem"
+  #
+  # Клиентский сертификат: прокси перед внешним Qdrant, по словам сопровождения,
+  # требует mTLS. Это НЕ специальные сертификаты для Qdrant — прокси принимает
+  # ЛЮБУЮ валидную пару, поэтому переиспользуем уже смонтированный секрет
+  # cognivault-gigachat-certs (/certs). Задавать оба ключа или ни одного:
+  # при одном приложение падает на валидации конфига.
+  QDRANT_CERT_PATH: "/certs/client_crt.crt"
+  QDRANT_KEY_PATH: "/certs/client_key.key"
+  # Пароль ключа (если он зашифрован) — QDRANT_KEY_PASSPHRASE, приходит из того же
+  # секрета через secretKeyRef в 04-backend.yaml, здесь его быть не должно.
+  #
+  # Проверка сертификата СЕРВЕРА Qdrant. "true" — штатный режим: цепочка
+  # проверяется по бандлу из QDRANT_CA_PATH выше. "false" — только временный
+  # escape hatch, если бандл не подошёл. В отличие от
+  # NODE_TLS_REJECT_UNAUTHORIZED=0 это гасит проверку ТОЛЬКО для host:port
+  # Qdrant, GigaChat не затрагивается.
+  QDRANT_VERIFY_SSL: "true"
+
   # ── Эмбеддинги: GigaChat ──────────────────────────────────────────────
   EMBEDDING_PROVIDER: "gigachat"
   GIGACHAT_BASE_URL: "https://gigachat-ift.sberdevices.delta.sbrf.ru/v1"
@@ -48,11 +78,15 @@ data:
   # Пути к файлам из смонтированного секрета cognivault-gigachat-certs (/certs).
   GIGACHAT_CERT_PATH: "/certs/client_crt.crt"
   GIGACHAT_KEY_PATH: "/certs/client_key.key"
-  # Раскомментировать, когда в секрет добавлен ключ ca.pem:
-  # GIGACHAT_CA_PATH: "/certs/ca.pem"
+  # CA-бандл внутреннего УЦ (cacert.pem) лежит в том же секрете и уже используется
+  # для Qdrant (QDRANT_CA_PATH выше). ЕСЛИ подключение к Qdrant по нему заработало,
+  # логично попробовать тот же бандл и для GigaChat: раскомментировать строку ниже
+  # и поменять GIGACHAT_VERIFY_SSL на "true". По умолчанию НЕ включено — не
+  # проверено, что этот бандл покрывает цепочку хоста GigaChat; при несовпадении
+  # эмбеддинги перестанут работать (UNABLE_TO_VERIFY_LEAF_SIGNATURE).
+  # GIGACHAT_CA_PATH: "/certs/cacert.pem"
   # Временный escape hatch: проверка сертификата сервера GigaChat снята (как в
-  # эталонном локальном Giga_sigma). Когда появится CA-бандл — задать
-  # GIGACHAT_CA_PATH выше и вернуть "true".
+  # эталонном локальном Giga_sigma).
   GIGACHAT_VERIFY_SSL: "false"
 
   # ── Тюнинг GigaChat (значения проверены на локальном контуре) ─────────

@@ -62,12 +62,6 @@ spec:
               readOnly: true
             - name: data
               mountPath: /data
-            # CA внутреннего УЦ для TLS Confluence. Раскомментировать вместе с
-            # CONFLUENCE_CA_PATH в 03-configmap-ui.yaml и volume `sber-ca` ниже.
-            # Отдельный каталог /certs-ca, чтобы не перекрыть секрет GigaChat в /certs.
-            # - name: sber-ca
-            #   mountPath: /certs-ca
-            #   readOnly: true
           startupProbe:
             httpGet:
               path: /healthz
@@ -104,14 +98,15 @@ spec:
       volumes:
         - name: gigachat-certs
           secret:
+            # Тот же секрет, что у бэкенда: клиентские сертификаты + CA-бандл
+            # cacert.pem.
             secretName: cognivault-gigachat-certs
-            defaultMode: 0400
+            # 0440, а НЕ 0400: владелец файлов секрета — root, процесс идёт под
+            # uid 1000 (fsGroup 1000). При 0400 группа прав не получает и чтение
+            # ключа падает. 0440 — читают root и группа 1000, посторонние ничего.
+            defaultMode: 0440
         - name: data
           emptyDir: {}
-        # - name: sber-ca
-        #   secret:
-        #     secretName: sber-ca
-        #     defaultMode: 0444
 ---
 apiVersion: v1
 kind: Service

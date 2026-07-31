@@ -533,6 +533,25 @@ describe('qdrantPlugin', () => {
       await close();
     });
 
+    // The "custom" TLS path (and its no-leak guarantees) lives in
+    // src/lib/__tests__/qdrant-tls.test.ts — installing a real undici dispatcher
+    // from here would mutate the global dispatcher of the whole test process.
+    it('reports the TLS mode on the same line as the auth mode', async () => {
+      const { close, logCalls } = await start({});
+
+      const configuredLog = logCalls.find((args) => args[1] === 'Qdrant client configured')?.[0] as
+        | Record<string, unknown>
+        | undefined;
+
+      expect(configuredLog).toMatchObject({
+        qdrantTls: 'system',
+        qdrantClientCert: false,
+        qdrantVerifySsl: true,
+      });
+
+      await close();
+    });
+
     it('reports qdrantAuth "none" when running without credentials', async () => {
       const { close, logCalls } = await start({});
 

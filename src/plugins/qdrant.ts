@@ -4,6 +4,7 @@ import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import { config } from '../config.js';
 import { resolveDimensions } from '../lib/embedding.js';
+import { describeQdrantTls, installQdrantTls } from '../lib/qdrant-tls.js';
 import { TenantQdrantClient } from '../lib/tenant-qdrant-client.js';
 
 declare module 'fastify' {
@@ -153,15 +154,21 @@ function buildClientParams(): QdrantClientParams {
 async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
   const dimensions = resolveDimensions(config);
 
+  // Must precede the client and its first connection: the REST client ships its own
+  // undici Agent, so the only reachable seam is `tls.connect` (see qdrant-tls.ts).
+  installQdrantTls(config, fastify.log);
+
   const params = buildClientParams();
   const client = new QdrantClient(params);
 
-  // Log the auth MODE only — never the header value or the params object.
+  // Log MODES only — never the header value, the params object, cert paths or the
+  // key passphrase.
   fastify.log.info(
     {
       qdrantUrl: config.QDRANT_URL,
       qdrantAuth: params.headers ? 'basic' : 'none',
       qdrantTimeoutMs: config.QDRANT_TIMEOUT_MS,
+      ...describeQdrantTls(config),
     },
     'Qdrant client configured',
   );
