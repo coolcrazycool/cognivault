@@ -64,6 +64,8 @@ const MOCK_EMBEDDING = [Array.from({ length: 10 }, (_, i) => (i + 1) * 0.1)];
 const mockQdrantSearch = vi.fn().mockResolvedValue(MOCK_SCORED_POINTS);
 const mockQdrantScroll = vi.fn().mockResolvedValue(MOCK_SCROLL_RESULT);
 const mockEmbed = vi.fn().mockResolvedValue(MOCK_EMBEDDING);
+// Semantic search must go through embedQuery (query side), never embed (document side).
+const mockEmbedQuery = vi.fn().mockResolvedValue(MOCK_EMBEDDING[0]);
 
 const mockTenantQdrant = {
   search: mockQdrantSearch,
@@ -75,6 +77,7 @@ const mockTenantQdrant = {
 
 const mockEmbedder = {
   embed: mockEmbed,
+  embedQuery: mockEmbedQuery,
   dimensions: 10,
 };
 
@@ -170,10 +173,12 @@ describe('search routes', () => {
     mockQdrantSearch.mockReset();
     mockQdrantScroll.mockReset();
     mockEmbed.mockReset();
+    mockEmbedQuery.mockReset();
     // Reset to default return values
     mockQdrantSearch.mockResolvedValue(MOCK_SCORED_POINTS);
     mockQdrantScroll.mockResolvedValue(MOCK_SCROLL_RESULT);
     mockEmbed.mockResolvedValue(MOCK_EMBEDDING);
+    mockEmbedQuery.mockResolvedValue(MOCK_EMBEDDING[0]);
   });
 
   describe('POST /api/vault/search/semantic', () => {
@@ -260,7 +265,7 @@ describe('search routes', () => {
       ]);
     });
 
-    it('calls embedder.embed with query and tenant qdrant.search with the embedding vector', async () => {
+    it('calls embedder.embedQuery with query and tenant qdrant.search with the embedding vector', async () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/semantic',
@@ -268,7 +273,10 @@ describe('search routes', () => {
         payload: { query: 'embedding test' },
       });
 
-      expect(mockEmbed).toHaveBeenCalledWith(['embedding test']);
+      // Query side goes through embedQuery so asymmetric models get their instruction;
+      // the document-side embed() must not be touched.
+      expect(mockEmbedQuery).toHaveBeenCalledWith('embedding test');
+      expect(mockEmbed).not.toHaveBeenCalled();
       expect(mockQdrantSearch).toHaveBeenCalledWith(
         expect.objectContaining({
           vector: MOCK_EMBEDDING[0],
@@ -418,6 +426,18 @@ describe('search routes', () => {
 
       expect(mockQdrantSearch).toHaveBeenCalledTimes(1);
       expect(mockQdrantScroll).not.toHaveBeenCalled();
+    });
+
+    it('delegates to semantic and therefore embeds via embedQuery', async () => {
+      await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'hybrid test' },
+      });
+
+      expect(mockEmbedQuery).toHaveBeenCalledWith('hybrid test');
+      expect(mockEmbed).not.toHaveBeenCalled();
     });
 
     it('passes the requested limit straight through (no 2x oversampling)', async () => {

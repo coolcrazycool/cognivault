@@ -40,6 +40,7 @@ describe('GigaChatEmbeddingProvider', () => {
     expect(call).toBeDefined();
     const [url, body] = call as [string, string];
     expect(url).toBe(`${baseOpts.baseUrl}/embeddings`);
+    // Document path: body is exactly model + raw input, no query instruction.
     expect(JSON.parse(body)).toEqual({ model: 'EmbeddingsGigaR', input: ['hello'] });
   });
 
@@ -183,6 +184,88 @@ describe('GigaChatEmbeddingProvider', () => {
 
     expect(transport).toHaveBeenCalledTimes(2);
     expect(result).toEqual([[0.9]]);
+  });
+
+  it('embedQuery applies the query instruction with {query} substituted', async () => {
+    let sent: string[] = [];
+    const transport = vi.fn().mockImplementation((_url: string, body: string) => {
+      sent = (JSON.parse(body) as { input: string[] }).input;
+      return Promise.resolve({ data: [{ index: 0, embedding: [0.4, 0.5] }] });
+    });
+    const provider = new GigaChatEmbeddingProvider({
+      ...baseOpts,
+      queryInstruction: 'INSTRUCTION\nquestion: {query}',
+      transport,
+    });
+
+    const result = await provider.embedQuery('что такое RAG');
+
+    expect(sent).toEqual(['INSTRUCTION\nquestion: что такое RAG']);
+    expect(result).toEqual([0.4, 0.5]);
+  });
+
+  it('embedQuery uses Sber default instruction when none is configured', async () => {
+    let sent: string[] = [];
+    const transport = vi.fn().mockImplementation((_url: string, body: string) => {
+      sent = (JSON.parse(body) as { input: string[] }).input;
+      return Promise.resolve({ data: [{ index: 0, embedding: [1] }] });
+    });
+    const provider = new GigaChatEmbeddingProvider({ ...baseOpts, transport });
+
+    await provider.embedQuery('отпуск');
+
+    expect(sent).toEqual(['Дан вопрос, необходимо найти абзац текста с ответом \nвопрос: отпуск']);
+  });
+
+  it('embedQuery leaves the query untouched when the instruction is empty', async () => {
+    let sent: string[] = [];
+    const transport = vi.fn().mockImplementation((_url: string, body: string) => {
+      sent = (JSON.parse(body) as { input: string[] }).input;
+      return Promise.resolve({ data: [{ index: 0, embedding: [1] }] });
+    });
+    const provider = new GigaChatEmbeddingProvider({
+      ...baseOpts,
+      queryInstruction: '',
+      transport,
+    });
+
+    await provider.embedQuery('plain query');
+
+    expect(sent).toEqual(['plain query']);
+  });
+
+  it('embedQuery prepends an instruction that has no {query} placeholder', async () => {
+    let sent: string[] = [];
+    const transport = vi.fn().mockImplementation((_url: string, body: string) => {
+      sent = (JSON.parse(body) as { input: string[] }).input;
+      return Promise.resolve({ data: [{ index: 0, embedding: [1] }] });
+    });
+    const provider = new GigaChatEmbeddingProvider({
+      ...baseOpts,
+      queryInstruction: 'search_query: ',
+      transport,
+    });
+
+    await provider.embedQuery('kubernetes');
+
+    expect(sent).toEqual(['search_query: kubernetes']);
+  });
+
+  it('embed (documents) never receives the query instruction', async () => {
+    let sent: string[] = [];
+    const transport = vi.fn().mockImplementation((_url: string, body: string) => {
+      sent = (JSON.parse(body) as { input: string[] }).input;
+      return Promise.resolve({ data: sent.map((_t, index) => ({ index, embedding: [index] })) });
+    });
+    const provider = new GigaChatEmbeddingProvider({
+      ...baseOpts,
+      queryInstruction: 'INSTRUCTION: {query}',
+      transport,
+    });
+
+    await provider.embed(['doc one', 'doc two']);
+
+    expect(sent).toEqual(['doc one', 'doc two']);
   });
 
   it('does not retry non-retryable client errors (413)', async () => {

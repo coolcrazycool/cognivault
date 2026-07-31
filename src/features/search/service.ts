@@ -47,11 +47,12 @@ export class SearchService {
   }
 
   async semantic(query: string, limit: number, filters: SearchFilters): Promise<SearchResult[]> {
-    const [embedding] = await this.embedder.embed([query]);
+    // embedQuery (not embed) — asymmetric models instruct the query side only.
+    const embedding = await this.embedder.embedQuery(query);
     const folderPrefix = filters.folder;
 
     const result = await this.qdrant.search({
-      vector: embedding as number[],
+      vector: embedding,
       limit,
       with_payload: true,
       filter: this.buildFilter(filters) as { must?: unknown[] },

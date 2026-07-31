@@ -21,6 +21,10 @@ services:
       # keeps returning "too many requests" during bulk reindex.
       - GIGACHAT_MAX_RETRIES=${GIGACHAT_MAX_RETRIES:-5}
       - GIGACHAT_RETRY_BASE_DELAY_MS=${GIGACHAT_RETRY_BASE_DELAY_MS:-1000}
+      # Query-side instruction for the asymmetric EmbeddingsGigaR model. Pass-through:
+      # only forwarded when set in the host env, otherwise the app's default applies
+      # (setting it to an empty string would DISABLE the instruction).
+      - GIGACHAT_QUERY_INSTRUCTION
     volumes:
       - cognivault_data:/data
       - ${VAULT_PATH:-./notes}:/vault

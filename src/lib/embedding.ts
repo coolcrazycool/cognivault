@@ -10,7 +10,14 @@ export const DIMENSION_MAP: Record<string, number> = {
 const MAX_EMBEDDING_TOKENS = 8191;
 
 export interface EmbeddingProvider {
+  /** Embeds documents (index side). Never carries a query-side instruction. */
   embed(texts: string[]): Promise<number[][]>;
+  /**
+   * Embeds a search query (query side). Asymmetric models (GigaChat) expect an
+   * instruction prefix here that documents must NOT get; symmetric ones (OpenAI)
+   * just delegate to embed().
+   */
+  embedQuery(text: string): Promise<number[]>;
   readonly dimensions: number;
 }
 
@@ -93,6 +100,15 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
       .slice()
       .sort((a, b) => a.index - b.index)
       .map((item) => item.embedding);
+  }
+
+  /** OpenAI embeddings are symmetric — a query is embedded exactly like a document. */
+  async embedQuery(text: string): Promise<number[]> {
+    const [embedding] = await this.embed([text]);
+    if (embedding === undefined) {
+      throw new Error('OpenAI embeddings returned no vector for the query');
+    }
+    return embedding;
   }
 
   async validate(): Promise<void> {

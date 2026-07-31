@@ -23,6 +23,12 @@ const DEFAULT_MAX_BATCH_ITEMS = 64;
 // token count per request as well. Conservative default; tune per deployment.
 const DEFAULT_MAX_REQUEST_TOKENS = 2_048;
 const DEFAULT_RETRY_BASE_DELAY_MS = 1_000;
+// EmbeddingsGigaR is an ASYMMETRIC model: the query side expects a task instruction
+// that the document side must never see. Sber's reference instruction for retrieval,
+// with a literal newline before "вопрос:".
+const QUERY_PLACEHOLDER = '{query}';
+const DEFAULT_QUERY_INSTRUCTION =
+  'Дан вопрос, необходимо найти абзац текста с ответом \nвопрос: {query}';
 
 /** HTTP error from GigaChat, carrying the status and any Retry-After hint. */
 export class GigaChatHttpError extends Error {
@@ -97,6 +103,12 @@ export interface GigaChatEmbeddingProviderOptions {
   maxRequestTokens?: number;
   /** Max cl100k tokens per single text before truncation (default 3000). */
   maxEmbeddingTokens?: number;
+  /**
+   * Instruction applied to SEARCH QUERIES only (never to documents). `{query}` is
+   * replaced by the query text; without the placeholder the template is prepended.
+   * An empty string disables the instruction. Defaults to Sber's retrieval prompt.
+   */
+  queryInstruction?: string;
   /** Attempts per request before giving up (default 5). */
   maxRetries?: number;
   /** Base backoff between retries; doubles each attempt (default 1000ms). 0 in tests. */
@@ -121,6 +133,7 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
   private readonly maxEmbeddingTokens: number;
   private readonly maxRetries: number;
   private readonly retryBaseDelayMs: number;
+  private readonly queryInstruction: string;
 
   constructor(opts: GigaChatEmbeddingProviderOptions) {
     this.model = opts.model;
@@ -133,6 +146,7 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
     this.maxEmbeddingTokens = opts.maxEmbeddingTokens ?? DEFAULT_MAX_EMBEDDING_TOKENS;
     this.maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.retryBaseDelayMs = opts.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS;
+    this.queryInstruction = opts.queryInstruction ?? DEFAULT_QUERY_INSTRUCTION;
   }
 
   get dimensions(): number {
@@ -171,6 +185,33 @@ export class GigaChatEmbeddingProvider implements EmbeddingProvider {
     }
 
     return embeddings;
+  }
+
+  /**
+   * Embeds a search query. EmbeddingsGigaR is asymmetric, so the query gets the
+   * configured instruction applied first; everything after that (token truncation,
+   * batching, transport, response parsing) is the same path documents take.
+   */
+  async embedQuery(text: string): Promise<number[]> {
+    const [embedding] = await this.embed([this.applyQueryInstruction(text)]);
+    if (embedding === undefined) {
+      throw new Error('GigaChat embeddings returned no vector for the query');
+    }
+    return embedding;
+  }
+
+  /**
+   * `{query}` in the template is replaced by the query text. A template without the
+   * placeholder is prepended verbatim. An empty template leaves the query untouched.
+   */
+  private applyQueryInstruction(query: string): string {
+    if (this.queryInstruction.length === 0) {
+      return query;
+    }
+    if (this.queryInstruction.includes(QUERY_PLACEHOLDER)) {
+      return this.queryInstruction.split(QUERY_PLACEHOLDER).join(query);
+    }
+    return `${this.queryInstruction}${query}`;
   }
 
   /**

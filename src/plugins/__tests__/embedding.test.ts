@@ -91,6 +91,7 @@ describe('embedding plugin (per-user)', () => {
     const embedder = app.getUserEmbedder('alice');
     expect(embedder).toBeDefined();
     expect(typeof embedder.embed).toBe('function');
+    expect(typeof embedder.embedQuery).toBe('function');
     expect(embedder.dimensions).toBe(1536);
 
     await app.close();

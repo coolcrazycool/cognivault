@@ -164,4 +164,35 @@ describe('OpenAIEmbeddingProvider', () => {
       });
     });
   });
+
+  describe('embedQuery()', () => {
+    it('returns the first vector and sends the query verbatim (no instruction)', async () => {
+      mockEmbeddingsCreate.mockResolvedValueOnce({
+        data: [{ index: 0, embedding: [0.1, 0.2, 0.3] }],
+      });
+
+      const provider = new OpenAIEmbeddingProvider({
+        apiKey: 'test-key',
+        model: 'text-embedding-3-small',
+      });
+      const result = await provider.embedQuery('a query');
+
+      expect(result).toEqual([0.1, 0.2, 0.3]);
+      expect(mockEmbeddingsCreate).toHaveBeenCalledWith({
+        model: 'text-embedding-3-small',
+        input: ['a query'],
+      });
+    });
+
+    it('throws when the API returns no vector', async () => {
+      mockEmbeddingsCreate.mockResolvedValueOnce({ data: [] });
+
+      const provider = new OpenAIEmbeddingProvider({
+        apiKey: 'test-key',
+        model: 'text-embedding-3-small',
+      });
+
+      await expect(provider.embedQuery('a query')).rejects.toThrow(/no vector/i);
+    });
+  });
 });

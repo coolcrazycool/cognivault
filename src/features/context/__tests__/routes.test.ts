@@ -94,6 +94,8 @@ const MOCK_EMBEDDING = [Array.from({ length: 10 }, (_, i) => (i + 1) * 0.1)];
 const mockQdrantSearch = vi.fn().mockResolvedValue(MOCK_SCORED_POINTS);
 const mockQdrantScroll = vi.fn().mockResolvedValue(MOCK_SCROLL_RESULT);
 const mockEmbed = vi.fn().mockResolvedValue(MOCK_EMBEDDING);
+// /context runs hybrid → semantic, which embeds the query via embedQuery.
+const mockEmbedQuery = vi.fn().mockResolvedValue(MOCK_EMBEDDING[0]);
 
 const mockTenantQdrant = {
   search: mockQdrantSearch,
@@ -105,6 +107,7 @@ const mockTenantQdrant = {
 
 const mockEmbedder = {
   embed: mockEmbed,
+  embedQuery: mockEmbedQuery,
   dimensions: 10,
 };
 
@@ -197,10 +200,12 @@ describe('context routes', () => {
     mockQdrantSearch.mockClear();
     mockQdrantScroll.mockClear();
     mockEmbed.mockClear();
+    mockEmbedQuery.mockClear();
     // Reset to default return values
     mockQdrantSearch.mockResolvedValue(MOCK_SCORED_POINTS);
     mockQdrantScroll.mockResolvedValue(MOCK_SCROLL_RESULT);
     mockEmbed.mockResolvedValue(MOCK_EMBEDDING);
+    mockEmbedQuery.mockResolvedValue(MOCK_EMBEDDING[0]);
   });
 
   describe('POST /api/vault/context', () => {
@@ -451,6 +456,21 @@ describe('context routes', () => {
       // hybrid() passes the limit straight to qdrant.search (no oversampling, no lexical leg)
       expect(mockQdrantSearch).toHaveBeenCalledWith(expect.objectContaining({ limit: 50 }));
       expect(mockQdrantScroll).not.toHaveBeenCalled();
+    });
+
+    it('embeds the query via embedQuery (query side), never via embed', async () => {
+      await app.inject({
+        method: 'POST',
+        url: '/api/vault/context',
+        headers: {
+          authorization: 'Bearer cv-test-context-key',
+          'content-type': 'application/json',
+        },
+        payload: { query: 'system architecture' },
+      });
+
+      expect(mockEmbedQuery).toHaveBeenCalledWith('system architecture');
+      expect(mockEmbed).not.toHaveBeenCalled();
     });
 
     it('meta.query_ms is a non-negative integer', async () => {
