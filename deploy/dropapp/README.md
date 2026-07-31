@@ -13,11 +13,13 @@
 > Чек-лист восстановления и способ это вылечить — раздел 10.
 
 Namespace: `ci05490208-oasis-cognivault`.
-Образы (пин на конкретный digest-тег, оба из одной сборки):
+Образы пинятся на конкретный тег `sha-<gitsha>`. Теги у бэкенда и UI **не совпадают** —
+образы собираются независимо, каждый из своего пути, поэтому компонент, который не менялся,
+остаётся на прежнем коммите:
 
 | Компонент | Образ |
 |-----------|-------|
-| бэкенд | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-f8a989d` |
+| бэкенд | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-895f591` |
 | UI | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-f8a989d` |
 
 ---
