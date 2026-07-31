@@ -135,6 +135,11 @@ function recallAtK(retrieved: string[], relevant: string[], k: number): number {
 
 /**
  * POST to a search endpoint and return the result paths.
+ *
+ * Paths are de-duplicated, keeping first-appearance order: since Wave 0 (0.2)
+ * hybrid intentionally returns several chunks of the same file, so a raw
+ * `results.map(r => r.path)` would mechanically depress recall@10 without any
+ * real regression. recall@K here is a *document*-level metric.
  */
 async function search(endpoint: string, query: string, limit: number): Promise<string[]> {
   const url = `${BASE_URL}/api/vault/search/${endpoint}`;
@@ -154,7 +159,15 @@ async function search(endpoint: string, query: string, limit: number): Promise<s
   }
 
   const data = (await response.json()) as SearchResponse;
-  return data.results.map((r) => r.path);
+
+  const seen = new Set<string>();
+  const paths: string[] = [];
+  for (const result of data.results) {
+    if (seen.has(result.path)) continue;
+    seen.add(result.path);
+    paths.push(result.path);
+  }
+  return paths;
 }
 
 // ---------------------------------------------------------------------------
