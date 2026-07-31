@@ -37,6 +37,11 @@ _SSE_HEADERS = {
     "Connection": "keep-alive",
 }
 
+# `finish_reason` для ветки готового ответа (`RagContext.answer_override`):
+# грейдер не оставил ни одного пригодного фрагмента, GigaChat в этом ходе не
+# вызывался — значит подставить его `last_finish_reason` нечем, код наш.
+_NO_CONTEXT_FINISH_REASON = "no_context"
+
 
 def _new_chat_id() -> str:
     return f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
@@ -128,6 +133,19 @@ async def chat(request: Request) -> Any:
     Pre-flight validation may return a plain JSON error (e.g. missing certs)
     before the stream starts; once streaming begins, errors are terminal SSE
     ``error`` frames.
+
+    Frame order is part of the contract: ``meta`` → (``notice`` | ``sources``)
+    → ``token``\\* → ``done``. ``sources`` is always emitted *before* the first
+    token so the retrieval/grading latency hides behind the first paint.
+
+    Three RAG outcomes are routed here (wave 2):
+
+    * ``answer_override`` — the answer is already known (nothing survived the
+      grader): one ``token`` frame, no GigaChat call at all;
+    * ``smalltalk``/``clarify`` — no messages and no notice: plain generation on
+      the incoming history, no ``sources`` frame;
+    * ``kb_question`` — the normal path: rules system turn + history + the user
+      turn carrying the sources block.
     """
     body = await request.json()
     if not isinstance(body, dict):
@@ -200,6 +218,12 @@ async def chat(request: Request) -> Any:
         errored = False
         invalid_citations: list[int] = []
         notice: str | None = None
+        # Телеметрия конвейера волны 2 (интент + condense, кандидаты, грейды).
+        # Остаётся `None` вне RAG-режима и на старом `RagContext`.
+        intent: str | None = None
+        question_standalone: str | None = None
+        candidates: list[dict[str, Any]] | None = None
+        grades: list[dict[str, Any]] | None = None
 
         try:
             yield format_sse("meta", {"chat_id": chat_id})
@@ -214,6 +238,39 @@ async def chat(request: Request) -> Any:
                 sources = ctx.sources
                 context_chars = ctx.context_chars
                 notice = ctx.notice
+                # Поля волны 2 читаем мягко: они keyword-defaulted и могут
+                # отсутствовать на более старом `RagContext`.
+                intent = getattr(ctx, "intent", None)
+                question_standalone = getattr(ctx, "standalone_question", None)
+                candidates = getattr(ctx, "candidates", None)
+                grades = getattr(ctx, "grades", None)
+                answer_override = getattr(ctx, "answer_override", None)
+
+                if answer_override:
+                    # Ответ уже готов (шаблонный отказ: ни один кандидат не
+                    # прошёл грейдер) — генерацию пропускаем целиком, GigaChat
+                    # в этой ветке не вызывается вообще. Кадры те же, что в
+                    # обычном ходе: meta → sources (пустой) → token → done.
+                    rag_used = True
+                    sources = []
+                    context_chars = 0
+                    full_text = answer_override
+                    finish_reason = _NO_CONTEXT_FINISH_REASON
+                    log.info(
+                        "chat %s: answer_override (intent=%s), генерация пропущена",
+                        chat_id,
+                        intent,
+                    )
+                    yield format_sse("sources", {"sources": [], "context_chars": 0})
+                    yield format_sse("token", {"text": full_text})
+                    yield format_sse(
+                        "done", {"chat_id": chat_id, "finish_reason": finish_reason}
+                    )
+                    return
+
+                # `smalltalk`/`clarify`: сообщений нет и жаловаться не на что
+                # (`notice is None`) — идём обычной генерацией по истории как
+                # есть, кадр `sources` не эмитим.
                 if ctx.notice:
                     yield format_sse("notice", {"message": ctx.notice})
                 elif ctx.system_message is not None and ctx.user_message is not None:
@@ -304,17 +361,16 @@ async def chat(request: Request) -> Any:
                     "ts": rag_log.now_iso(),
                     "chat_id": chat_id,
                     "message_index": message_index,
-                    # Появятся в волне 2 вместе с классификатором намерения и
-                    # переписыванием вопроса в самодостаточный.
-                    "intent": None,
+                    # Волна 2: классификатор намерения + переписывание вопроса
+                    # в самодостаточный. Вне RAG-режима остаются `None`.
+                    "intent": intent,
                     "question_raw": question_raw,
-                    "question_standalone": None,
-                    # Кандидаты поиска до отбора живут внутри `rag.py` и наружу
-                    # (в `RagContext`) пока не выходят — появятся в волне 2
-                    # вместе с грейдером, тогда же здесь станут списком
-                    # {path, chunk_index, score}.
-                    "candidates": None,
-                    "grades": None,
+                    "question_standalone": question_standalone,
+                    # Кандидаты поиска ДО отбора ({path, chunk_index, score,
+                    # rank}) и оценки батч-грейдера ({id, path, chunk_index,
+                    # score}) — вход и выход волны-2 реранкинга.
+                    "candidates": candidates,
+                    "grades": grades,
                     "sources": [
                         {
                             "n": s.get("n"),

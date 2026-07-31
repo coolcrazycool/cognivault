@@ -251,6 +251,8 @@ def test_chat_writes_request_record(tmp_path, monkeypatch):
     # 3 incoming messages → the answer is index 3 in the persisted chat.
     assert rec["message_index"] == 3
     assert rec["question_raw"] == "как настроить ЕФС?"
+    # Поля конвейера волны 2 приходят из `RagContext`; здесь он замокан пустым,
+    # поэтому они `None`. Заполненный случай — в `test_chat_intent_routing.py`.
     assert rec["intent"] is None and rec["question_standalone"] is None
     assert rec["candidates"] is None and rec["grades"] is None
     assert rec["sources"] == [
