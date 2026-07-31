@@ -15,7 +15,7 @@ data:
   # 04-backend.yaml (kind: Service, name: cognivault, port 3000).
   COGNIVAULT_BASE_URL: "http://cognivault:3000"
   UI_PORT: "8787"
-  # ВНИМАНИЕ: /data у UI — emptyDir (квота 1 PVC, он отдан бэкенду).
+  # ВНИМАНИЕ: /data у UI — emptyDir (PVC в namespace нет ни одного).
   # История чатов и rag_log.jsonl НЕ переживают перезапуск пода.
   UI_DATA_DIR: "/data"
 

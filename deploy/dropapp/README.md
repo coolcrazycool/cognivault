@@ -4,6 +4,14 @@
 и `cognivault-ui.yaml` в корне репозитория **устарели** — они оставлены для истории
 и отката, применять их не надо.
 
+> ⚠️ **ХРАНИЛИЩА НЕТ: `/data` бэкенда эфемерный (emptyDir).** PVC в namespace нет
+> ни одного — платформа их не выдаёт. При **каждом** перезапуске или перепланировке
+> пода бэкенда теряются `users.json` (все cv-токены — пользователей надо заводить
+> заново), SQLite-индекс `index.db` и содержимое волтов `/data/vaults/*` — сами
+> документы. Векторы живут во внешнем Qdrant и переживают рестарт бэкенда, но после
+> потери волта переиндексировать нечего, пока файлы не зальют обратно.
+> Чек-лист восстановления и способ это вылечить — раздел 10.
+
 Namespace: `ci05490208-oasis-cognivault`.
 Образы (пин на конкретный digest-тег, оба из одной сборки):
 
@@ -19,7 +27,6 @@ Namespace: `ci05490208-oasis-cognivault`.
 | Файл | Объекты | Обязателен? |
 |------|---------|-------------|
 | `00-secrets.example.yaml` | Secret `cognivault-gigachat-certs`, Secret `sber-ca` | **Шаблон, не применять.** Секреты создаются командами из шага 2 |
-| `01-pvc.yaml` | PersistentVolumeClaim `cognivault-data` (5Gi, RWO) | **Да** |
 | `02-configmap-backend.yaml` | ConfigMap `cognivault-config` | **Да** |
 | `03-configmap-ui.yaml` | ConfigMap `cognivault-ui-config` | **Да** |
 | `04-backend.yaml` | Deployment `cognivault` + Service `cognivault` (:3000) | **Да** |
@@ -66,7 +73,9 @@ Ingress oasis-cognivault-ingress (nginx, HTTP, без TLS)
   `latest` SberOSC не проксирует. Первый пул запускает сканирование —
   следите за статусом на `sberosc.sigma.sbrf.ru/dashboard`; очень свежие артефакты
   (младше ~3 дней) прокси может временно не отдавать.
-- Квота namespace: **один PVC**. Он занят `cognivault-data`.
+- **PVC в namespace нет вообще** — платформа их не выдаёт. Поэтому `/data` у всех
+  компонентов (бэкенд, UI, внутрикластерный Qdrant) — `emptyDir`, то есть данные
+  эфемерны. Последствия и порядок восстановления — раздел 10.
 
 ---
 
@@ -198,7 +207,6 @@ oc exec -n $NS deploy/cognivault-ui -- wget -q -O - --no-check-certificate \
 NS=ci05490208-oasis-cognivault
 oc project $NS
 
-oc apply -f deploy/dropapp/01-pvc.yaml
 oc apply -f deploy/dropapp/02-configmap-backend.yaml
 oc apply -f deploy/dropapp/03-configmap-ui.yaml
 oc apply -f deploy/dropapp/04-backend.yaml
@@ -268,9 +276,13 @@ oc exec deploy/cognivault-ui -- python -c \
 
 ## 6. Пользователь и ОБЯЗАТЕЛЬНАЯ переиндексация
 
-Внешний Qdrant при развёртывании с нуля **пустой** — сам по себе он не наполнится.
-Даже если `/data` на PVC уже содержит файлы, векторов в новой коллекции нет,
+Внешний Qdrant при развёртывании с нуля **пустой** — сам по себе он не наполнится,
 поэтому после первого старта нужен полный reindex.
+
+> ⚠️ `/data` бэкенда — `emptyDir`. Всё, что описано в этом разделе (пользователь,
+> его cv-токен, залитые документы, построенный индекс), живёт **только до
+> перезапуска пода**. После рестарта раздел проходится заново — см. чек-лист
+> восстановления в разделе 10.
 
 ### 6.1 Завести пользователя и получить cv-токен
 
@@ -281,12 +293,27 @@ oc rsh deploy/cognivault \
 
 CLI печатает ключ вида `cv-…` — **сохраните его**, повторно он не показывается.
 Запись идёт в `/data/users.json`, сервер подхватывает изменения на лету.
-Папка `/data/vaults/bob` лежит на PVC и переживает перезапуски; складывать в неё
-`.md`-файлы можно так:
+
+⚠️ И `users.json`, и папка волта `/data/vaults/bob` лежат на `emptyDir` и
+**перезапуск пода не переживают**: после рестарта пользователя (и токен) придётся
+создавать заново, а документы — заливать повторно. Держите исходники заметок
+у себя локально.
+
+Залить `.md`-файлы в волт — двумя способами:
 
 ```bash
+# А) прямым копированием в под
 oc cp ./notes/. $(oc get pod -l app.kubernetes.io/name=cognivault -o name | cut -d/ -f2):/data/vaults/bob/
+
+# Б) по HTTP zip-архивом (до 50 МБ) — когда прав на `oc cp` нет.
+# Загрузка идёт из браузера через UI либо curl'ом изнутри кластера:
+zip -r notes.zip ./notes
+#   curl -H "Authorization: Bearer $CV" -F file=@notes.zip \
+#        http://cognivault:3000/api/vault/upload
 ```
+
+Файлы попадают в watched-каталог волта и подхватываются поллером в течение
+одного цикла; полный reindex после заливки — шаг 6.2.
 
 ### 6.2 Запустить полную переиндексацию
 
@@ -387,6 +414,9 @@ oc rollout status deploy/cognivault
 > Изменение ConfigMap **само по себе не перезапускает** под. Если правили только
 > ConfigMap — нужен `oc rollout restart deploy/cognivault` (и/или `deploy/cognivault-ui`).
 
+> ⚠️ Любое обновление бэкенда пересоздаёт под, а значит **стирает `/data`**: токены,
+> волты и индекс. После каждой выкатки проходите чек-лист восстановления (раздел 10.2).
+
 **Переиндексация НУЖНА, когда:**
 
 - меняется модель эмбеддингов или `EMBEDDING_DIMENSIONS` (нужна новая коллекция
@@ -394,6 +424,8 @@ oc rollout status deploy/cognivault
 - меняется схема коллекции / стратегия чанкинга (планируется в Волне 3: BM25 и
   sparse-векторы);
 - откатились на внутрикластерный Qdrant на emptyDir и он перезапустился;
+- **перезапустился под бэкенда** — `/data` эфемерный, волт и индекс потеряны;
+  сначала залить документы обратно, потом reindex (раздел 10.2);
 - разворачиваете окружение с нуля (шаг 6.2).
 
 **Переиндексация НЕ нужна, когда:**
@@ -426,16 +458,107 @@ oc rollout status deploy/cognivault
 
 ## 10. Известные ограничения
 
-- **Одна реплика каждого компонента.** PVC — ReadWriteOnce, единственный писатель
-  SQLite и `users.json`. `replicas > 1` без перехода на RWX и дизайна с несколькими
-  писателями сломает данные.
-- **`/data` у UI — emptyDir.** История чатов и `rag_log.jsonl` **не переживают**
-  перезапуск или перепланировку пода. Лечится вторым PVC (нужна квота), после чего
-  том `data` в `05-ui.yaml` меняется на `persistentVolumeClaim` — код менять не надо,
-  mountPath тот же.
+### 10.1 Главное: постоянного хранилища нет, `/data` бэкенда эфемерный
+
+**PVC в namespace нет ни одного — платформа их не выдаёт.** Поэтому том `data`
+бэкенда в `04-backend.yaml` — это `emptyDir`, живущий ровно столько же, сколько под.
+
+При **каждом** перезапуске или перепланировке пода бэкенда теряются:
+
+- **`/data/users.json`** — то есть **все cv-токены**; пользователей надо заводить заново;
+- **SQLite-индекс `/data/index.db`** — состояние индексации;
+- **содержимое волтов `/data/vaults/*`** — **сами документы**.
+
+Векторы лежат во внешнем Qdrant и рестарт бэкенда переживают, но пользы от этого
+мало: после потери волта **переиндексировать нечего**, пока файлы не зальют обратно.
+(Если откатились на внутрикластерный Qdrant из `99-qdrant-inhouse.yaml`, он тоже на
+`emptyDir` — тогда теряются и векторы.)
+
+Тот же диагноз у UI: `/data` в `05-ui.yaml` — `emptyDir`, история чатов и
+`rag_log.jsonl` перезапуск не переживают.
+
+**Практический вывод:** держите исходники заметок у себя локально, а cv-токен
+считайте одноразовым — после любого рестарта он невалиден.
+
+### 10.2 Чек-лист восстановления после перезапуска пода
+
+```bash
+NS=ci05490208-oasis-cognivault
+oc project $NS
+
+# 1. Убедиться, что под поднялся и подключился к Qdrant.
+oc rollout status deploy/cognivault
+oc logs deploy/cognivault | head -50   # ждём «Connected to Qdrant» и «Server listening»
+
+# 2. Завести пользователя заново — выдаётся НОВЫЙ cv-токен, сохраните его.
+oc rsh deploy/cognivault \
+  node dist/cli/index.js add-local-user bob --vault-path /data/vaults/bob
+
+# 3. Залить документы обратно (вариант А — копированием в под).
+oc cp ./notes/. $(oc get pod -l app.kubernetes.io/name=cognivault -o name | cut -d/ -f2):/data/vaults/bob/
+#    Вариант Б — zip-архивом по HTTP (до 50 МБ), из браузера через UI либо:
+#    curl -H "Authorization: Bearer $CV" -F file=@notes.zip \
+#         http://cognivault:3000/api/vault/upload
+
+# 4. Полная переиндексация.
+CV=cv-<НОВЫЙ_КЛЮЧ>
+oc exec deploy/cognivault -- node -e "
+fetch('http://127.0.0.1:3000/api/admin/reindex', {
+  method: 'POST',
+  headers: { 'Authorization': 'Bearer $CV', 'Content-Type': 'application/json' },
+  body: JSON.stringify({ scope: 'full' }),
+}).then(r => r.text()).then(console.log);"
+
+# 5. Прогресс (jobId из ответа шага 4).
+oc exec deploy/cognivault -- node -e "
+fetch('http://127.0.0.1:3000/api/admin/reindex/status?jobId=<JOB_ID>', {
+  headers: { 'Authorization': 'Bearer $CV' },
+}).then(r => r.text()).then(console.log);"
+```
+
+Новый cv-токен нужно ввести в UI заново (шаг 7). Подробности по каждому шагу —
+раздел 6.
+
+### 10.3 Чем это лечится
+
+Честно: **только PVC от платформы** — нужна квота на PersistentVolumeClaim в
+namespace. Обходного пути на уровне приложения нет: код и так пишет всё в один
+каталог `/data`, менять в нём ничего не потребуется.
+
+Как только PVC появится, в `04-backend.yaml` том `data` возвращается к виду
+(копипастой, `mountPath` остаётся `/data`):
+
+```yaml
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: cognivault-data
+```
+
+и рядом в набор добавляется сам claim:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cognivault-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+```
+
+Аналогично для UI (`05-ui.yaml`) и внутрикластерного Qdrant
+(`99-qdrant-inhouse.yaml`) — каждому нужен свой claim с отдельным именем.
+
+### 10.4 Прочие ограничения
+
+- **Одна реплика каждого компонента.** `users.json` и SQLite-индекс рассчитаны ровно
+  на одного писателя, а реплики не разделяют `/data` (у каждой свой `emptyDir`).
+  `replicas > 1` без общего тома (RWX) и дизайна с несколькими писателями сломает данные.
 - **TLS на Ingress нет** — трафик, включая cv-токены, идёт открытым текстом (шаг 7).
-- **Квота namespace: один PVC.** Он занят `cognivault-data`. Поэтому и UI, и
-  внутрикластерный Qdrant из `99-qdrant-inhouse.yaml` вынуждены жить на emptyDir.
 - **Внешний Qdrant должен быть доступен на старте** — иначе бэкенд не поднимется.
   Проверять связность до выкатки (шаг 3).
 - **`GIGACHAT_VERIFY_SSL: "false"`** — временный escape hatch, пока нет CA-бандла.

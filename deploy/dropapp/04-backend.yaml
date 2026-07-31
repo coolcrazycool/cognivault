@@ -4,6 +4,14 @@
 # из ConfigMap UI. Без Service морда не найдёт API.
 #
 # Наружу бэкенд НЕ выставляется: снаружи доступен только UI (06-ingress.yaml).
+#
+# ⚠️ ХРАНИЛИЩЕ — /data смонтирован как emptyDir. PVC в namespace НЕТ ни одного:
+# платформа их не выдаёт. При каждом перезапуске или перепланировке пода
+# ТЕРЯЮТСЯ: /data/users.json (все cv-токены — пользователей заводить заново),
+# SQLite-индекс /data/index.db и содержимое волтов /data/vaults/* (сами
+# документы). Порядок восстановления — README, раздел 10. Когда платформа даст
+# PVC, том `data` внизу файла меняется обратно на persistentVolumeClaim —
+# правок в коде не требуется, mountPath тот же.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -12,12 +20,14 @@ metadata:
     app.kubernetes.io/name: cognivault
     app.kubernetes.io/component: api
 spec:
-  # Строго 1 реплика: PVC /data — ReadWriteOnce, а users.json и SQLite-индексы
-  # имеют ровно одного писателя. Не масштабировать без перехода на RWX и
-  # дизайна, безопасного для нескольких писателей.
+  # Строго 1 реплика: users.json и SQLite-индекс рассчитаны ровно на одного
+  # писателя. Реплики не разделяют /data (у каждой свой emptyDir), поэтому
+  # replicas > 1 дало бы расходящиеся состояния и битый SQLite. Масштабировать
+  # можно только вместе с общим томом (RWX) и дизайном под нескольких писателей.
   replicas: 1
   strategy:
-    # Recreate (не RollingUpdate), чтобы старый под отпустил RWO-PVC до старта нового.
+    # Recreate (не RollingUpdate): два пода бэкенда одновременно недопустимы —
+    # каждый писал бы свой users.json и свой SQLite-индекс.
     type: Recreate
   selector:
     matchLabels:
@@ -38,8 +48,9 @@ spec:
         - name: sberosc-pull
       securityContext:
         # Namespace с restricted PodSecurity. Пользователь node в образе — uid 1000;
-        # указываем числом, иначе runAsNonRoot не проверяется. fsGroup делает PVC
-        # записываемым для этого uid.
+        # указываем числом, иначе runAsNonRoot не проверяется. fsGroup задаёт
+        # группу-владельца смонтированных томов, чтобы /data был записываем
+        # для этого uid.
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
@@ -159,9 +170,10 @@ spec:
               drop:
                 - ALL
       volumes:
+        # emptyDir, а не PVC: в namespace нет ни одного PVC — платформа их не
+        # выдаёт. Данные эфемерны, см. предупреждение вверху файла.
         - name: data
-          persistentVolumeClaim:
-            claimName: cognivault-data
+          emptyDir: {}
         - name: gigachat-certs
           secret:
             secretName: cognivault-gigachat-certs

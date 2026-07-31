@@ -1,11 +1,11 @@
 # Фронтенд CogniVault (FastAPI + SPA): Deployment + ClusterIP Service.
 # Это единственный компонент, который выставляется наружу (06-ingress.yaml).
 #
-# ВНИМАНИЕ: /data смонтирован как emptyDir — БЕЗ PVC (квота namespace: 1 PVC,
-# он отдан бэкенду). История чатов и rag_log.jsonl НЕ переживают перезапуск или
-# перепланировку пода. Для постоянства нужен второй PVC (поднять квоту у
-# платформы), после чего заменить том `data` на persistentVolumeClaim —
-# изменений в коде не требуется, тот же mountPath /data.
+# ВНИМАНИЕ: /data смонтирован как emptyDir — БЕЗ PVC. PVC в namespace нет ни
+# одного: платформа их не выдаёт. История чатов и rag_log.jsonl НЕ переживают
+# перезапуск или перепланировку пода. Для постоянства нужен PVC от платформы,
+# после чего заменить том `data` на persistentVolumeClaim — изменений в коде
+# не требуется, тот же mountPath /data.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
