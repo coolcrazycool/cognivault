@@ -7,10 +7,11 @@ the question itself. Keeping the retrieved text in the last user turn (instead
 of the system prompt) measurably improves instruction following and citation
 discipline on long contexts.
 
-The default ``mode == "auto"`` path performs *smart context expansion*: hybrid
-retrieval, group-by-file, and a per-file decision between a bare chunk, a section
-slice, or the whole document — all under a character budget derived from the
-model's context window and a hard cap on the number of blocks. The legacy
+The default ``mode == "auto"`` path performs *smart context expansion*: intent
+routing + query condensing (:mod:`app.rag_pipeline`), hybrid retrieval, a batched
+relevance grader, group-by-file, and a per-file decision between a bare chunk, a
+section slice, or the whole document — all under a character budget derived from
+the model's context window and a hard cap on the number of blocks. The legacy
 ``semantic``/``context`` sources remain for backward compatibility.
 """
 
@@ -20,7 +21,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import cognivault
+from . import cognivault, rag_pipeline
 
 # Order in which grouped ``/context`` buckets are flattened.
 _CONTEXT_GROUP_ORDER = (
@@ -57,8 +58,16 @@ _CONTEXT_REMINDER = """Напоминание: отвечай только по 
 
 _RETRIEVAL_UNAVAILABLE = "Поиск по базе недоступен — отвечаю без контекста"
 
-# Auto-mode internal retrieval width (independent of any stored `limit`).
-_AUTO_LIMIT = 10
+# Canned answer when the grader judged every candidate irrelevant: generating
+# from noise is worse than an honest "no".
+_NO_ANSWER = "В доступных мне документах ответа на этот вопрос не нашлось."
+
+# Auto-mode internal retrieval width (independent of any stored `limit`): the
+# grader re-ranks this many candidates down to `_MAX_CONTEXT_BLOCKS`.
+_RERANK_CANDIDATES = 20
+
+# Intents that skip retrieval entirely — the model answers from the history.
+_NO_RAG_INTENTS = ("smalltalk", "clarify")
 
 # Hard cap on blocks in the context (expanded + bare combined). Beyond ~5 the
 # tail is mostly noise that dilutes attention and invites wrong citations.
@@ -81,17 +90,27 @@ _BUDGET_HEADROOM = 0.85
 class RagContext:
     """Everything :func:`build_rag_context` hands back to the chat route.
 
-    A dataclass rather than a tuple on purpose: later waves add fields
-    (``intent``, ``standalone_question``, ``grades``) and a positional tuple
-    would break callers silently.
+    A dataclass rather than a tuple on purpose: every wave adds fields and a
+    positional tuple would break callers silently. All fields are
+    keyword-defaulted for the same reason.
 
     * ``system_message`` — rules-only system turn (``None`` when RAG produced
       nothing usable);
     * ``user_message`` — the final user turn: «Источники» → напоминание →
       вопрос. Always set together with ``system_message``;
-    * ``sources`` — UI/citation metadata, ``n`` matching the block numbers;
+    * ``sources`` — UI/citation metadata, ``n`` matching the block numbers,
+      ``grade`` carrying the grader's 1..5 score (``None`` when not graded);
     * ``notice`` — user-visible reason RAG was skipped (retrieval failure);
-    * ``context_chars`` — size of the rendered sources block, for telemetry.
+    * ``context_chars`` — size of the rendered sources block, for telemetry;
+    * ``intent`` — ``smalltalk`` / ``clarify`` / ``kb_question`` from the
+      condense step; the first two mean retrieval was skipped on purpose;
+    * ``standalone_question`` — the rewritten, self-contained question actually
+      used for retrieval and for the final user turn;
+    * ``candidates`` — every retrieved candidate BEFORE selection
+      (``path``, ``chunk_index``, ``score``, ``rank``), for the query log;
+    * ``grades`` — grader output (``id``, ``path``, ``chunk_index``, ``score``),
+      ``None`` when grading was skipped;
+    * ``answer_override`` — ready-made answer; the route must skip generation.
     """
 
     system_message: dict[str, Any] | None = None
@@ -99,6 +118,11 @@ class RagContext:
     sources: list[dict[str, Any]] = field(default_factory=list)
     notice: str | None = None
     context_chars: int = 0
+    intent: str | None = None
+    standalone_question: str | None = None
+    candidates: list[dict[str, Any]] | None = None
+    grades: list[dict[str, Any]] | None = None
+    answer_override: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -167,9 +191,6 @@ def _passes_min_score(score: Any, min_score: float | None) -> bool:
 # --------------------------------------------------------------------------- #
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
-
-# First-word anaphora triggers (lowercased, punctuation-stripped).
-_ANAPHORA_WORDS = {"а", "и", "но", "это", "этот", "там", "его", "её", "ее", "их"}
 
 
 def _norm_heading(text: str) -> str:
@@ -265,43 +286,10 @@ def _decide_file_depth(
     return "section"
 
 
-def _first_word(text: str) -> str:
-    stripped = text.strip().casefold()
-    if not stripped:
-        return ""
-    word = stripped.split()[0]
-    return re.sub(r"[^\w]+$", "", word)
-
-
-def _needs_anaphora(query: str) -> bool:
-    """Short or referential questions likely depend on the previous turn."""
-    q = query.strip()
-    if len(q) < 25:
-        return True
-    return _first_word(q) in _ANAPHORA_WORDS
-
-
-def _previous_user_content(messages: list[dict[str, Any]] | None) -> str:
-    """Text of the user message BEFORE the current (last) user message."""
-    if not messages:
-        return ""
-    users = [m for m in messages if m.get("role") == "user"]
-    if len(users) >= 2:
-        return str(users[-2].get("content", "") or "")
-    return ""
-
-
-def _retrieval_query(query: str, messages: list[dict[str, Any]] | None) -> str:
-    """Prepend the previous user turn for retrieval when the question is anaphoric.
-
-    Only affects retrieval — the actual question sent to GigaChat is unchanged.
-    """
-    if not _needs_anaphora(query):
-        return query
-    prev = _previous_user_content(messages)
-    if prev and prev.strip() != query.strip():
-        return f"{prev} {query}"
-    return query
+def _best_grade(frags: list[dict[str, Any]]) -> int | None:
+    """Highest grader score among the fragments merged into one block."""
+    grades = [f.get("grade") for f in frags if isinstance(f.get("grade"), int)]
+    return max(grades) if grades else None
 
 
 def _merge_chunk_text(frags: list[dict[str, Any]]) -> str:
@@ -377,29 +365,85 @@ async def _build_auto(
     file_full_chars = int(rcfg.get("file_full_chars", 6000))
     section_max_chars = int(rcfg.get("section_max_chars", 4000))
     max_expanded_files = int(rcfg.get("max_expanded_files", 2))
+    limit = int(rcfg.get("rerank_candidates", _RERANK_CANDIDATES))
     budget = _compute_budget(rcfg, gcfg)
 
-    rq = _retrieval_query(query, messages)
+    # 0. Hidden call 1: route the turn and rewrite it into a standalone query.
+    intent, rq = await rag_pipeline.condense(query, messages, rcfg, gcfg)
+    if intent in _NO_RAG_INTENTS:
+        # Chit-chat / "say that again": no retrieval, the model answers from
+        # the untouched history.
+        return RagContext(intent=intent, standalone_question=rq)
 
     # 1. Retrieve with hybrid search, graceful fallback to semantic.
     try:
         try:
-            raw = await cognivault.hybrid_search(rq, _AUTO_LIMIT, cv=cv)
+            raw = await cognivault.hybrid_search(rq, limit, cv=cv)
         except Exception:  # noqa: BLE001 — hybrid missing/404 => semantic fallback
-            raw = await cognivault.semantic_search(rq, _AUTO_LIMIT, cv=cv)
+            raw = await cognivault.semantic_search(rq, limit, cv=cv)
     except Exception:  # noqa: BLE001 — any retrieval failure => graceful fallback
-        return RagContext(notice=_RETRIEVAL_UNAVAILABLE)
+        return RagContext(
+            notice=_RETRIEVAL_UNAVAILABLE, intent=intent, standalone_question=rq
+        )
 
     fragments = _norm_semantic(raw.get("results") or [])
     fragments = [
         f for f in fragments if _passes_min_score(f.get("score"), min_score)
     ]
     if not fragments:
-        return RagContext()
+        return RagContext(intent=intent, standalone_question=rq)
 
-    # 2-4. Group by file, rank files by their best hit.
+    candidates = [
+        {
+            "path": f.get("path", ""),
+            "chunk_index": f.get("chunk_index"),
+            "score": f.get("score"),
+            "rank": f.get("rank"),
+        }
+        for f in fragments
+    ]
+
+    # 1b. Hidden call 2: grade every candidate, then select. Runs BEFORE
+    # grouping and smart expansion so whole-file/section expansion only ever
+    # happens for fragments the judge kept.
+    grade_list = await rag_pipeline.grade(rq, fragments, rcfg, gcfg)
+    for f, g in zip(fragments, grade_list):
+        f["grade"] = g
+    graded = any(g is not None for g in grade_list)
+    grades_meta: list[dict[str, Any]] | None = (
+        [
+            {
+                "id": i + 1,
+                "path": c["path"],
+                "chunk_index": c["chunk_index"],
+                "score": g,
+            }
+            for i, (c, g) in enumerate(zip(candidates, grade_list))
+        ]
+        if graded
+        else None
+    )
+
+    fragments, refused = rag_pipeline.select(fragments, grade_list, rcfg)
+    if refused:
+        return RagContext(
+            intent=intent,
+            standalone_question=rq,
+            candidates=candidates,
+            grades=grades_meta,
+            answer_override=_NO_ANSWER,
+        )
+
+    # 2-4. Group by file, rank files by their best hit: the grader's verdict
+    # first (it re-ranks), the raw cosine score only as a tie-break / when the
+    # grader was skipped.
     groups, order = _group_by_path(fragments)
-    ranked = sorted(order, key=lambda p: _best_score(groups[p]), reverse=True)
+
+    def _file_rank(p: str) -> tuple[float, float]:
+        grade = _best_grade(groups[p])
+        return (float(grade) if grade is not None else 0.0, _best_score(groups[p]))
+
+    ranked = sorted(order, key=_file_rank, reverse=True)
     expanded_paths = ranked[:max_expanded_files]
     bare_paths = ranked[max_expanded_files:]
 
@@ -424,6 +468,7 @@ async def _build_auto(
         score: Any,
         text: str,
         depth: str,
+        grade: int | None,
     ) -> bool:
         nonlocal used, n
         if n >= _MAX_CONTEXT_BLOCKS:
@@ -443,6 +488,7 @@ async def _build_auto(
                 "section_path": section_path,
                 "score": score,
                 "depth": depth,
+                "grade": grade,
             }
         )
         return True
@@ -458,7 +504,8 @@ async def _build_auto(
             key = (path, text)
             if not text or key in seen:
                 continue
-            if not add(title, path, sp, f.get("score"), text, depth):
+            grade = f.get("grade") if isinstance(f.get("grade"), int) else None
+            if not add(title, path, sp, f.get("score"), text, depth, grade):
                 break
             seen.add(key)
 
@@ -469,9 +516,10 @@ async def _build_auto(
         frags = groups[p]
         title = frags[0].get("title") or p
         best = _best_score(frags)
+        best_grade = _best_grade(frags)
         content = contents.get(p)
         if content is None:
-            add(title, p, "", best, _merge_chunk_text(frags), "chunk")
+            add(title, p, "", best, _merge_chunk_text(frags), "chunk", best_grade)
             continue
         remaining = budget - used
         depth = _decide_file_depth(len(content), len(frags), file_full_chars, remaining)
@@ -481,7 +529,7 @@ async def _build_auto(
                 # Never partially cut a whole file — downgrade to its section.
                 add_sections(frags, content, title, p)
             else:
-                add(title, p, "", best, content, "file")
+                add(title, p, "", best, content, "file", best_grade)
         else:
             add_sections(frags, content, title, p)
 
@@ -492,18 +540,28 @@ async def _build_auto(
         title = frags[0].get("title") or p
         best = _best_score(frags)
         sp = frags[0].get("section_path") or ""
-        if not add(title, p, sp, best, _merge_chunk_text(frags), "chunk"):
+        text = _merge_chunk_text(frags)
+        if not add(title, p, sp, best, text, "chunk", _best_grade(frags)):
             break
 
     if not sources:
-        return RagContext()
+        return RagContext(
+            intent=intent,
+            standalone_question=rq,
+            candidates=candidates,
+            grades=grades_meta,
+        )
 
-    user_message, context_chars = _render_context_message(blocks, query)
+    user_message, context_chars = _render_context_message(blocks, rq)
     return RagContext(
         system_message=_system_message(),
         user_message=user_message,
         sources=sources,
         context_chars=context_chars,
+        intent=intent,
+        standalone_question=rq,
+        candidates=candidates,
+        grades=grades_meta,
     )
 
 
@@ -565,6 +623,8 @@ async def _build_legacy(
                 "section_path": section_path,
                 "score": frag.get("score"),
                 "depth": "chunk",
+                # Legacy modes never run the grader — keep the shape uniform.
+                "grade": None,
             }
         )
 
@@ -596,10 +656,15 @@ async def build_rag_context(
 
     Returns a :class:`RagContext`. ``system_message`` and ``user_message`` are
     either both set (RAG applies) or both ``None``; in the latter case
-    ``notice`` explains a retrieval failure, or is ``None`` when retrieval simply
-    found nothing. In ``mode == "auto"`` (the default) this runs the
-    smart-expansion pipeline using its own internals regardless of any stale
-    stored ``source``/``limit``.
+    ``notice`` explains a retrieval failure, ``intent`` explains a deliberate
+    skip (``smalltalk``/``clarify``), ``answer_override`` carries the canned
+    refusal when the grader rejected every candidate, and all three being
+    ``None`` means retrieval simply found nothing. In ``mode == "auto"`` (the
+    default) this runs condense → retrieve → grade → select → smart expansion
+    using its own internals regardless of any stale stored ``source``/``limit``.
+
+    ``messages`` is the outgoing chat history; it feeds the condense call (which
+    is skipped when the history is empty).
 
     ``cvcfg`` is the CogniVault call context threaded into *every* upstream
     request: in server mode it is the per-request ``{"base_url", "token"}``; in

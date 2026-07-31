@@ -8,8 +8,9 @@
   прежний последний вопрос не дублируется, история между ними режется;
 * :func:`app.routes.chat_routes._invalid_citations` — серверная валидация цитат.
 
-Мокается ТОЛЬКО транспорт (``rag.cognivault.hybrid_search`` / ``.content``),
-поэтому тестируется настоящий ``rag.py``, а не заглушка.
+Мокается ТОЛЬКО транспорт (``rag.cognivault.hybrid_search`` / ``.content``) и
+скрытые LLM-вызовы волны 2 (``rag_pipeline.gigachat.complete_json``), поэтому
+тестируется настоящий ``rag.py``, а не заглушка.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import rag, settings  # noqa: E402
+from app import rag, rag_pipeline, settings  # noqa: E402
 from app.config import AppPaths  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.routes import chat_routes  # noqa: E402
@@ -75,9 +76,17 @@ def _hit(i: int, *, section: str = "", text: str | None = None) -> dict:
 
 
 def _install_retrieval(monkeypatch, hits: list[dict], contents: dict | None = None):
-    """Замокать транспорт CogniVault: hybrid-поиск и выдачу документов."""
+    """Замокать транспорт CogniVault: hybrid-поиск и выдачу документов.
+
+    Заодно затыкается GigaChat волны 2: condense возвращает вопрос как есть,
+    грейдер — «5» каждому фрагменту (порядок поиска сохраняется, ср. tie-break
+    по ранку), поэтому эти тесты продолжают проверять сборку промпта, а не
+    отбор — он живёт в ``test_rag_pipeline.py``.
+    """
+    calls: list[tuple[str, int]] = []
 
     async def fake_hybrid(query, limit, cv=None):
+        calls.append((query, limit))
         return {"results": hits}
 
     async def fake_content(path, cv=None):
@@ -85,8 +94,22 @@ def _install_retrieval(monkeypatch, hits: list[dict], contents: dict | None = No
             return contents[path]
         raise RuntimeError("content unavailable")
 
+    async def fake_complete_json(messages, gcfg, **kwargs):
+        prompt = messages[-1]["content"]
+        if "Определи тип реплики" in prompt:
+            tail = prompt.split("Последняя реплика пользователя: ", 1)[1]
+            return {
+                "intent": "kb_question",
+                "standalone_question": tail.split("\n", 1)[0],
+            }
+        return {"grades": [{"id": i, "score": 5} for i in range(1, 41)]}
+
     monkeypatch.setattr(rag.cognivault, "hybrid_search", fake_hybrid)
     monkeypatch.setattr(rag.cognivault, "content", fake_content)
+    monkeypatch.setattr(
+        rag_pipeline.gigachat, "complete_json", fake_complete_json, raising=False
+    )
+    return calls
 
 
 def _build(query: str, hits: list[dict], **rcfg) -> rag.RagContext:
@@ -111,8 +134,19 @@ def test_sources_do_not_leak_internal_fields(monkeypatch):
     _install_retrieval(monkeypatch, [_hit(1)])
     ctx = _build("вопрос про архитектуру сервиса", [_hit(1)])
     assert set(ctx.sources[0]) == {
-        "n", "title", "path", "section_path", "score", "depth"
+        "n", "title", "path", "section_path", "score", "depth", "grade"
     }
+
+
+def test_auto_mode_retrieves_rerank_candidates_wide(monkeypatch):
+    """Ширина ретрива в auto — `rerank_candidates` (волна 2: 20), не `limit`."""
+    calls = _install_retrieval(monkeypatch, [_hit(1)])
+    _build("вопрос про архитектуру сервиса", [_hit(1)], limit=3)
+    assert calls[0][1] == 20
+
+    calls.clear()
+    _build("вопрос про архитектуру сервиса", [_hit(1)], rerank_candidates=40)
+    assert calls[0][1] == 40
 
 
 # --------------------------------------------------------------------------- #

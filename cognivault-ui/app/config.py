@@ -103,6 +103,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "file_full_chars": 6000,
         "section_max_chars": 4000,
         "max_expanded_files": 2,
+        # Волна 2: два скрытых вызова GigaChat в конвейере чата.
+        # `condense_enabled` — интент-маршрутизация + переписывание вопроса;
+        # `grader_enabled` — батч-оценка релевантности (она же реранкер);
+        # `rerank_candidates` — ширина ретрива, которую видит грейдер.
+        "condense_enabled": True,
+        "grader_enabled": True,
+        "grader_threshold": 4,
+        "grader_keep_top": 2,
+        "rerank_candidates": 20,
     },
     "env": {
         "pip_index_url": "https://sberosc.sigma.sbrf.ru/repo/pypi/simple",

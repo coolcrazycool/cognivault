@@ -172,6 +172,21 @@ def server_config() -> dict[str, Any]:
             "max_expanded_files": _env_int(
                 "RAG_MAX_EXPANDED_FILES", int(rag["max_expanded_files"])
             ),
+            "condense_enabled": _env_bool(
+                "RAG_CONDENSE_ENABLED", bool(rag["condense_enabled"])
+            ),
+            "grader_enabled": _env_bool(
+                "RAG_GRADER_ENABLED", bool(rag["grader_enabled"])
+            ),
+            "grader_threshold": _env_int(
+                "RAG_GRADER_THRESHOLD", int(rag["grader_threshold"])
+            ),
+            "grader_keep_top": _env_int(
+                "RAG_GRADER_KEEP_TOP", int(rag["grader_keep_top"])
+            ),
+            "rerank_candidates": _env_int(
+                "RAG_RERANK_CANDIDATES", int(rag["rerank_candidates"])
+            ),
         }
     )
 

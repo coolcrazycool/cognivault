@@ -29,6 +29,12 @@ data:
   RAG_MAX_EXPANDED_FILES: "2"
   RAG_LIMIT: "10"
   RAG_SOURCE: "hybrid"
+  # Волна 2: два скрытых вызова GigaChat (интент+condense, батч-грейдер).
+  RAG_CONDENSE_ENABLED: "true"
+  RAG_GRADER_ENABLED: "true"
+  RAG_GRADER_THRESHOLD: "4"
+  RAG_GRADER_KEEP_TOP: "2"
+  RAG_RERANK_CANDIDATES: "20"
   # Источник Confluence: проверка TLS сервера СНЯТА (verify=false) — временный режим,
   # пока нет внутреннего CA-бандла Сбера. В этом режиме CONFLUENCE_CA_PATH и ConfigMap
   # `sber-ca` игнорируются (монтирование остаётся, но не используется).
