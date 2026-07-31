@@ -69,10 +69,12 @@ https://console.bcayrqks.k8s.delta.sbrf.ru/k8s/ns/ci05490208-oasis-cognivault/
 
 Внешние зависимости, которые набор не создаёт:
 
-- **внешний Qdrant** DropApp — `https://tsled-oasis0001.esrt.sber.ru:6433` (резерв `…0002`);
+- **внешний Qdrant** DropApp — `https://tsled-oasis0001.esrt.sber.ru:6433` (резерв `…0002`).
+  За этим адресом **Platform V Vector DB**, надстройка над Qdrant: без UI, только mTLS,
+  авторизация JWT-токенами (раздел 3.5);
 - **Secret `vectordb-creds`** (`username`, `password`) — заводит платформа DropApp.
-  У внешнего Qdrant включена его РОДНАЯ аутентификация, поэтому используется только
-  ключ `password` — как значение `QDRANT_API_KEY` (заголовок `api-key`), см. 3.5;
+  Используются ОБА ключа: это ТУЗ и пароль доменного пользователя, которые меняются
+  на JWT у IAM-сервиса (`QDRANT_USERNAME`/`QDRANT_PASSWORD`), см. 3.5;
 - **Secret `sberosc-pull`** — создаёте вы (шаг 2);
 - **GigaChat** — `https://gigachat-ift.sberdevices.delta.sbrf.ru/v1`, авторизация клиентским сертификатом (mTLS).
 
@@ -82,7 +84,8 @@ https://console.bcayrqks.k8s.delta.sbrf.ru/k8s/ns/ci05490208-oasis-cognivault/
 Ingress oasis-cognivault-ingress (nginx, HTTP, без TLS)
   host cognivault-ui.apps.bcayrqks.k8s.delta.sbrf.ru
    └─> Service cognivault-ui:8787 ──> под UI ──┬─> Service cognivault:3000 ─> под бэкенда
-                                               │        └─> внешний Qdrant :6433 (api-key + mTLS)
+                                               │        ├─> IAM :6433 /auth (mTLS) ─> JWT
+                                               │        └─> Platform V Vector DB :6433 (mTLS + Bearer)
                                                │        └─> GigaChat (эмбеддинги, mTLS)
                                                ├─> GigaChat (генерация ответа, mTLS)
                                                └─> Confluence (опционально)
@@ -95,8 +98,9 @@ Ingress oasis-cognivault-ingress (nginx, HTTP, без TLS)
 - Доступ в веб-консоль DropApp к namespace `ci05490208-oasis-cognivault`.
 - Секрет **`vectordb-creds`** уже есть в namespace (его заводит платформа). Проверить:
   **Secrets** → в списке должен быть `vectordb-creds` с ключами `username`, `password`.
-  Если его нет — запросить у платформы, без него бэкенд не стартует. По умолчанию
-  используется только `password` — это api-key родной аутентификации Qdrant (раздел 3.5).
+  Если его нет — запросить у платформы, без него бэкенд не стартует. Нужны ОБА ключа:
+  `username` — ТУЗ, `password` — пароль доменного пользователя; вместе они меняются
+  на JWT у IAM-сервиса Platform V Vector DB (раздел 3.5).
 - TLS-материал одним комплектом: `client_crt.crt` + `client_key.key` (клиентская пара
   mTLS), `cacert.pem` (бандл внутреннего УЦ Сбера) и, если ключ зашифрован, его пароль.
   Всё это кладётся в один секрет — шаг 2.1.
@@ -207,7 +211,7 @@ OTLP — проходит абсолютно нетронутым.
 | Ключ | Где задаётся | Значение в наборе | Назначение |
 |------|--------------|-------------------|------------|
 | `QDRANT_CA_PATH` | ConfigMap `cognivault-config` | `/certs/cacert.pem` | PEM-бандл внутреннего УЦ. **Заменяет** системное хранилище корней — но только для хоста Qdrant |
-| `QDRANT_CERT_PATH` | ConfigMap | `/certs/client_crt.crt` | клиентский сертификат для прокси, требующего mTLS |
+| `QDRANT_CERT_PATH` | ConfigMap | `/certs/client_crt.crt` | клиентский сертификат: Platform V Vector DB принимает соединения только по mTLS |
 | `QDRANT_KEY_PATH` | ConfigMap | `/certs/client_key.key` | приватный ключ к нему. Задаётся **только вместе** с `QDRANT_CERT_PATH`, иначе приложение падает на валидации конфига |
 | `QDRANT_KEY_PASSPHRASE` | Secret `cognivault-gigachat-certs`, ключ `key.passphrase` (`optional: true`) | не задан | пароль приватного ключа, если он зашифрован |
 | `QDRANT_VERIFY_SSL` | ConfigMap | `true` | проверка сертификата сервера. `false` — временный escape hatch, гасит проверку **только** для Qdrant |
@@ -218,11 +222,16 @@ OTLP — проходит абсолютно нетронутым.
 Если не задано ничего (нет CA, нет пары cert+key, `QDRANT_VERIFY_SSL=true`),
 перехват **не устанавливается вовсе** и TLS работает ровно как раньше.
 
-> **Про клиентский сертификат.** По словам сопровождения, прокси перед внешним
-> Qdrant требует mTLS, но **не специальный** сертификат: подойдёт любая валидная
-> пара. Поэтому переиспользуется та же пара, что и для GigaChat
-> (`/certs/client_crt.crt`, `/certs/client_key.key`). Если окажется, что прокси mTLS
-> не требует, эти два ключа можно убрать из ConfigMap.
+> **Про клиентский сертификат.** Platform V Vector DB принимает соединения **только**
+> по mTLS — клиент обязан предъявить сертификат, иначе не откроется ни `/auth`, ни
+> сама СУБД. Сертификат при этом **не специальный**: подходит любая валидная пара,
+> поэтому переиспользуется та же, что и для GigaChat (`/certs/client_crt.crt`,
+> `/certs/client_key.key`). Проверено на стенде — работает.
+>
+> Тот же материал уходит и в запрос токена на `/auth`. Он передаётся туда **явно**,
+> а не через перехват `tls.connect`: перехват привязан к паре host:port из
+> `QDRANT_URL`, и если IAM вынесут на отдельный порт (`QDRANT_AUTH_URL`), перехват
+> не сработает.
 
 В логе старта появляются строки `Intercepting TLS connections to the Qdrant host`
 и `Qdrant client configured` с полями `qdrantTls: custom|system`,
@@ -253,10 +262,11 @@ OTLP — проходит абсолютно нетронутым.
 `curl` в образах нет — проверяем средствами рантайма. Открываем под, вкладку
 **Terminal**, вставляем однострочник.
 
-> Однострочники ниже проверяют **связность и TLS** — заголовок `Authorization: Basic`
-> в них исторический и на результат этой проверки не влияет (при включённом
-> `QDRANT_API_KEY` переменных `QDRANT_USERNAME`/`QDRANT_PASSWORD` в env пода вообще
-> нет, и в заголовок уйдёт `:`). Аутентификация проверяется отдельно — раздел 3.5.
+> Однострочники ниже проверяют **связность и TLS**, а не аутентификацию: корень `/`
+> отвечает и без токена. Заголовок `Authorization: Basic` в них исторический и на
+> результат не влияет — Platform V Vector DB Basic **не понимает вовсе** (проверено:
+> ответ на него ровно тот же 401, что и на запрос без заголовка). Аутентификация
+> проверяется отдельно — раздел 3.5.
 
 **Бэкенд-под (есть `node`).** Берёт `QDRANT_URL` и креды прямо из env пода, то есть
 проверяет ровно ту конфигурацию, с которой работает приложение — **без** клиентского
@@ -285,9 +295,10 @@ node -e "const https=require('https'),fs=require('fs');const u=new URL(process.e
 > Чтобы проверить «CA + клиентский сертификат» разом — оставьте `ca:` и уберите
 > `rejectUnauthorized:false`.
 
-**UI-под (`python:3.12-alpine`, есть `python`)** — независимая проверка сети и Basic-auth.
-Подставьте логин/пароль из `vectordb-creds` (их видно в консоли: **Secrets** →
-`vectordb-creds` → **Reveal values**):
+**UI-под (`python:3.12-alpine`, есть `python`)** — независимая проверка сети до хоста
+СУБД (аутентификацию она не проверяет: корень `/` открыт, а Basic здесь всё равно не
+понимают). Логин/пароль из `vectordb-creds` видно в консоли: **Secrets** →
+`vectordb-creds` → **Reveal values**:
 
 ```
 python -c "import base64,urllib.request as u; a=base64.b64encode(b'ЛОГИН:ПАРОЛЬ').decode(); r=u.urlopen(u.Request('https://tsled-oasis0001.esrt.sber.ru:6433/',headers={'Authorization':'Basic '+a}),timeout=10); print(r.status, r.read()[:150].decode())"
@@ -309,9 +320,10 @@ python -c "import base64,ssl,urllib.request as u; c=ssl._create_unverified_conte
 
 | Что видно | Что это значит | Что делать |
 |-----------|----------------|------------|
-| `{"title":"qdrant - vector search engine",…}` | сеть и TLS рабочие (корень `/` у Qdrant открыт и без аутентификации — про креды это ничего не говорит) | проверить `/collections`, раздел 3.5 |
-| `401` + тело `{"status":{"error":"Unauthorized: Must provide an API key or an Authorization bearer token"}}` | это ответ **самого Qdrant**: включена его родная аутентификация, а мы прислали не тот заголовок (или ничего). Basic тут не подходит и вдобавок мешает | задать `QDRANT_API_KEY` из `vectordb-creds/password`, Basic **выключить** — раздел 3.5 |
-| `401` / HTML-страница логина от прокси, `WWW-Authenticate: Basic`, про api key ни слова | 401 отдаёт **прокси** перед Qdrant: нужна Basic-аутентификация | проверить `username`/`password` в `vectordb-creds`, включить пару `QDRANT_USERNAME`/`QDRANT_PASSWORD` (раздел 3.5) |
+| `{"title":"qdrant - vector search engine",…}` | сеть и TLS рабочие (корень `/` открыт и без аутентификации — про креды это ничего не говорит) | проверить `/collections`, раздел 3.5 |
+| `401` + тело `{"status":{"error":"Unauthorized: Must provide an API key or an Authorization bearer token"}}` | токен не отправлен вовсе (либо отправлен `Authorization: Basic`, который здесь не понимают) | включить пару `QDRANT_USERNAME`/`QDRANT_PASSWORD` — раздел 3.5 |
+| `401` + тело `{"status":{"error":"Invalid API key or JWT. If you are using API key while security RBAC is enabled, consider to use JWT"}}` | отправлено **не то**: `api-key` вместо JWT | убрать `QDRANT_API_KEY`, включить пару username/password — раздел 3.5 |
+| `403` + тело `{"status":{"error":"Forbidden: InvalidSignature"}}` | JWT разобран, но подписан **не тем** секретом — выпущен не IAM'ом (самодельный токен так и выглядит) | брать токен только через `POST /auth`, раздел 3.5 |
 | `ERR … UNABLE_TO_VERIFY_LEAF_SIGNATURE` / `SELF_SIGNED_CERT_IN_CHAIN` | сеть есть, не хватает CA внутреннего УЦ (тот же URL без проверки сертификата при этом отвечает корректно) | проверить `QDRANT_CA_PATH` и наличие `/certs/cacert.pem` — шаг 3.4 |
 | `ERR … DEPTH_ZERO_SELF_SIGNED_CERT` | самоподписанный сертификат сервера | тот же CA-бандл; если его нет — временно `QDRANT_VERIFY_SSL: "false"` |
 | `ERR … handshake failure` / `SSLV3_ALERT_HANDSHAKE_FAILURE` / `socket hang up` / `ECONNRESET` сразу после TLS-hello | **прокси требует клиентский сертификат**, а мы его не предъявили | задать `QDRANT_CERT_PATH` / `QDRANT_KEY_PATH` (шаг 3.1); проверить третьим однострочником из 3.2 |
@@ -338,68 +350,115 @@ python -c "import base64,ssl,urllib.request as u; c=ssl._create_unverified_conte
 `NODE_TLS_REJECT_UNAUTHORIZED=0`, который в `04-backend.yaml` оставлен закомментированным
 как аварийный костыль: он гасит проверку **во всём процессе**, включая GigaChat.
 
-### 3.5 Аутентификация Qdrant: `api-key` или Basic
+### 3.5 Аутентификация: Platform V Vector DB и её IAM
 
-TLS и аутентификация — разные слои, и они ломаются по очереди: сначала не сходился
-TLS, потом заработавшее соединение упёрлось в 401. Схем аутентификации две, и они
-**взаимоисключающие**:
+TLS и аутентификация — разные слои, и они ломались по очереди: сначала не сходился
+TLS, потом заработавшее соединение упёрлось в 401.
 
-| Схема | Переменные | Что уходит в запрос | Когда нужна |
-|-------|------------|---------------------|-------------|
-| Родная аутентификация Qdrant | `QDRANT_API_KEY` | заголовок `api-key: <ключ>` (его ставит сам клиент) | Qdrant включил свою аутентификацию — наш случай |
-| HTTP Basic | `QDRANT_USERNAME` + `QDRANT_PASSWORD` | `Authorization: Basic …` | перед Qdrant стоит реверс-прокси со своей Basic-аутентификацией |
+**Главное, что выяснилось:** за адресом `QDRANT_URL` стоит **не сырой Qdrant**, а
+**Platform V Vector DB** — надстройка Сбера. Из её документации и проверок на стенде:
+
+- **UI нет вовсе**, взаимодействие только по REST/gRPC;
+- соединение **только по mTLS**: клиент обязан предъявить свой сертификат (раздел 3.1);
+- запросы к самой СУБД авторизуются **JWT-токенами**, а не `api-key`;
+- токен выдаёт отдельный **сервис IAM**: `POST /auth` с телом
+  `{"username": "<ТУЗ>", "password": "<пароль доменного пользователя>"}`,
+  `Content-Type: application/json`, тоже по mTLS;
+- **время жизни токена — 1 час**, всё это время он переиспользуется.
+
+Итоговая схема одного запроса:
+
+```
+mTLS-соединение клиентским сертификатом
+  └─> POST https://…:6433/auth  {"username":…,"password":…}
+        └─> 200 {"result":{"token":"eyJ0eXAiOiJKV1Q…"}}
+              └─> GET https://…:6433/collections
+                    Authorization: Bearer eyJ0eXAiOiJKV1Q…
+```
+
+#### Порт IAM
+
+Документация вендора противоречит сама себе: в тексте — для версий Vector DB
+**< 2.0.0** IAM слушает на 6533 (REST) / 6534 (gRPC), для **>= 2.0.0** на тех же
+портах, что и СУБД, то есть 6433 / 6434; а в примерах `curl` в обоих случаях стоит
+`:6533`.
+
+**На нашем стенде проверено: IAM отвечает на 6433**, том же порту, что и СУБД. Поэтому
+дефолт `QDRANT_AUTH_URL = ${QDRANT_URL}/auth` верен и задавать ключ не нужно. Он всё
+равно оставлен конфигурируемым (закомментирован в `02-configmap-backend.yaml`) — на
+другом стенде IAM может оказаться на 6533:
+
+```yaml
+QDRANT_AUTH_URL: "https://tsled-oasis0001.esrt.sber.ru:6533/auth"
+```
+
+#### Что настроено в наборе
+
+| Схема | Переменные | Что уходит в запрос к СУБД | Когда нужна |
+|-------|------------|----------------------------|-------------|
+| **IAM → JWT** (действующая) | `QDRANT_USERNAME` + `QDRANT_PASSWORD` | `Authorization: Bearer <токен от /auth>` | Platform V Vector DB — наш случай |
+| Статический api-key | `QDRANT_API_KEY` | заголовок `api-key: <ключ>` (его ставит сам клиент) | только сырой Qdrant с включённой родной аутентификацией |
 
 **Включать обе сразу нельзя.** Бэкенд падает на валидации конфига
-(`QDRANT_API_KEY and QDRANT_USERNAME/QDRANT_PASSWORD are mutually exclusive…`), и это
-не перестраховка: Qdrant видит непустой `Authorization`, который не `Bearer`, и
-отвечает 401 даже при верном api-key. Именно поэтому старая пара Basic не просто «не
-помогала», а **мешала**.
+(`QDRANT_API_KEY and QDRANT_USERNAME/QDRANT_PASSWORD are mutually exclusive…`).
 
-**Как определить, что нужно, — по телу ответа 401:**
+Пара username/password **к СУБД не уходит никогда** — только к `/auth`. Дальше по сети
+летит исключительно токен.
 
-- `{"status":{"error":"Unauthorized: Must provide an API key or an Authorization bearer
-  token"}}` — это формат **самого Qdrant**. Значит родная аутентификация: нужен
-  `QDRANT_API_KEY`, Basic убрать.
-- HTML-страница логина, `WWW-Authenticate: Basic`, текст от nginx/шлюза, про api key ни
-  слова — 401 отдаёт **прокси**: нужна пара `QDRANT_USERNAME`/`QDRANT_PASSWORD`.
+**Обновление токена происходит само.** За `QDRANT_TOKEN_REFRESH_SKEW_MS` (по умолчанию
+5 минут) до истечения приложение запрашивает новый токен и пересоздаёт HTTP-клиент с
+новым заголовком. Перезапускать под не нужно. Если IAM в этот момент недоступен —
+в лог уходит `Failed to refresh Qdrant IAM token`, приложение продолжает работать на
+текущем токене и повторяет попытку через 30 секунд. А вот если IAM недоступен **на
+старте** — под падает сразу и с внятной ошибкой, это правильное поведение.
 
-> Корень `/` у Qdrant отвечает `{"title":"qdrant - vector search engine",…}` и без
+#### Симптом → причина → что делать
+
+Все ответы ниже наблюдались на живом стенде (`tsled-oasis0001`, сервер 1.16.3).
+
+| Ответ на `/collections` | Причина | Что делать |
+|-------------------------|---------|------------|
+| `200 {"result":{"collections":[…]},"status":"ok"}` | всё верно: mTLS + валидный JWT | — |
+| `401 {"status":{"error":"Unauthorized: Must provide an API key or an Authorization bearer token"}}` | **токен не отправлен вовсе.** Тот же ответ приходит и на `Authorization: Basic` — Basic здесь не понимают, поэтому эта схема из приложения удалена | включить пару `QDRANT_USERNAME`/`QDRANT_PASSWORD` в `04-backend.yaml` |
+| `401 {"status":{"error":"Invalid API key or JWT. If you are using API key while security RBAC is enabled, consider to use JWT"}}` | **отправлено не то**: заголовок `api-key` со значением пароля. Сервер прямым текстом просит JWT | убрать `QDRANT_API_KEY`, включить пару username/password |
+| `403 {"status":{"error":"Forbidden: InvalidSignature"}}` | **токен подписан не тем секретом**, то есть выпущен не IAM'ом. Так отвечает сервер на самодельный HS256-JWT, подписанный паролем или логином: разобрать разобрал, а подпись не сошлась | не изобретать токен, брать его только через `POST /auth` |
+| `ERR … handshake failure` / `socket hang up` | клиентский сертификат не предъявлен | раздел 3.1, `QDRANT_CERT_PATH`/`QDRANT_KEY_PATH` |
+
+> Корень `/` отвечает `{"title":"qdrant - vector search engine",…}` и **без**
 > аутентификации, поэтому проверять надо **`/collections`** — именно этот путь бэкенд
 > дёргает на старте.
 
-**Перебор вариантов из вкладки Terminal бэкенд-пода.** Однострочник по очереди пробует
-`api-key`, `Bearer`, `Basic` и «без аутентификации». Идёт через `node:https` **с
-клиентским сертификатом и CA из `/certs`** — без них соединение просто не установится и
-до 401 дело не дойдёт. Ключ берётся из `QDRANT_API_KEY`, а если его нет — из
-`QDRANT_PASSWORD`:
+#### Проверка из вкладки Terminal бэкенд-пода
+
+Однострочник делает ровно то же, что приложение: берёт `QDRANT_URL`, `QDRANT_USERNAME`,
+`QDRANT_PASSWORD` из env пода, идёт по mTLS на `/auth`, вынимает токен из
+`result.token` и сразу дёргает `/collections` с `Authorization: Bearer`. Ни пароль, ни
+токен не печатаются — только длина токена и статусы:
 
 ```
-node -e "const https=require('https'),fs=require('fs');const u=new URL(process.env.QDRANT_URL);const k=process.env.QDRANT_API_KEY||process.env.QDRANT_PASSWORD||'';const b=Buffer.from((process.env.QDRANT_USERNAME||'')+':'+(process.env.QDRANT_PASSWORD||'')).toString('base64');const o={hostname:u.hostname,port:u.port||443,path:'/collections',cert:fs.readFileSync('/certs/client_crt.crt'),key:fs.readFileSync('/certs/client_key.key'),ca:fs.readFileSync('/certs/cacert.pem'),passphrase:process.env.QDRANT_KEY_PASSPHRASE};const v=[['api-key',{'api-key':k}],['bearer',{authorization:'Bearer '+k}],['basic',{authorization:'Basic '+b}],['none',{}]];(async()=>{for(const [n,h] of v){await new Promise(res=>{https.request(Object.assign({},o,{headers:h}),r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>{console.log(n,r.statusCode,d.slice(0,120));res()})}).on('error',e=>{console.log(n,'ERR',e.message,e.code);res()}).end()})}})()"
+node -e "const https=require('https'),fs=require('fs');const u=new URL(process.env.QDRANT_URL);const a=process.env.QDRANT_AUTH_URL?new URL(process.env.QDRANT_AUTH_URL):new URL('/auth',u);const tls={cert:fs.readFileSync('/certs/client_crt.crt'),key:fs.readFileSync('/certs/client_key.key'),ca:fs.readFileSync('/certs/cacert.pem'),passphrase:process.env.QDRANT_KEY_PASSPHRASE};const go=(o,b)=>new Promise((res,rej)=>{const r=https.request(Object.assign({},tls,o),x=>{let d='';x.on('data',c=>d+=c);x.on('end',()=>res({s:x.statusCode,d}))});r.on('error',rej);if(b)r.write(b);r.end()});(async()=>{const body=JSON.stringify({username:process.env.QDRANT_USERNAME,password:process.env.QDRANT_PASSWORD});const auth=await go({hostname:a.hostname,port:a.port||443,path:a.pathname,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(body)}},body);console.log('auth',auth.s,auth.s===200?'ok':auth.d.slice(0,200));if(auth.s!==200)return;const t=JSON.parse(auth.d).result.token;console.log('token length',t.length,'exp',new Date(JSON.parse(Buffer.from(t.split('.')[1],'base64url')).exp*1000).toISOString());const col=await go({hostname:u.hostname,port:u.port||443,path:'/collections',headers:{authorization:'Bearer '+t}});console.log('collections',col.s,col.d.slice(0,200))})().catch(e=>console.log('ERR',e.message,e.code))"
 ```
 
-Ожидаемый вывод при родной аутентификации Qdrant:
+Ожидаемый вывод:
 
 ```
-api-key 200 {"result":{"collections":[...]},"status":"ok",...}
-bearer 401 {"status":{"error":"Unauthorized: Must provide an API key or an Authorization bearer token"}}
-basic 401 {"status":{"error":"Unauthorized: Must provide an API key or an Authorization bearer token"}}
-none 401 {"status":{"error":"Unauthorized: Must provide an API key or an Authorization bearer token"}}
+auth 200 ok
+token length 512 exp 2026-07-31T14:30:00.000Z
+collections 200 {"result":{"collections":[{"name":"cognivault"}]},"status":"ok","time":0.0001}
 ```
 
-Строка `basic` в перебор попадает даже когда `QDRANT_USERNAME`/`QDRANT_PASSWORD` в env
-пода не заданы (тогда она заведомо бесполезна) — при необходимости подставьте креды из
-`vectordb-creds` прямо в команду. Если 200 отдаёт `bearer`, а не `api-key`, — перед
-Qdrant всё-таки прокси с Bearer-токеном; тогда пишите в задачу, поддержки этой схемы
-в конфиге сейчас нет.
+Если `auth` вернул не 200 — смотрите тело: 401 значит неверные ТУЗ/пароль в
+`vectordb-creds`, `ERR … ECONNREFUSED` на порту 6533 — IAM всё-таки на 6433 (уберите
+`QDRANT_AUTH_URL`), и наоборот.
 
-**Что менять по итогу.** Обе схемы живут в `04-backend.yaml` (блок `env`): вариант с
-`QDRANT_API_KEY` через `secretKeyRef` на `vectordb-creds`/`password` включён, вариант с
-`QDRANT_USERNAME`/`QDRANT_PASSWORD` лежит рядом закомментированным. Переключение —
+**Что менять по итогу.** Обе схемы живут в `04-backend.yaml` (блок `env`): пара
+`QDRANT_USERNAME`/`QDRANT_PASSWORD` через `secretKeyRef` на `vectordb-creds` включена,
+вариант с `QDRANT_API_KEY` лежит рядом закомментированным. Переключение —
 закомментировать один блок и раскомментировать другой; одновременно активными их
 оставлять нельзя. В логах после рестарта поле `qdrantAuth` строки
-`Qdrant client configured` покажет выбранную схему: `api-key`, `basic` или `none`.
-Ни ключ, ни пароль в логи не попадают.
-
+`Qdrant client configured` покажет выбранную схему: `iam`, `api-key` или `none`.
+Ни пароль, ни токен в логи не попадают — токен описывается только длиной и сроком
+истечения (`Obtained Qdrant IAM token`, поля `tokenLength`, `expiresAt`).
 ---
 
 ## 4. Порядок применения
@@ -446,14 +505,24 @@ kubectl apply -n $NS -f deploy/dropapp/05-ui.yaml
 
 - `Intercepting TLS connections to the Qdrant host` — если задан CA и/или клиентский
   сертификат (при пустой TLS-конфигурации строки не будет, это нормально);
+- **`Obtained Qdrant IAM token`** с полями `qdrantAuthUrl`, `tokenLength`, `expiresAt`,
+  `expirySource` — обмен с IAM прошёл (только в режиме `iam`). Сам токен и пароль в лог
+  не попадают: токен описывается длиной и сроком истечения. `expirySource: jwt-exp`
+  значит, что срок взят из самого токена; `default-ttl` — что в токене не нашлось `exp`
+  и применён фолбэк в один час;
 - `Qdrant client configured` с полями `qdrantAuth`, `qdrantTls`, `qdrantClientCert`,
   `qdrantVerifySsl` — быстрый способ убедиться, что под подхватил именно ту конфигурацию,
-  которую вы задали. `qdrantAuth` принимает три значения: `api-key` (родная
-  аутентификация Qdrant, штатный режим), `basic` (прокси с HTTP Basic) и `none`.
-  Значения ключа и пароля в лог не попадают никогда;
+  которую вы задали. `qdrantAuth` принимает три значения: `iam` (Platform V Vector DB,
+  штатный режим), `api-key` (сырой Qdrant со статическим ключом) и `none`.
+  Значения ключа, пароля и токена в лог не попадают никогда;
 - **`Connected to Qdrant`** с версией сервера — подтверждает, что сеть и TLS отработали;
-  на 401 эта строка появится, а вот следующий шаг (список коллекций) упадёт — смотрите
-  раздел 3.5;
+  на 401/403 эта строка появится, а вот следующий шаг (список коллекций) упадёт —
+  смотрите раздел 3.5;
+- примерно раз в час — **`Refreshed Qdrant IAM token`** с новым `expiresAt`. Это норма,
+  а не признак проблемы: токен живёт час и обновляется сам. Строка
+  `Failed to refresh Qdrant IAM token — retrying shortly` означает, что IAM временно
+  недоступен; приложение продолжает работать на текущем токене и повторяет попытку
+  через 30 секунд;
 - создание/проверка коллекции `cognivault`;
 - `Server listening`.
 
@@ -483,8 +552,13 @@ python -c "import urllib.request as u; print(u.urlopen('http://cognivault:3000/h
 | ошибка подключения к Qdrant | DNS / egress / TLS / креды | прогнать проверки из шага 3.2 |
 | `Cannot read QDRANT_CA_PATH "…": ENOENT` | в секрете нет ключа `cacert.pem` | добавить его в `cognivault-gigachat-certs` (шаг 2.1) или снять `QDRANT_CA_PATH` |
 | `QDRANT_KEY_PATH is required when QDRANT_CERT_PATH is set` | задан только один из двух ключей mTLS | задать оба или убрать оба |
-| `QDRANT_PASSWORD is required when QDRANT_USERNAME is set` | задан только один ключ Basic-auth | проверить оба `secretKeyRef` на `vectordb-creds` |
-| `401 … Must provide an API key or an Authorization bearer token` | 401 отдаёт **сам Qdrant**: включена его родная аутентификация, а мы прислали Basic либо ничего | задать `QDRANT_API_KEY` из `vectordb-creds/password`, пару `QDRANT_USERNAME`/`QDRANT_PASSWORD` убрать — раздел 3.5 |
+| `QDRANT_PASSWORD is required when QDRANT_USERNAME is set` | из пары для IAM задан только один ключ | проверить оба `secretKeyRef` на `vectordb-creds` |
+| `Qdrant IAM … answered 401` | ТУЗ или пароль в `vectordb-creds` неверны. Пароль и токен в текст ошибки не попадают — в `detail` только обрезанное тело ответа | сверить креды с платформой, проверить однострочником из 3.5 |
+| `Qdrant IAM … returned no recognised token field` | IAM ответил 200, но в теле нет токена. В сообщении перечислены **имена** ключей ответа (значений там нет намеренно) | по именам понять, что вернулось: `status` обычно значит ошибку внутри 200 |
+| `Qdrant IAM request to … failed` | до IAM не достучались: DNS, egress, mTLS или неверный порт | если задан `QDRANT_AUTH_URL` — проверить порт; наш стенд отвечает на 6433, см. 3.5 |
+| `401 … Must provide an API key or an Authorization bearer token` | токен не отправлен вовсе | включить пару `QDRANT_USERNAME`/`QDRANT_PASSWORD` — раздел 3.5 |
+| `401 … Invalid API key or JWT … consider to use JWT` | отправлен `api-key` вместо JWT | убрать `QDRANT_API_KEY`, включить пару username/password |
+| `403 … Forbidden: InvalidSignature` | токен подписан не тем секретом (выпущен не IAM'ом) | брать токен только через `POST /auth` |
 | `QDRANT_API_KEY and QDRANT_USERNAME/QDRANT_PASSWORD are mutually exclusive…` | в `04-backend.yaml` активны оба варианта аутентификации | оставить ровно один блок `env`, второй закомментировать |
 | жалоба на `EMBEDDING_DIMENSIONS` | размерность не задана/нечисловая или не совпала с коллекцией | `EMBEDDING_DIMENSIONS: "2560"`; при несовпадении — новая коллекция + reindex |
 | `UNABLE_TO_VERIFY_LEAF_SIGNATURE` на GigaChat | бандл `cacert.pem` не покрывает цепочку GigaChat | вернуть `GIGACHAT_VERIFY_SSL=false` и снять `GIGACHAT_CA_PATH` (см. 3.1) |

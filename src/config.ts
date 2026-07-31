@@ -10,14 +10,25 @@ const configSchema = z
     // Two MUTUALLY EXCLUSIVE authentication schemes, depending on what answers the
     // requests:
     //  1. native Qdrant — `api-key` header (QDRANT_API_KEY below);
-    //  2. a reverse proxy in front of Qdrant — HTTP Basic (QDRANT_USERNAME/PASSWORD).
+    //  2. Platform V Vector DB — IAM token exchange (QDRANT_USERNAME/PASSWORD).
     // Native Qdrant auth. Sent by the REST client as the `api-key` header; never
-    // combine with Basic — Qdrant sees a non-Bearer `Authorization` and rejects the
-    // request with 401 even though the api key is valid.
+    // combine with the IAM pair — Qdrant answers 401/403 on a mismatched credential
+    // even though the api key itself is valid.
     QDRANT_API_KEY: z.string().optional(),
-    // Basic auth for a proxy in front of Qdrant. Both must be set together, or neither.
+    // Platform V Vector DB credentials: the technical account (ТУЗ) and its domain
+    // password. They are NOT sent to the database — they are exchanged at the IAM
+    // endpoint for a JWT, which then travels as `Authorization: Bearer …`.
+    // Both must be set together, or neither.
     QDRANT_USERNAME: z.string().optional(),
     QDRANT_PASSWORD: z.string().optional(),
+    // IAM endpoint that mints the JWT. Defaults to `${origin(QDRANT_URL)}/auth`, which
+    // is correct for Vector DB >= 2.0.0 (IAM shares the database port, 6433 — confirmed
+    // on the live stand). On < 2.0.0 IAM listens on its own port and this must be set
+    // explicitly, e.g. https://host:6533/auth.
+    QDRANT_AUTH_URL: z.string().url().optional(),
+    // Renew the JWT this long before it expires. The token lives an hour by default,
+    // so 5 minutes of headroom absorbs a slow IAM without ever serving a stale token.
+    QDRANT_TOKEN_REFRESH_SKEW_MS: z.coerce.number().int().positive().default(300_000),
     // Per-request timeout for the Qdrant REST client (client default is 300_000 ms —
     // far too long for a hop over the corporate network).
     QDRANT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
@@ -93,7 +104,7 @@ const configSchema = z
     OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
   })
   .superRefine((cfg, ctx) => {
-    // Half-configured Basic auth silently produces unauthenticated requests — fail fast.
+    // Half-configured IAM credentials silently produce unauthenticated requests — fail fast.
     if (cfg.QDRANT_USERNAME && !cfg.QDRANT_PASSWORD) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -109,10 +120,9 @@ const configSchema = z
       });
     }
 
-    // Native Qdrant auth and proxy Basic auth are mutually exclusive: sending both an
-    // `api-key` header and `Authorization: Basic` makes Qdrant reject the request with
-    // 401 ("Must provide an API key or an Authorization bearer token"), because the
-    // Authorization header it sees is not a Bearer token. Fail fast instead of shipping
+    // Native api-key auth and the IAM token exchange are mutually exclusive: they
+    // produce different credentials on the same request, and Platform V Vector DB
+    // rejects the mismatch ("Invalid API key or JWT…"). Fail fast instead of shipping
     // a request that can only be refused.
     if (cfg.QDRANT_API_KEY && (cfg.QDRANT_USERNAME || cfg.QDRANT_PASSWORD)) {
       ctx.addIssue({
@@ -120,9 +130,10 @@ const configSchema = z
         path: ['QDRANT_API_KEY'],
         message:
           'QDRANT_API_KEY and QDRANT_USERNAME/QDRANT_PASSWORD are mutually exclusive: ' +
-          'sending api-key together with Authorization: Basic breaks Qdrant ' +
-          'authentication. Set QDRANT_API_KEY for native Qdrant auth, or the ' +
-          'username/password pair for a proxy that speaks HTTP Basic — never both',
+          'the api key travels as the `api-key` header while the username/password ' +
+          'pair is exchanged at the IAM endpoint for a Bearer JWT. Set QDRANT_API_KEY ' +
+          'for a raw Qdrant with a static key, or the username/password pair for ' +
+          'Platform V Vector DB — never both',
       });
     }
 

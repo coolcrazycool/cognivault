@@ -86,37 +86,47 @@ spec:
                   key: key.passphrase
                   optional: true
             # ── Аутентификация внешнего Qdrant (QDRANT_URL в ConfigMap) ────
-            # Секрет vectordb-creds (ключи username/password) заводит платформа
-            # DropApp. Вариантов аутентификации ДВА, и включать их ОДНОВРЕМЕННО
-            # НЕЛЬЗЯ — приложение падает на валидации конфига, а Qdrant всё равно
-            # отверг бы такой запрос: он видит непустой `Authorization`, который
-            # не Bearer, и отвечает 401 даже при верном api-key.
+            # За адресом QDRANT_URL стоит НЕ голый Qdrant, а Platform V Vector DB —
+            # надстройка Сбера. У неё нет UI, соединение только по mTLS, а запросы
+            # к самой СУБД авторизуются JWT-токеном. Схема целиком:
             #
-            # ВАРИАНТ 1 (основной, действующий): родная аутентификация Qdrant.
-            # Клиент отправляет ключ заголовком `api-key`. Признак того, что нужен
-            # именно он, — 401 с телом от САМОГО Qdrant:
-            #   {"status":{"error":"Unauthorized: Must provide an API key or an
-            #    Authorization bearer token"}}
-            # Ключ лежит в vectordb-creds под именем password (поле username при
-            # этой схеме не используется вовсе).
-            - name: QDRANT_API_KEY
+            #   1. mTLS-соединение клиентским сертификатом (QDRANT_CERT_PATH /
+            #      QDRANT_KEY_PATH в ConfigMap) — без него не открывается вообще
+            #      ничего, включая /auth;
+            #   2. POST ${QDRANT_URL}/auth с телом {"username":…,"password":…} →
+            #      200 {"result":{"token":"eyJ0eXAiOiJKV1Q…"}};
+            #   3. запросы к СУБД идут с заголовком `Authorization: Bearer <токен>`.
+            #
+            # Токен живёт ЧАС и обновляется приложением автоматически (за 5 минут
+            # до истечения, ключ QDRANT_TOKEN_REFRESH_SKEW_MS). Перезапуск пода для
+            # этого не нужен, ротации секрета — тоже.
+            #
+            # ВАРИАНТ 1 (основной, действующий): username/password → IAM → JWT.
+            # Секрет vectordb-creds заводит платформа DropApp; username — это ТУЗ,
+            # password — пароль доменного пользователя. К СУБД они НЕ уходят:
+            # приложение меняет их на токен и дальше отправляет только его.
+            # Задавать ОБА ключа или НИ ОДНОГО — при одном под падает на валидации.
+            - name: QDRANT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: vectordb-creds
+                  key: username
+            - name: QDRANT_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: vectordb-creds
                   key: password
             #
-            # ВАРИАНТ 2 (альтернатива, выключен): HTTP Basic. Нужен, ТОЛЬКО если
-            # перед Qdrant стоит реверс-прокси со своей Basic-аутентификацией —
-            # признак: 401 отдаёт прокси (HTML-страница логина, заголовок
-            # WWW-Authenticate: Basic, никакого упоминания api key в теле).
-            # Чтобы переключиться: закомментировать QDRANT_API_KEY выше и
-            # раскомментировать обе строки ниже — задавать ОБА ключа или НИ ОДНОГО.
-            # - name: QDRANT_USERNAME
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: vectordb-creds
-            #       key: username
-            # - name: QDRANT_PASSWORD
+            # ВАРИАНТ 2 (альтернатива, выключен): статический api-key. Нужен, ТОЛЬКО
+            # если за адресом когда-нибудь окажется СЫРОЙ Qdrant с включённой родной
+            # аутентификацией — тогда ключ уходит заголовком `api-key`. На Platform V
+            # Vector DB это не работает: проверено, сервер отвечает
+            #   401 {"status":{"error":"Invalid API key or JWT. If you are using API
+            #        key while security RBAC is enabled, consider to use JWT"}}
+            # Чтобы переключиться: закомментировать пару выше и раскомментировать
+            # блок ниже. Включать оба варианта ОДНОВРЕМЕННО нельзя — приложение
+            # падает на валидации конфига.
+            # - name: QDRANT_API_KEY
             #   valueFrom:
             #     secretKeyRef:
             #       name: vectordb-creds
@@ -124,8 +134,8 @@ spec:
             #
             # При откате на внутрикластерный Qdrant (99-qdrant-inhouse.yaml,
             # аутентификации нет) весь этот блок убрать вместе со сменой QDRANT_URL.
-            # Пароль приватного ключа, которым бэкенд предъявляется прокси перед
-            # внешним Qdrant (QDRANT_CERT_PATH / QDRANT_KEY_PATH в ConfigMap).
+            # Пароль приватного ключа, которым бэкенд открывает mTLS до внешнего
+            # Qdrant (QDRANT_CERT_PATH / QDRANT_KEY_PATH в ConfigMap).
             # Ключ переиспользуется от GigaChat, поэтому и пароль тот же секрет.
             # optional: true → если ключа key.passphrase в секрете нет, под стартует.
             - name: QDRANT_KEY_PASSPHRASE

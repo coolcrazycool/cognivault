@@ -1,3 +1,4 @@
+import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TenantQdrantClient } from '../../lib/tenant-qdrant-client.js';
 
@@ -30,6 +31,26 @@ vi.mock('@qdrant/js-client-rest', () => {
     }
   }
   return { QdrantClient: MockQdrantClient };
+});
+
+/** Hands out IAM tokens without touching the network. */
+const mockGetToken = vi.fn();
+let mockExpiresAt: number | undefined;
+
+vi.mock('../../lib/qdrant-auth.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/qdrant-auth.js')>();
+  return {
+    ...actual,
+    QdrantTokenProvider: class {
+      getToken = mockGetToken;
+      get expiresAt(): number | undefined {
+        return mockExpiresAt;
+      }
+      get expirySource(): string {
+        return 'jwt-exp';
+      }
+    },
+  };
 });
 
 /** Fields the plugin indexes when it has to create the collection from scratch. */
@@ -415,11 +436,15 @@ describe('qdrantPlugin', () => {
       'QDRANT_USERNAME',
       'QDRANT_PASSWORD',
       'QDRANT_TIMEOUT_MS',
+      'QDRANT_AUTH_URL',
+      'QDRANT_TOKEN_REFRESH_SKEW_MS',
     ] as const;
 
     const USERNAME = 'qdrant-reader';
     const PASSWORD = 'sup3r-s3cr3t-p@ss';
     const API_KEY = 'qdr4nt-@pi-k3y-v3ry-s3cr3t';
+    const TOKEN = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0dXoifQ.s1gn4tur3';
+    const NEXT_TOKEN = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0dXoiLCJuIjoyfQ.n3xt';
 
     interface ClientParams {
       url?: string;
@@ -430,9 +455,15 @@ describe('qdrantPlugin', () => {
     }
 
     interface StartedApp {
+      app: FastifyInstance;
       close: () => Promise<void>;
       params: ClientParams;
       logCalls: unknown[][];
+    }
+
+    /** Options of the most recently constructed client. */
+    function latestParams(): ClientParams {
+      return mockClientConstructor.mock.calls.at(-1)?.[0] as ClientParams;
     }
 
     /**
@@ -465,13 +496,14 @@ describe('qdrantPlugin', () => {
       await app.register(qdrantPlugin);
       await app.ready();
 
-      const params = mockClientConstructor.mock.calls.at(-1)?.[0] as ClientParams;
-      return { close: () => app.close(), params, logCalls };
+      return { app, close: () => app.close(), params: latestParams(), logCalls };
     }
 
     beforeEach(() => {
       mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
       mockCreatePayloadIndex.mockResolvedValue({});
+      mockGetToken.mockResolvedValue(TOKEN);
+      mockExpiresAt = Date.now() + 3_600_000;
     });
 
     afterEach(() => {
@@ -492,22 +524,100 @@ describe('qdrantPlugin', () => {
       await close();
     });
 
-    it('sends a Basic Authorization header when both credentials are set', async () => {
+    it('sends the IAM token as a Bearer header when username/password are set', async () => {
       const { close, params } = await start({
         QDRANT_USERNAME: USERNAME,
         QDRANT_PASSWORD: PASSWORD,
       });
 
-      const authorization = params.headers?.Authorization;
-      expect(authorization).toMatch(/^Basic /);
-      const decoded = Buffer.from(String(authorization).slice('Basic '.length), 'base64').toString(
-        'utf8',
-      );
-      expect(decoded).toBe(`${USERNAME}:${PASSWORD}`);
-      // Basic auth must not smuggle an api key alongside it.
+      expect(params.headers?.Authorization).toBe(`Bearer ${TOKEN}`);
+      // The JWT is the whole credential — no api key tags along.
       expect(params.apiKey).toBeUndefined();
+      // The credentials themselves never reach the database client.
+      expect(JSON.stringify(params)).not.toContain(PASSWORD);
+      expect(JSON.stringify(params)).not.toContain(USERNAME);
 
       await close();
+    });
+
+    it('mints exactly one token at startup', async () => {
+      const { close } = await start({
+        QDRANT_USERNAME: USERNAME,
+        QDRANT_PASSWORD: PASSWORD,
+      });
+
+      expect(mockGetToken).toHaveBeenCalledTimes(1);
+
+      await close();
+    });
+
+    it('recreates the client on renewal, and createTenantQdrant wraps the NEW one', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        // Skew larger than the remaining lifetime collapses the delay to its 1s floor.
+        mockExpiresAt = Date.now() + 60_000;
+        const started = await start({
+          QDRANT_USERNAME: USERNAME,
+          QDRANT_PASSWORD: PASSWORD,
+          QDRANT_TOKEN_REFRESH_SKEW_MS: '600000',
+        });
+
+        const clientsBefore = mockClientConstructor.mock.calls.length;
+        expect(latestParams().headers?.Authorization).toBe(`Bearer ${TOKEN}`);
+        const wrapperBefore = started.app.createTenantQdrant('user-1') as unknown as {
+          client: unknown;
+        };
+
+        mockGetToken.mockResolvedValue(NEXT_TOKEN);
+        mockExpiresAt = Date.now() + 3_600_000;
+        await vi.advanceTimersByTimeAsync(1_500);
+
+        // A brand-new client, built with the renewed header.
+        expect(mockClientConstructor.mock.calls.length).toBe(clientsBefore + 1);
+        expect(latestParams().headers?.Authorization).toBe(`Bearer ${NEXT_TOKEN}`);
+
+        // …and the factory hands out wrappers over it, not over the retired client.
+        const wrapperAfter = started.app.createTenantQdrant('user-1') as unknown as {
+          client: unknown;
+        };
+        expect(wrapperAfter.client).not.toBe(wrapperBefore.client);
+
+        await started.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps running when a renewal fails, and logs the failure', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        mockExpiresAt = Date.now() + 60_000;
+        const started = await start({
+          QDRANT_USERNAME: USERNAME,
+          QDRANT_PASSWORD: PASSWORD,
+          QDRANT_TOKEN_REFRESH_SKEW_MS: '600000',
+        });
+
+        const clientsBefore = mockClientConstructor.mock.calls.length;
+        mockGetToken.mockRejectedValue(new Error('IAM unreachable'));
+        await vi.advanceTimersByTimeAsync(1_500);
+
+        // The old client stays in place — the current token is usually still valid.
+        expect(mockClientConstructor.mock.calls.length).toBe(clientsBefore);
+        // `vi.resetModules()` gives the plugin its own copy of the module, so compare
+        // by constructor name rather than by identity.
+        expect(started.app.createTenantQdrant('user-1').constructor.name).toBe(
+          TenantQdrantClient.name,
+        );
+        const failureLog = started.logCalls.find((args) =>
+          String(args[1]).includes('Failed to refresh Qdrant IAM token'),
+        );
+        expect(failureLog).toBeDefined();
+
+        await started.close();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('sends neither an api key nor an Authorization header when nothing is set', async () => {
@@ -519,7 +629,7 @@ describe('qdrantPlugin', () => {
       await close();
     });
 
-    it('refuses to boot when the api key and Basic credentials are both set', async () => {
+    it('refuses to boot when the api key and the IAM credentials are both set', async () => {
       for (const key of QDRANT_ENV_KEYS) {
         delete process.env[key];
       }
@@ -560,7 +670,7 @@ describe('qdrantPlugin', () => {
       await close();
     });
 
-    it('never leaks the password into the logs', async () => {
+    it('leaks neither the password nor the token into the logs', async () => {
       const { close, logCalls } = await start({
         QDRANT_USERNAME: USERNAME,
         QDRANT_PASSWORD: PASSWORD,
@@ -568,15 +678,53 @@ describe('qdrantPlugin', () => {
 
       const serialized = JSON.stringify(logCalls);
       expect(serialized).not.toContain(PASSWORD);
-      // The base64 blob must not surface either.
-      expect(serialized).not.toContain(Buffer.from(`${USERNAME}:${PASSWORD}`).toString('base64'));
+      expect(serialized).not.toContain(TOKEN);
       // …but the auth MODE is reported, so a misconfiguration is visible in the logs.
       const authLog = logCalls.find(
-        (args) => (args[0] as { qdrantAuth?: string } | undefined)?.qdrantAuth === 'basic',
+        (args) => (args[0] as { qdrantAuth?: string } | undefined)?.qdrantAuth === 'iam',
       );
       expect(authLog).toBeDefined();
 
       await close();
+    });
+
+    it('logs the token by length and expiry only', async () => {
+      const { close, logCalls } = await start({
+        QDRANT_USERNAME: USERNAME,
+        QDRANT_PASSWORD: PASSWORD,
+      });
+
+      const tokenLog = logCalls.find((args) => args[1] === 'Obtained Qdrant IAM token')?.[0] as
+        | Record<string, unknown>
+        | undefined;
+
+      expect(tokenLog).toMatchObject({ tokenLength: TOKEN.length, expirySource: 'jwt-exp' });
+      expect(typeof tokenLog?.expiresAt).toBe('string');
+
+      await close();
+    });
+
+    it('derives the IAM endpoint from the QDRANT_URL origin unless told otherwise', async () => {
+      const started = await start({
+        QDRANT_USERNAME: USERNAME,
+        QDRANT_PASSWORD: PASSWORD,
+      });
+      const derived = started.logCalls.find(
+        (args) => args[1] === 'Obtained Qdrant IAM token',
+      )?.[0] as { qdrantAuthUrl?: string } | undefined;
+      expect(derived?.qdrantAuthUrl).toBe('http://localhost:6333/auth');
+      await started.close();
+
+      const overridden = await start({
+        QDRANT_USERNAME: USERNAME,
+        QDRANT_PASSWORD: PASSWORD,
+        QDRANT_AUTH_URL: 'https://vectordb.example:6533/auth',
+      });
+      const explicit = overridden.logCalls.find(
+        (args) => args[1] === 'Obtained Qdrant IAM token',
+      )?.[0] as { qdrantAuthUrl?: string } | undefined;
+      expect(explicit?.qdrantAuthUrl).toBe('https://vectordb.example:6533/auth');
+      await overridden.close();
     });
 
     // The "custom" TLS path (and its no-leak guarantees) lives in
