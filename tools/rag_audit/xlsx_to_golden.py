@@ -192,7 +192,20 @@ def build_rows(
                 "id": f"x{int(num_cell):02d}-{category}",
                 "question": question,
                 "ground_truth": ground_truth,
-                "kind": _KIND_BY_CATEGORY.get(category, "factual"),
+                # Комментарий о КОРПУСЕ («в корпусе нет», «собирается из двух
+                # страниц», «эта страница-двойник намеренно не в alt_source_paths»)
+                # размечается разбором корпуса ровно так же дорого, как пути, и
+                # переживает регенерацию тем же путём. В ground_truth ему нельзя:
+                # это эталон ЗАМЕРА, а слов про устройство корпуса не содержит ни
+                # одна страница — они только опускали бы потолок меры содержания.
+                # Ловушку комментарий переживает: он объясняет ВЕРДИКТ, а не ответ.
+                "ground_truth_note": str(prev.get("ground_truth_note") or ""),
+                # Вид строки следует ВЕРДИКТУ, а не теме: ловушка «неотвечаема»,
+                # какой бы категории ни был вопрос (x23-meta — ловушка категории
+                # meta). Иначе регенерация возвращала бы ей kind: factual.
+                "kind": "unanswerable"
+                if expected_refusal
+                else _KIND_BY_CATEGORY.get(category, "factual"),
                 "category": category,
                 "source_path": source_path,
                 "alt_source_paths": alt_source_paths,

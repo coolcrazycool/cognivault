@@ -323,8 +323,13 @@ def test_apply_stages_runs_in_order_and_cuts_after_all_stages() -> None:
 
 
 def test_default_post_pipeline_mirrors_prod() -> None:
-    assert default_post_pipeline(True) == (("dedupe_chunks", {}), ("group_by_section", {}))
-    assert default_post_pipeline(False) == (("dedupe_chunks", {}),)
+    """Полный состав и порядок продового хвоста закреплён в
+    `test_collapse_bridge.py` (третья стадия — схлопывание копий между файлами —
+    живёт там же, где мост к ней). Здесь платформе вариантов важно другое: что
+    незаданный `post` — это ПРОД, а не «ничего», и что `group_by_section`
+    появляется в нём только по требованию вызывающего."""
+    assert default_post_pipeline(True)[:2] == (("dedupe_chunks", {}), ("group_by_section", {}))
+    assert "group_by_section" not in dict(default_post_pipeline(False))
 
 
 def test_dedupe_near_collapses_normalized_duplicates() -> None:

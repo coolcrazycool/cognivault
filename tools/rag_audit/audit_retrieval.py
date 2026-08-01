@@ -27,6 +27,9 @@
 | IDF               | формула Qdrant 1.16 `fancy_idf`          | Qdrant, server-side    |
 | слияние           | RRF Qdrant 1.16, k=2, позиция с нуля     | Qdrant, server-side    |
 | глубины веток     | константы из `service.ts`                | они же                 |
+| пост-обработка    | `dedupeChunks`/`dedupeSections` — формула,| она же                |
+|                   | `collapseCrossFileDuplicates` — САМ код  |                        |
+|                   | (через `collapse_duplicates.ts`)         |                        |
 | плотный вектор    | multilingual-e5-base                     | GigaChat EmbeddingsGigaR|
 
 Три из четырёх слоёв — тот же код или та же формула. Заменён один: эмбеддер.
@@ -66,6 +69,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import math
@@ -981,13 +985,132 @@ def dedupe_chunks(docs: Sequence[int], chunks: Sequence[Chunk]) -> list[int]:
 def post_filter(
     docs: Sequence[int], chunks: Sequence[Chunk], limit: int, group_by_section: bool
 ) -> list[int]:
-    """Продовый хвост `SearchService.hybrid` одним вызовом: дедуп чанков,
-    группировка разделов, срез до limit. Вариантный конвейер (`apply_stages`)
-    в дефолте делает ровно это же — функция оставлена как эталон для тестов."""
+    """ДЕТЕРМИНИРОВАННАЯ часть продового хвоста `SearchService.hybrid`: дедуп
+    чанков, группировка разделов, срез до limit.
+
+    Третья стадия хвоста — `collapseCrossFileDuplicates` — сюда НЕ входит: она
+    зависит от текста запроса и считается настоящим продовым кодом через мост
+    (`collapse_duplicates.ts`), то есть требует подпроцесса. Функция оставлена
+    как эталон для тестов чистой части; продовый конвейер целиком собирает
+    `default_post_pipeline`."""
     result = dedupe_chunks(docs, chunks)
     if group_by_section:
         result = dedupe_sections(result, chunks)
     return result[:limit]
+
+
+# --- мост к схлопыванию копий между файлами ----------------------------------
+
+
+class CollapseBridge:
+    """Живой процесс `collapse_duplicates.ts --serve`: НАСТОЯЩИЙ
+    `SearchService.collapseCrossFileDuplicates` на каждый запрос.
+
+    Почему процесс, а не пакетный вызов, как у `sparse_vectors.ts`: список
+    кандидатов известен только ПОСЛЕ слияния, отдельный на каждый вопрос и на
+    каждую ветку, — собрать их все заранее нельзя, не прогнав поиск дважды.
+    Старт `npx tsx` стоит секунду, а вызовов за прогон сотни, поэтому процесс
+    живёт весь прогон: корпус уезжает в него ОДИН раз, запрос — это номера
+    документов.
+
+    Почему не переписать двадцать строк на Python: в них шесть решений (порог
+    Жаккара, пол по числу различных слов, `WORD_PATTERN`, снятие аннотации,
+    освобождение для чанков одного файла, защита по слову запроса), и ни одно
+    из них не проявит расхождение ничем, кроме неверных чисел. Тот же довод,
+    по которому разреженную сторону гоняет `bm25.ts`, а окно — `sectionWindow`.
+    """
+
+    def __init__(self, chunks: Sequence[Chunk]) -> None:
+        script = REPO_ROOT / "tools" / "rag_audit" / "collapse_duplicates.ts"
+        # Ссылка на корпус держится, чтобы `id(chunks)` не переиспользовался
+        # другим объектом после сборки мусора: по нему проверяется, что мост
+        # заряжен ИМЕННО этим корпусом.
+        self.chunks = chunks
+        self._errlog = tempfile.NamedTemporaryFile(  # noqa: SIM115 — живёт с процессом
+            prefix="rag-audit-collapse-", suffix=".log", mode="w+", encoding="utf-8"
+        )
+        try:
+            self._proc = subprocess.Popen(
+                ["npx", "tsx", str(script), "--serve"],
+                cwd=REPO_ROOT,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=self._errlog,
+                text=True,
+                encoding="utf-8",
+            )
+        except OSError as exc:  # pragma: no cover — нет npx
+            raise SystemExit(f"не удалось запустить collapse_duplicates.ts: {exc}") from exc
+        # `payload.text` в проде — текст ТОЧКИ (чанк с крошкой), он не зависит от
+        # doc-композера варианта: композер меняет индексируемый текст, а не
+        # полезную нагрузку. Поэтому корпус моста — всегда сырой `chunk.text`.
+        reply = self._exchange(
+            {"op": "corpus", "docs": [{"path": c.path, "text": c.text} for c in chunks]}
+        )
+        if reply.get("docs") != len(chunks):
+            raise SystemExit(f"collapse_duplicates.ts принял корпус неверно: {reply}")
+
+    def _exchange(self, message: dict[str, Any]) -> dict[str, Any]:
+        assert self._proc.stdin is not None and self._proc.stdout is not None
+        try:
+            self._proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+            self._proc.stdin.flush()
+            line = self._proc.stdout.readline()
+        except (BrokenPipeError, ValueError) as exc:
+            raise SystemExit(f"collapse_duplicates.ts оборвался: {exc}\n{self._stderr()}") from exc
+        if not line:
+            raise SystemExit(f"collapse_duplicates.ts замолчал\n{self._stderr()}")
+        reply: dict[str, Any] = json.loads(line)
+        if "error" in reply:
+            raise SystemExit(f"collapse_duplicates.ts: {reply['error']}\n{self._stderr()}")
+        return reply
+
+    def _stderr(self) -> str:
+        self._errlog.flush()
+        self._errlog.seek(0)
+        return self._errlog.read()[-2000:]
+
+    def collapse(self, query: str, docs: Sequence[int]) -> list[int]:
+        if not docs:
+            return []
+        return [int(doc) for doc in self._exchange(
+            {"op": "collapse", "query": query, "docs": [int(d) for d in docs]}
+        )["kept"]]
+
+    def close(self) -> None:
+        if self._proc.poll() is None:
+            if self._proc.stdin is not None:
+                try:
+                    self._proc.stdin.close()
+                except OSError:  # pragma: no cover
+                    pass
+            try:
+                self._proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:  # pragma: no cover
+                self._proc.kill()
+        self._errlog.close()
+
+
+_COLLAPSE_BRIDGE: CollapseBridge | None = None
+
+
+def collapse_bridge(chunks: Sequence[Chunk]) -> CollapseBridge:
+    """Мост на текущий корпус — один на прогон; смена корпуса перезаряжает его."""
+    global _COLLAPSE_BRIDGE
+    if _COLLAPSE_BRIDGE is None or _COLLAPSE_BRIDGE.chunks is not chunks:
+        close_collapse_bridge()
+        _COLLAPSE_BRIDGE = CollapseBridge(chunks)
+    return _COLLAPSE_BRIDGE
+
+
+def close_collapse_bridge() -> None:
+    global _COLLAPSE_BRIDGE
+    if _COLLAPSE_BRIDGE is not None:
+        _COLLAPSE_BRIDGE.close()
+        _COLLAPSE_BRIDGE = None
+
+
+atexit.register(close_collapse_bridge)
 
 
 # --- стадии пост-обработки ---------------------------------------------------
@@ -1003,6 +1126,20 @@ def _stage_group_by_section(
     docs: list[int], ctx: StageContext, params: dict[str, Any]
 ) -> list[int]:
     return dedupe_sections(docs, ctx.chunks)
+
+
+@register_post_stage("collapse_cross_file_duplicates")
+def _stage_collapse_cross_file_duplicates(
+    docs: list[int], ctx: StageContext, params: dict[str, Any]
+) -> list[int]:
+    """`SearchService.collapseCrossFileDuplicates` — САМ, через мост
+    `collapse_duplicates.ts`. Питоновской реализации здесь нет намеренно:
+    см. `CollapseBridge`.
+
+    Стадия зависит от ТЕКСТА ЗАПРОСА (копия, несущая слово запроса, которого нет
+    у выжившего, для этого запроса не дубликат) — единственная в конвейере.
+    """
+    return collapse_bridge(ctx.chunks).collapse(ctx.query_text, docs)
 
 
 @register_post_stage("dedupe_near")
@@ -1080,10 +1217,18 @@ def apply_stages(
 
 
 def default_post_pipeline(group_by_section: bool) -> tuple[tuple[str, dict[str, Any]], ...]:
-    """Продовый конвейер: дедуп чанков (+ группировка разделов, как её зовёт чат)."""
+    """Продовый конвейер — ровно хвост `SearchService.hybrid` и в том же порядке:
+
+        dedupeChunks → [dedupeSections] → collapseCrossFileDuplicates → slice(limit)
+
+    Схлопывание копий между файлами тут не «ещё одна стадия», а прод: в бою оно
+    зовётся ВСЕГДА, независимо от `group_by_section`, и срез до `limit` идёт
+    после него. Пока его в конвейере не было, табло описывало конвейер, который
+    не отгружается."""
     stages: list[tuple[str, dict[str, Any]]] = [("dedupe_chunks", {})]
     if group_by_section:
         stages.append(("group_by_section", {}))
+    stages.append(("collapse_cross_file_duplicates", {}))
     return tuple(stages)
 
 
@@ -1289,7 +1434,11 @@ def evaluate(
     """Полный прогон: выдача на каждый вопрос → метрики по веткам и категориям."""
     answerable = [q for q in queries if not q.expected_refusal and q.source_path]
     traps = [q for q in queries if q.expected_refusal]
-    # `x23-meta` — вопрос о корпусе целиком, правильного документа у него нет по замыслу.
+    # Отвечаемая строка без пути — ни отвечаемая, ни ловушка: она не попадает ни в один
+    # знаменатель и потому невидима. С 2026-08-01 таких строк в наборе нет (`x23-meta`
+    # переведён в ловушку: правильного документа у него нет по замыслу — вопрос про
+    # формат ответа самого ассистента). Список остаётся ГРОМКИМ индикатором: он
+    # печатается в отчёте, чтобы следующая такая строка не завелась молча.
     no_path = [q for q in queries if not q.expected_refusal and not q.source_path]
 
     # Метка раздела может не существовать в ЭТОМ корпусе: правки конвертера вернули

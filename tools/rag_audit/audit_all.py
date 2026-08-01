@@ -67,6 +67,7 @@ RULERS = (
     "audit_window.py",
     "section_windows.ts",
     "sparse_vectors.ts",
+    "collapse_duplicates.ts",
 )
 
 

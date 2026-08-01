@@ -835,6 +835,13 @@ def build_report(args: argparse.Namespace, state: dict[str, Any]) -> dict[str, A
             "attainable_share_mean": mean(shares),
             "attainable_share_median": median(shares),
             "questions_below_min_terms": sum(1 for r in prod_rows if not r["judgeable"]),
+            # Счёт говорит «сколько», но не «какие», а «какие» — это адрес: строку
+            # либо чинят разметкой, либо признают замером ТОЛЬКО стыка 3. Молчаливое
+            # число делает вторую возможность неотличимой от недосмотра, поэтому id
+            # перечислены (обоснование по каждой — в её `ground_truth_note`).
+            "questions_below_min_terms_ids": sorted(
+                str(r["id"]) for r in prod_rows if not r["judgeable"]
+            ),
         },
         "prod": {
             "all": summarize(prod_rows, threshold),
