@@ -31,6 +31,7 @@ Pipeline (two-stage + post):
 from __future__ import annotations
 
 import logging
+import posixpath
 import re
 import unicodedata
 from typing import Any
@@ -174,8 +175,31 @@ _LANG_MAP = {
     "plain": "",
 }
 
-# Macro names dropped entirely (navigation / dynamic content).
-_DROP_MACROS = {"toc", "pagetree", "children", "contentbylabel", "recently-updated"}
+# Macro names dropped entirely: navigation / dynamic content, plus macros that
+# render nothing at all in Confluence.  ``anchor`` is the latter -- an empty
+# `<span>` target for in-page links; его имя ("а", "b", "перечень") — не текст
+# страницы, а идентификатор якоря, и в индексе это чистый мусорный токен.
+_DROP_MACROS = {
+    "toc",
+    "pagetree",
+    "children",
+    "contentbylabel",
+    "recently-updated",
+    "anchor",
+}
+
+# Макросы, чей `<ac:plain-text-body>` Confluence РЕНДЕРИТ как разметку, а не
+# показывает дословно.  Различие принципиальное: payload `markdown`/`html` —
+# это HTML-документ (ссылки, картинки, таблицы), и разобрать его надо как
+# разметку; payload `code`/`noformat` и любого незнакомого макроса — дословный
+# текст, и разбор его как разметки молча съел бы всё, что похоже на тег.
+# Поэтому список белый: незнакомое считается дословным (см. `_emit_plain_body`).
+_RENDERED_PLAIN_BODY_MACROS = {"markdown", "html", "html-include"}
+
+# Вложения лежат в вольте по ОДНОМУ адресу, и знают его двое: `sync.py`, который
+# кладёт туда файл, и конвертер, который на него ссылается.  Раньше адрес был
+# записан в обоих местах руками и разошёлся — ссылки не разрешались ни одна.
+_ATTACHMENTS_ROOT = "Confluence/attachments"
 
 
 # ===========================================================================
@@ -222,6 +246,46 @@ def build_vault_path(page: dict) -> str:
             segments.append(seg)
     segments.append(safe_filename(page.get("title", ""), page.get("id", "")) + ".md")
     return "/".join(segments)
+
+
+def attachment_vault_path(page_id: str, filename: str) -> str:
+    """Абсолютный (от корня вольта) путь вложения: ``Confluence/attachments/<id>/<file>``.
+
+    Единственное определение этого адреса.  Им пользуется и `sync.py` при
+    записи файла, и конвертер при построении ссылки на него, — чтобы «куда
+    положили» и «куда сослались» не могли разъехаться.
+    """
+    return f"{_ATTACHMENTS_ROOT}/{page_id}/{filename}"
+
+
+def attachment_href(note_path: str, page_id: str, filename: str) -> str:
+    """Ссылка на вложение ОТНОСИТЕЛЬНО заметки ``note_path``.
+
+    Вложения лежат в общей папке в корне вольта, а заметка — на глубине
+    ``Confluence/<пространство>/<предки…>``, поэтому путь всегда идёт вверх
+    (``../../attachments/…``).  Раньше писалось ``attachments/<id>/<file>``
+    относительно заметки — это разрешалось бы только для заметки, лежащей
+    прямо в ``Confluence/``, а сегмент пространства есть всегда.
+    """
+    target = attachment_vault_path(page_id, _quote_href(filename))
+    note_dir = note_path.rsplit("/", 1)[0] if "/" in note_path else ""
+    if not note_dir:
+        return target
+    return posixpath.relpath(target, note_dir)
+
+
+def _quote_href(name: str) -> str:
+    """Экранирует в имени файла то, что ломает синтаксис ссылки Markdown.
+
+    Кириллица и прочее НЕ трогается: `%`-кодировать всё подряд — значит сделать
+    путь нечитаемым ради символов, которые разметке не мешают.  Пробел мешает:
+    вложения тут зовутся «Проблемы SAFP на 20250526.eml», и без экранирования
+    ссылка обрывается на первом же пробеле.
+    """
+    return _HREF_UNSAFE_RE.sub(lambda m: f"%{ord(m.group(0)):02X}", name)
+
+
+_HREF_UNSAFE_RE = re.compile(r"[ ()<>\"'%]")
 
 
 # ===========================================================================
@@ -290,6 +354,11 @@ def storage_to_markdown(
         space=space,
         crawl_titles=crawl_titles,
         attachment_names=attachment_names,
+        # Ссылка на вложение относительна ЗАМЕТКЕ, поэтому конвертеру нужен её
+        # собственный путь.  Он выводится здесь, а не приходит из `sync.py`:
+        # разрешение коллизий там меняет только имя файла, каталог остаётся тем
+        # же, а именно каталог и определяет ссылку.
+        note_path=build_vault_path(page),
     )
 
     # --- Stage A: normalize the storage soup -------------------------------
@@ -335,11 +404,13 @@ class _Context:
         space: str,
         crawl_titles: dict[str, str],
         attachment_names: set[str],
+        note_path: str = "",
     ) -> None:
         self.page_id = page_id
         self.space = space
         self.crawl_titles = crawl_titles
         self.attachment_names = attachment_names
+        self.note_path = note_path
         self.placeholders: dict[str, tuple[str, Any]] = {}
         self.refs: list[str] = []
         self._seen_refs: set[str] = set()
@@ -351,6 +422,9 @@ class _Context:
         self._counter += 1
         self.placeholders[key] = (kind, payload)
         return key
+
+    def attachment_href(self, filename: str) -> str:
+        return attachment_href(self.note_path, self.page_id, filename)
 
     def record_ref(self, filename: str) -> None:
         if filename and filename not in self._seen_refs:
@@ -406,8 +480,12 @@ def _transform_macros(soup: BeautifulSoup, ctx: _Context) -> None:
             _handle_include(macro, ctx)
         elif name == "jira":
             _handle_jira(macro, ctx)
-        elif name in ("drawio", "gliffy", "chart"):
+        elif name in ("drawio", "drawio-sketch", "gliffy", "chart"):
             _handle_diagram(macro, ctx)
+        elif name == "view-file":
+            _handle_view_file(macro, ctx)
+        elif name == "open-api":
+            _handle_open_api(macro, ctx)
         elif name in _DROP_MACROS:
             macro.decompose()
         else:
@@ -533,14 +611,100 @@ def _handle_diagram(macro: Tag, ctx: _Context) -> None:
     _placeholder_line(macro, ctx, label)
 
 
+def _handle_view_file(macro: Tag, ctx: _Context) -> None:
+    """`view-file` — предпросмотр вложения; имя файла и есть всё его содержимое.
+
+    Имя лежит НЕ текстом параметра, а вложенным `<ri:attachment ri:filename>`,
+    поэтому обычный разбор параметров его не видел, и макрос уходил в выход
+    пустым — вместе с единственной ссылкой на приложенный документ.
+    """
+    att = macro.find("ri:attachment")
+    filename = (att.get("ri:filename") or "").strip() if att is not None else ""
+    if not filename:
+        macro.decompose()
+        return
+    ctx.record_ref(filename)
+    p = _new_tag(macro, "p")
+    a = _new_tag(macro, "a")
+    a["href"] = ctx.attachment_href(filename)
+    # Текст ссылки — через плейсхолдер: имена файлов полны `_` и `.`, которые
+    # markdownify экранирует, а именно они и ищутся лексически.
+    a.string = ctx.add_placeholder("literal", f"Файл: {filename}")
+    p.append(a)
+    macro.replace_with(p)
+
+
+def _handle_open_api(macro: Tag, ctx: _Context) -> None:
+    """`open-api` — спецификация подгружается JavaScript'ом при рендере.
+
+    Ни в storage, ни в отрендеренной странице тела спецификации нет: адрес —
+    единственное, что вообще доступно, и без него страница пустая.
+    """
+    url = (_param(macro, "url") or "").strip()
+    label = f"[Спецификация OpenAPI: {url}]" if url else "[Спецификация OpenAPI]"
+    _placeholder_line(macro, ctx, label)
+
+
 def _handle_unknown_macro(macro: Tag, ctx: _Context) -> None:
     name = (macro.get("ac:name") or "unknown").lower()
     ctx.coverage.append(name)
+
+    # Заголовок макроса — не украшение, а метка раздела («Логика окрашивания
+    # вершин потоков»).  У `ui-expand` их 98 против 68 у обработанного `expand`,
+    # и раньше все они пропадали: у неизвестного макроса брали только тело.
+    title = (_param(macro, "title") or "").strip()
+    if title:
+        heading = _new_tag(macro, "h3")
+        heading.string = title
+        macro.insert_before(heading)
+
     body = macro.find("ac:rich-text-body")
     if body is not None:
         for child in list(body.children):
             macro.insert_before(child.extract())
+        macro.decompose()
+        return
+
+    plain = macro.find("ac:plain-text-body")
+    if plain is not None:
+        _emit_plain_body(macro, ctx, name, _cdata_text(plain))
+        return
+
     macro.decompose()
+
+
+def _emit_plain_body(macro: Tag, ctx: _Context, name: str, payload: str) -> None:
+    """Тело `<ac:plain-text-body>` незнакомого макроса — сохранить, не разобрав.
+
+    Раньше искали только `<ac:rich-text-body>`, и страница-навигатор целиком
+    состоящая из макроса `markdown` схлопывалась в одну строку заголовка.
+
+    Правило простое и намеренно осторожное: payload разбирается как разметка
+    ТОЛЬКО для макросов из `_RENDERED_PLAIN_BODY_MACROS` — тех, что Confluence
+    и сам рендерит.  Всё остальное укладывается в забор кода дословно: для
+    `noformat`-подобного макроса payload — литеральный текст, и разбор его как
+    HTML съел бы всё, что похоже на тег, молча и без следа.
+
+    `<style>`/`<script>` из разбираемого payload'а выбрасываются: CSS — не текст
+    страницы, а несколько сотен токенов шума на каждую страницу-навигатор.
+    """
+    if not payload.strip():
+        macro.decompose()
+        return
+
+    if name in _RENDERED_PLAIN_BODY_MACROS:
+        fragment = BeautifulSoup(payload, "html.parser")
+        for junk in fragment.find_all(["style", "script"]):
+            junk.decompose()
+        for child in list(fragment.contents):
+            macro.insert_before(child.extract())
+        macro.decompose()
+        return
+
+    key = ctx.add_placeholder("code", ("", payload))
+    ph = _new_tag(macro, "p")
+    ph.string = key
+    macro.replace_with(ph)
 
 
 def _transform_images(soup: BeautifulSoup, ctx: _Context) -> None:
@@ -572,7 +736,7 @@ def _transform_images(soup: BeautifulSoup, ctx: _Context) -> None:
                 continue
             ctx.record_ref(filename)
             img = _new_tag(image, "img")
-            img["src"] = f"attachments/{ctx.page_id}/{filename}"
+            img["src"] = ctx.attachment_href(filename)
             img["alt"] = alt
             image.replace_with(img)
         elif url is not None:
@@ -617,7 +781,7 @@ def _transform_links(soup: BeautifulSoup, ctx: _Context) -> None:
             if filename:
                 ctx.record_ref(filename)
                 a = _new_tag(link, "a")
-                a["href"] = f"attachments/{ctx.page_id}/{filename}"
+                a["href"] = ctx.attachment_href(filename)
                 a.string = text
                 link.replace_with(a)
             else:
@@ -1287,13 +1451,21 @@ class _StorageConverter(MarkdownConverter):
 # ===========================================================================
 
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*)$")
+# Префикс цитаты, который markdownify ставит перед строкой внутри `<blockquote>`
+# (вложенные панели дают `> > `).
+_QUOTE_PREFIX_RE = re.compile(r"^[ \t]*(?:>[ \t]*)+")
 
 
 def _postprocess(md: str, title: str, placeholders: dict) -> str:
     md = _demote_and_prepend_title(md, title)
     md = _normalize_text(md)
-    md = _restore_block_placeholders(md, placeholders)
+    # Схлопывание пустых строк — ДО восстановления плейсхолдеров.  После него
+    # оно резало пустые строки ВНУТРИ забора кода: код обязан дойти дословно, а
+    # пустая строка там — часть текста (разделитель примеров, отступ в JSON).
+    # Пока код и таблицы — плейсхолдеры, они от любой правки текста защищены по
+    # построению, чем весь Stage C и пользуется.
     md = re.sub(r"\n{3,}", "\n\n", md)
+    md = _restore_block_placeholders(md, placeholders)
     return md.strip() + "\n"
 
 
@@ -1330,6 +1502,18 @@ def _normalize_text(md: str) -> str:
 
 
 def _restore_block_placeholders(md: str, placeholders: dict) -> str:
+    """Подставляет обратно код и таблицы, вынимая блочные из цитат.
+
+    Панель (`_handle_panel`) — это `<blockquote>`, и markdownify ставит `> `
+    только на строку с плейсхолдером.  Многострочная подстановка на месте давала
+    `> ```python`, а сами строки кода оставались без префикса: забор не
+    закрывался внутри цитаты, и блок переставал быть блоком — ни для markdown,
+    ни для чанкера бэкенда, который разбирает документ в mdast и видит там не
+    `code`, а испорченную цитату.  Префикс можно было бы дописать всем строкам,
+    но забор внутри цитаты чанкер всё равно не считает кодом, поэтому блок
+    выносится из цитаты наружу: дословность и разбираемость важнее рамки.
+    """
+
     def repl(match: re.Match) -> str:
         entry = placeholders.get(match.group(0))
         if not entry:
@@ -1345,7 +1529,22 @@ def _restore_block_placeholders(md: str, placeholders: dict) -> str:
             return str(payload)
         return ""
 
-    return _PH_RE.sub(repl, md)
+    out: list[str] = []
+    for line in md.split("\n"):
+        if not _PH_RE.search(line):
+            out.append(line)
+            continue
+        quote = _QUOTE_PREFIX_RE.match(line)
+        rest = line[quote.end() :] if quote else line
+        restored = _PH_RE.sub(repl, rest if quote else line)
+        # Из цитаты выносится только блок, занимающий строку целиком: инлайновый
+        # плейсхолдер (метка `status`, однострочный код) — часть предложения, и
+        # без префикса он выпал бы из цитаты вместе с ним.
+        if quote and _PH_RE.fullmatch(rest.strip()) and "\n" in restored:
+            out.append(restored)
+            continue
+        out.append(line[: quote.end()] + restored if quote else restored)
+    return "\n".join(out)
 
 
 # ===========================================================================

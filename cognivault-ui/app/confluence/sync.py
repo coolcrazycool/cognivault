@@ -40,6 +40,7 @@ from .client import (
     resolve_display_url,
 )
 from .convert import (
+    attachment_vault_path,
     build_frontmatter,
     build_vault_path,
     collision_suffix,
@@ -619,7 +620,9 @@ async def sync_stream(
                                         f"вложение {fname}: пропущено ({msg})"
                                     )
                                     continue
-                                zippath = f"Confluence/attachments/{pid}/{fname}"
+                                # Адрес вложения — из конвертера, а не строкой
+                                # здесь: он же строит ссылку на этот файл.
+                                zippath = attachment_vault_path(pid, fname)
                                 att_entries.append((zippath, data))
                                 att_batch_bytes += len(data)
                                 new_att[fname] = {

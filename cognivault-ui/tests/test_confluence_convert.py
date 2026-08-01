@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import logging
 import os
+import posixpath
 import re
 import sys
+import urllib.parse
 
 import yaml
 
@@ -97,6 +99,37 @@ def test_code_title_becomes_bold_caption_above():
     )
     assert "**Пример**" in md
     assert md.index("**Пример**") < md.index("```python")
+
+
+def test_blank_lines_inside_code_survive_postprocess():
+    """Схлопывание пустых строк не имеет права трогать дословный код."""
+    code = 'resp = client.get(url)\n\n\n# Пример ответа:\n{"status": "ok"}'
+    md = _md(
+        '<ac:structured-macro ac:name="code">'
+        '<ac:parameter ac:name="language">python</ac:parameter>'
+        f"<ac:plain-text-body><![CDATA[{code}]]></ac:plain-text-body>"
+        "</ac:structured-macro>"
+    )
+    assert f"```python\n{code}\n```" in md
+
+
+def test_code_inside_panel_is_a_closed_top_level_fence():
+    """Забор внутри цитаты не закрывается: markdownify префиксует только первую строку."""
+    code = 'SELECT 1\n\nFROM dual'
+    md = _md(
+        '<ac:structured-macro ac:name="panel">'
+        '<ac:parameter ac:name="title">Инструкция для первого пользователя</ac:parameter>'
+        "<ac:rich-text-body><p>Подготовить файлы:</p>"
+        '<ac:structured-macro ac:name="code">'
+        '<ac:parameter ac:name="language">sql</ac:parameter>'
+        f"<ac:plain-text-body><![CDATA[{code}]]></ac:plain-text-body>"
+        "</ac:structured-macro>"
+        "</ac:rich-text-body></ac:structured-macro>"
+    )
+    assert "Инструкция для первого пользователя" in md
+    assert f"```sql\n{code}\n```" in md
+    # Ни одна строка забора не унесена в цитату — иначе он не закроется.
+    assert not re.search(r"^\s*>.*```", md, re.MULTILINE)
 
 
 # ---------------------------------------------------------------------------
@@ -572,7 +605,8 @@ def test_attachment_image_and_refs():
         '<p><ac:image ac:alt="карта">'
         '<ri:attachment ri:filename="map.png"/></ac:image></p>'
     )
-    assert "![карта](attachments/100/map.png)" in md
+    # Заметка лежит в `Confluence/DEV/`, вложения — в `Confluence/attachments/`.
+    assert "![карта](../attachments/100/map.png)" in md
     assert refs == ["map.png"]
 
 
@@ -611,8 +645,33 @@ def test_ri_attachment_link_and_ref():
         "<ac:plain-text-link-body>Документ</ac:plain-text-link-body>"
         "</ac:link></p>"
     )
-    assert "[Документ](attachments/100/doc.pdf)" in md
+    assert "[Документ](../attachments/100/doc.pdf)" in md
     assert refs == ["doc.pdf"]
+
+
+def test_attachment_href_is_relative_to_the_note_and_resolves_to_storage():
+    """Путь вложения обязан разрешаться ИЗ каталога заметки в место, куда его кладёт sync."""
+    page = _page(
+        '<p><ac:image ac:alt="схема">'
+        '<ri:attachment ri:filename="Схема потоков.png"/></ac:image></p>',
+        ancestors=["OASIS External Home", "Продукты"],
+        space="OASISEXT",
+    )
+    md, _refs = convert.storage_to_markdown(page)
+    href = re.search(r"!\[схема\]\(([^)]+)\)", md).group(1)
+    # Пробел в имени рвёт ссылку Markdown — он экранирован.
+    assert " " not in href
+    note_dir = convert.build_vault_path(page).rsplit("/", 1)[0]
+    resolved = posixpath.normpath(f"{note_dir}/{urllib.parse.unquote(href)}")
+    assert resolved == convert.attachment_vault_path("100", "Схема потоков.png")
+    assert resolved == "Confluence/attachments/100/Схема потоков.png"
+
+
+def test_sync_stores_attachments_where_the_converter_points():
+    """У «куда положили» и «куда сослались» одно определение, а не две строки."""
+    from app.confluence import sync
+
+    assert sync.attachment_vault_path is convert.attachment_vault_path
 
 
 # ---------------------------------------------------------------------------
@@ -660,6 +719,112 @@ def test_unknown_macro_without_body_dropped():
     md = _md('<ac:structured-macro ac:name="widget"/><p>рядом</p>')
     assert "рядом" in md
     assert "widget" not in md
+
+
+def test_markdown_macro_plain_body_survives_as_markup():
+    """`markdown` кладёт HTML в plain-text-body — раньше страница-навигатор исчезала."""
+    md = _md(
+        '<ac:layout><ac:layout-section ac:type="single"><ac:layout-cell>'
+        '<ac:structured-macro ac:name="markdown" ac:schema-version="1">'
+        "<ac:plain-text-body><![CDATA["
+        '<div class="main"><img class="img-large" src="https://wiki.ru/шапка.png">'
+        "<h2>Продуктовая витрина</h2>"
+        '<div class="custom-block">'
+        '<a href="https://wiki.ru/display/OASISEXT/Fincert-enricher">'
+        "<div>Fincert-enricher</div></a></div>"
+        '<div class="custom-block">'
+        '<a href="https://wiki.ru/pages/viewpage.action?pageId=181">'
+        "<div>Fincert. Сервис получения ФИДов</div></a></div>"
+        "</div>]]></ac:plain-text-body></ac:structured-macro>"
+        "</ac:layout-cell></ac:layout-section></ac:layout>"
+    )
+    assert "Продуктовая витрина" in md
+    assert "Сервис получения ФИДов" in md
+    # Разметка разобрана, а не выведена дословно: ссылки стали ссылками.
+    assert "](https://wiki.ru/display/OASISEXT/Fincert-enricher)" in md
+    assert "<div" not in md
+
+
+def test_markdown_macro_css_payload_is_not_indexed():
+    """Соседний макрос `markdown` часто несёт только `<style>` — это не текст страницы."""
+    md = _md(
+        '<ac:structured-macro ac:name="markdown">'
+        "<ac:plain-text-body><![CDATA["
+        "<style>.custom-block { box-shadow: 0 4px 10px rgba(0,0,0,0.3); }</style>"
+        "<p>Видимый текст</p>]]></ac:plain-text-body></ac:structured-macro>"
+    )
+    assert "Видимый текст" in md
+    assert "box-shadow" not in md and "custom-block" not in md
+
+
+def test_unknown_macro_plain_body_kept_verbatim_not_parsed():
+    """У НЕизвестного макроса plain-text-body — литеральный текст, а не разметка."""
+    md = _md(
+        '<ac:structured-macro ac:name="mystery-format">'
+        "<ac:plain-text-body><![CDATA[если a < b и c > d, то <тег> не тег]]>"
+        "</ac:plain-text-body></ac:structured-macro>"
+    )
+    assert "если a < b и c > d, то <тег> не тег" in md
+    assert "```" in md
+
+
+def test_ui_expand_title_becomes_a_heading():
+    """Заголовок `ui-*` — метка раздела и якорь поиска; терять его нельзя."""
+    md = _md(
+        '<ac:structured-macro ac:name="ui-expand">'
+        '<ac:parameter ac:name="title">Логика окрашивания вершин потоков</ac:parameter>'
+        "<ac:rich-text-body><p>Синий — поток работает стабильно</p>"
+        "</ac:rich-text-body></ac:structured-macro>"
+    )
+    assert re.search(r"^#{2,6} Логика окрашивания вершин потоков$", md, re.MULTILINE)
+    assert "Синий — поток работает стабильно" in md
+
+
+def test_view_file_emits_filename_and_records_ref():
+    md, refs = _md_refs(
+        '<ac:structured-macro ac:name="view-file">'
+        '<ac:parameter ac:name="name">'
+        '<ri:attachment ri:filename="Проблемы SAFP на 20250526.eml"/>'
+        "</ac:parameter>"
+        '<ac:parameter ac:name="height">250</ac:parameter>'
+        "</ac:structured-macro>"
+    )
+    assert "Проблемы SAFP на 20250526.eml" in md
+    assert refs == ["Проблемы SAFP на 20250526.eml"]
+
+
+def test_drawio_sketch_named_like_plain_drawio():
+    md = _md(
+        '<ac:structured-macro ac:name="drawio-sketch">'
+        '<ac:parameter ac:name="diagramName">ЖЦ модели</ac:parameter>'
+        '<ac:parameter ac:name="revision">1</ac:parameter>'
+        "</ac:structured-macro>"
+    )
+    assert "[Диаграмма: ЖЦ модели]" in md
+
+
+def test_open_api_keeps_the_spec_url():
+    """Спецификацию грузит JavaScript — адрес единственное, что есть в storage."""
+    url = "https://apistudio.sigma.sbrf.ru/public/body/yml/a7118300-2057"
+    md = _md(
+        '<ac:structured-macro ac:name="open-api">'
+        f'<ac:parameter ac:name="url">{url}</ac:parameter>'
+        "</ac:structured-macro>"
+    )
+    assert url in md
+
+
+def test_anchor_macro_leaves_no_text():
+    """`anchor` в Confluence не рендерит ничего — его имя в индексе просто мусор."""
+    md = _md(
+        "<p>до</p>"
+        '<ac:structured-macro ac:name="anchor">'
+        '<ac:parameter ac:name="">перечень-правил</ac:parameter>'
+        "</ac:structured-macro>"
+        "<p>после</p>"
+    )
+    assert "до" in md and "после" in md
+    assert "перечень-правил" not in md
 
 
 # ---------------------------------------------------------------------------

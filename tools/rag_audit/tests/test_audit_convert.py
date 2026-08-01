@@ -152,15 +152,21 @@ def test_classify_macro():
     assert classify_macro("markdown") == "unknown"
 
 
-def test_unknown_macro_with_plain_text_body_loses_everything():
+def test_unknown_macro_with_plain_text_body_is_measured_as_content():
+    """`plain-text-body` незнакомого макроса аудит считает содержимым и видит его в выходе.
+
+    Тест раньше фиксировал потерю (`survival == 0`): `_handle_unknown_macro`
+    искал только `rich-text-body`, и страница из одного макроса `markdown`
+    схлопывалась в заголовок. Конвертер это чинит, и мерить теперь надо, что
+    текст ДОШЁЛ, — сама метрика (эталон = видимый текст payload'а) не менялась.
+    """
     metrics, body = _convert(PLAIN_BODY_UNKNOWN)
     observed = metrics["macros"][0]
     assert observed["kind"] == "unknown"
     assert observed["body_kind"] == "plain-text-body"
-    # `_handle_unknown_macro` ищет только rich-text-body — plain-text исчезает.
-    assert observed["survival"] == 0.0
-    assert "Реестр витрин" not in body
-    assert metrics["recall"] == 0.0
+    assert observed["survival"] == 1.0
+    assert "Реестр витрин" in body
+    assert metrics["recall"] == 1.0
 
 
 def test_unknown_macro_with_rich_text_body_survives():
@@ -175,8 +181,9 @@ def test_unknown_macro_with_rich_text_body_survives():
     assert observed["kind"] == "unknown"
     assert observed["survival"] == 1.0
     assert "Содержимое секции" in body
-    # Тело выжило, а заголовок из параметра — нет: это и есть замеряемая потеря.
-    assert "Заголовок секции" not in body
+    # Заголовок макроса аудит считает содержимым (`_CONTENT_PARAMS`), и он тоже
+    # доходит: раньше здесь фиксировалась его потеря у всех `ui-*` макросов.
+    assert "Заголовок секции" in body
 
 
 def test_macro_observations_attribute_body_to_the_owning_macro():

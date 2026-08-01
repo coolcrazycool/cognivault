@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import posixpath
 import re
 import statistics
 import sys
@@ -53,10 +54,13 @@ from typing import Any
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "cognivault-ui"))
 
-from bs4 import BeautifulSoup, NavigableString, Tag  # noqa: E402
+from urllib.parse import unquote  # noqa: E402
+
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag  # noqa: E402
 
 from app.confluence.convert import (  # noqa: E402
     _DROP_MACROS,
+    _RENDERED_PLAIN_BODY_MACROS as _CONVERTER_RENDERED_PLAIN_BODY,
     _LANG_MAP,
     _PANEL_LABELS,
     _PH_CLOSE,
@@ -101,7 +105,7 @@ _CONTENT_PARAMS = {"title"}
 # Для них эталон — видимый текст payload'а, а не его разметка: иначе `<div
 # style="padding:0 10px">` попадает в «потерянное содержимое» и топит метрику
 # шумом из атрибутов. Для `code`/`noformat` наоборот — там payload и есть текст.
-_RENDERED_PLAIN_BODY_MACROS = {"markdown"}
+_RENDERED_PLAIN_BODY_MACROS = _CONVERTER_RENDERED_PLAIN_BODY
 
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 _LIST_LINE_RE = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+\S")
@@ -183,6 +187,11 @@ _BLOCK_TAGS = {
     "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre",
 }
 
+# Ни Confluence, ни markdownify не выводят это как текст. Восемь из 32 макросов
+# `markdown` в корпусе — чистый CSS: считать его содержимым значит объявить
+# потерянным то, чего в выходе быть не должно, и утопить метрику страницы.
+_NON_TEXT_TAGS = {"style", "script"}
+
 
 def block_aware_text(node: Tag) -> str:
     """Текст узла по тем же правилам склейки, что у конвертера.
@@ -199,9 +208,15 @@ def block_aware_text(node: Tag) -> str:
 
     def walk(current: Tag) -> None:
         for child in current.children:
+            # Comment — подкласс NavigableString, поэтому проверяется первым:
+            # иначе комментарий разметки попадёт в эталон как «видимый текст».
+            if isinstance(child, Comment):
+                continue
             if isinstance(child, NavigableString):
                 parts.append(str(child))
             elif isinstance(child, Tag):
+                if child.name in _NON_TEXT_TAGS:
+                    continue
                 if child.name in _BLOCK_TAGS:
                     parts.append(" ")
                 walk(child)
@@ -681,51 +696,57 @@ def layout_stats(storage: str) -> dict[str, Any]:
 # ===========================================================================
 
 
-def image_stats(storage: str, vault_path: str, page_id: str, md: str) -> dict[str, Any]:
-    """Разрешаются ли пути вложений: src относительный, файлы лежат в корне.
+_MD_LINK_RE = re.compile(r"!?\[[^\]]*\]\(\s*<?([^)>\s]+)>?[^)]*\)")
+_ATTACHMENT_ROOT = "Confluence/attachments/"
 
-    Конвертер пишет `attachments/<pid>/<file>` относительно заметки, а sync
-    кладёт файл в `Confluence/attachments/<pid>/<file>`. Совпадёт это только для
-    заметки, лежащей прямо в `Confluence/` — чего не бывает: путь всегда
-    содержит хотя бы сегмент пространства.
+
+def image_stats(storage: str, vault_path: str, page_id: str, md: str) -> dict[str, Any]:
+    """Разрешаются ли ссылки на вложения ОТНОСИТЕЛЬНО заметки, где они стоят.
+
+    Судим по тому, что реально вышло в markdown, а не по тому, что конвертер
+    «должен был» написать: линейка, воспроизводящая ожидаемый путь у себя,
+    меряет собственную копию правила и не заметит ни его починки, ни его
+    поломки. Считается разрешимой ссылка, которая после склейки с каталогом
+    заметки указывает в `Confluence/attachments/` — туда, куда sync кладёт файл.
     """
     soup = BeautifulSoup(storage or "", "html.parser")
-    note_dir = vault_path.rsplit("/", 1)[0]
-    broken = 0
-    resolved_ok = 0
     external = 0
     dropped = 0
-    examples: list[str] = []
-
-    def _check(filename: str) -> None:
-        nonlocal broken, resolved_ok
-        src = f"attachments/{page_id}/{filename}"
-        resolved = f"{note_dir}/{src}"
-        canonical = f"Confluence/attachments/{page_id}/{filename}"
-        if resolved == canonical:
-            resolved_ok += 1
-        else:
-            broken += 1
-            if len(examples) < 2:
-                examples.append(f"{resolved}  ->  ожидался {canonical}")
 
     images = soup.find_all("ac:image")
     for image in images:
         att = image.find("ri:attachment")
         url = image.find("ri:url")
         if att is not None and (att.get("ri:filename") or ""):
-            _check(att.get("ri:filename"))
-        elif url is not None:
+            continue
+        if url is not None:
             external += 1
         else:
             dropped += 1
 
-    att_links = 0
-    for link in soup.find_all("ac:link"):
-        att = link.find("ri:attachment")
-        if att is not None and (att.get("ri:filename") or ""):
-            att_links += 1
-            _check(att.get("ri:filename"))
+    att_links = sum(
+        1
+        for link in soup.find_all("ac:link")
+        if (link.find("ri:attachment") or {}) and (link.find("ri:attachment").get("ri:filename") or "")
+    )
+
+    note_dir = posixpath.dirname(vault_path)
+    resolved_ok = 0
+    broken = 0
+    examples: list[str] = []
+    for href in _MD_LINK_RE.findall(md):
+        if "://" in href or href.startswith("#"):
+            continue
+        target = unquote(href)
+        if "attachments/" not in target:
+            continue  # ссылка на другую заметку, а не на вложение
+        resolved = posixpath.normpath(posixpath.join(note_dir, target))
+        if resolved.startswith(_ATTACHMENT_ROOT):
+            resolved_ok += 1
+        else:
+            broken += 1
+            if len(examples) < 2:
+                examples.append(f"{href}  ->  {resolved}  (ожидался {_ATTACHMENT_ROOT}…)")
 
     return {
         "images_in": len(images),
