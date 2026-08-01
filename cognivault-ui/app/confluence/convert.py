@@ -863,9 +863,20 @@ def _flatten_nested_table(table: Tag, ctx: _Context) -> None:
 
 
 def _emit_table(table: Tag, ctx: _Context) -> None:
-    header, body_rows, caption = _grid_to_rows(table, ctx)
+    header, body_rows, caption, origins = _grid_to_rows_ex(table, ctx)
+    before_promote = len(body_rows)
     header, body_rows, caption = _promote_caption_row(header, body_rows, caption)
-    header, body_rows = _collapse_span_columns(header, body_rows)
+    if len(body_rows) != before_promote:  # первая строка ушла в шапку/подпись
+        origins = origins[1:]
+    collapsed_header, collapsed_body = _collapse_span_columns(header, body_rows)
+    if collapsed_body is not body_rows or collapsed_header is not header:
+        # Колонки перекроили (иерархический заголовок) — соответствие сетки
+        # происхождения потеряно.  Честный откат: без него группировка строк
+        # ниже опиралась бы на сдвинутые колонки.  Такие таблицы — узкие
+        # «Атрибут/Значение», в линеаризацию они не попадают.
+        origins = []
+    header, body_rows = collapsed_header, collapsed_body
+    body_rows, origins = _drop_blank_rows(body_rows, origins)
 
     # Ветка рендера выбирается ДО обрезки.  Обратный порядок отрезал строки у
     # таблицы, которую всё равно предстояло линеаризовать: обрезка могла унести
@@ -874,6 +885,7 @@ def _emit_table(table: Tag, ctx: _Context) -> None:
     wide = _is_wide(header, body_rows)
     budget = _MAX_LINEARIZED_TABLE_CHARS if wide else _MAX_EXPANDED_TABLE_CHARS
     body_rows, dropped = _cap_expanded_rows(header, body_rows, budget)
+    origins = origins[: len(body_rows)]
     if dropped:
         logger.warning(
             "confluence page %s: table truncated -- expanded size over %d tokens, "
@@ -884,7 +896,14 @@ def _emit_table(table: Tag, ctx: _Context) -> None:
             len(body_rows) + dropped,
         )
     md = _render_table(
-        header, body_rows, caption, dropped, ctx.placeholders, wide=wide, budget=budget
+        header,
+        body_rows,
+        caption,
+        dropped,
+        ctx.placeholders,
+        wide=wide,
+        budget=budget,
+        origins=origins,
     )
     key = ctx.add_placeholder("table", md)
     ph = _new_tag(table, "p")
@@ -896,6 +915,20 @@ def _grid_to_rows(
     table: Tag, ctx: _Context
 ) -> tuple[list[str], list[list[str]], str]:
     """Expand rowspan/colspan into a full grid and return (header, body, caption)."""
+    header, body, caption, _origins = _grid_to_rows_ex(table, ctx)
+    return header, body, caption
+
+
+def _grid_to_rows_ex(
+    table: Tag, ctx: _Context
+) -> tuple[list[str], list[list[str]], str, list[list[int]]]:
+    """`_grid_to_rows` + сетка происхождения ячеек ТЕЛА (см. `_expand_spans`).
+
+    Отдельная функция, а не четвёртый элемент в `_grid_to_rows`: ту импортирует
+    аудит (`tools/rag_audit/audit_convert.py`) и сверяет её выход попозиционно
+    с независимым эталоном — контракт «ровно три значения, сетка дословная»
+    менять нельзя.
+    """
     caption_el = table.find("caption", recursive=False)
     caption = _cell_text(caption_el, ctx) if caption_el is not None else ""
 
@@ -915,9 +948,9 @@ def _grid_to_rows(
         )
 
     if not parsed:
-        return [], [], caption
+        return [], [], caption, []
 
-    grid = _expand_spans(parsed, ctx)
+    grid, grid_origins = _expand_spans(parsed, ctx)
 
     # Шапка — ВСЕГДА первая строка сетки.  Раньше шапкой объявлялась первая
     # строка целиком из `<th>`, где бы она ни стояла, и её поднимали наверх —
@@ -927,12 +960,23 @@ def _grid_to_rows(
     # строка-название разбирается отдельно, как подпись (`_promote_caption_row`).
     header = grid[0]
     body = grid[1:]
+    body_origins = grid_origins[1:]
 
-    # Normalize width across the whole grid.
+    # Normalize width across the whole grid.  Дополнение до ширины получает
+    # уникальные «происхождения»-заглушки: пустая добивка ничьей копией не
+    # является и склеивать строки не должна.
     width = max((len(r) for r in grid), default=0)
     header = header + [""] * (width - len(header))
     body = [r + [""] * (width - len(r)) for r in body]
-    return header, body, caption
+    filler = -1
+    padded_origins: list[list[int]] = []
+    for row in body_origins:
+        pad: list[int] = []
+        for _ in range(width - len(row)):
+            pad.append(filler)
+            filler -= 1
+        padded_origins.append(row + pad)
+    return header, body, caption, padded_origins
 
 
 def _direct_rows(table: Tag) -> list[Tag]:
@@ -958,26 +1002,38 @@ def _int_attr(cell: Tag, name: str, default: int) -> int:
 
 def _expand_spans(
     parsed: list[list[tuple[Tag, int, int]]], ctx: _Context
-) -> list[list[str]]:
+) -> tuple[list[list[str]], list[list[int]]]:
     """Duplicate rowspan/colspan values so every emitted row is self-contained.
 
-    ``pending`` maps a column index to ``(text, remaining_rows)`` for an active
-    rowspan carried down from an earlier row.  Ragged spans (exceeding the
-    remaining columns/rows) are simply clamped by construction -- never crash.
+    ``pending`` maps a column index to ``(text, remaining_rows, origin)`` for an
+    active rowspan carried down from an earlier row.  Ragged spans (exceeding
+    the remaining columns/rows) are simply clamped by construction -- never
+    crash.
+
+    Возвращает и сетку текстов, и сетку ПРОИСХОЖДЕНИЯ: id исходной ячейки для
+    каждой позиции (копии одного span'а делят id).  По тексту «размножено
+    span'ом» неотличимо от «одно и то же значение написано в каждой строке»
+    («int» в колонке типа) — а различать их обязан `_linearize_table`: первое —
+    изготовленный раскрытием повтор, второе — настоящие вхождения исходника,
+    и их схлопывание роняло пословный recall корпуса 0.9993 → 0.9977.
     """
     grid: list[list[str]] = []
-    pending: dict[int, tuple[str, int]] = {}
+    origins: list[list[int]] = []
+    pending: dict[int, tuple[str, int, int]] = {}
+    next_origin = 0
 
     for row_cells in parsed:
         out: list[str] = []
+        out_origins: list[int] = []
         col = 0
         ci = 0
         while ci < len(row_cells) or pending:
             if col in pending:
-                text, rem = pending[col]
+                text, rem, origin = pending[col]
                 out.append(text)
+                out_origins.append(origin)
                 if rem - 1 > 0:
-                    pending[col] = (text, rem - 1)
+                    pending[col] = (text, rem - 1, origin)
                 else:
                     del pending[col]
                 col += 1
@@ -986,10 +1042,13 @@ def _expand_spans(
                 cell, colspan, rowspan = row_cells[ci]
                 ci += 1
                 text = _cell_text(cell, ctx)
+                origin = next_origin
+                next_origin += 1
                 for _ in range(colspan):
                     out.append(text)
+                    out_origins.append(origin)
                     if rowspan > 1:
-                        pending[col] = (text, rowspan - 1)
+                        pending[col] = (text, rowspan - 1, origin)
                     col += 1
                 continue
             # No source cell here, but a rowspan may resume at a later column.
@@ -998,12 +1057,15 @@ def _expand_spans(
                 nxt = min(future)
                 while col < nxt:
                     out.append("")
+                    out_origins.append(next_origin)  # заглушка — всегда уникальна
+                    next_origin += 1
                     col += 1
                 continue
             break
         grid.append(out)
+        origins.append(out_origins)
 
-    return grid
+    return grid, origins
 
 
 # ---- grid post-processing (representation, not content) ---------------------
@@ -1011,6 +1073,65 @@ def _expand_spans(
 # Обе функции ниже правят ПРЕДСТАВЛЕНИЕ сетки перед рендером и намеренно НЕ
 # живут в `_grid_to_rows`: раскрытие span'ов должно оставаться дословным
 # (позиция в позицию с исходной таблицей), иначе его нечем проверять.
+
+
+def _uniform_row_value(row: list[str]) -> str | None:
+    """Общее значение полноширинной строки: все ячейки одинаковы и непусты.
+
+    Это признак ячейки `<td colspan=N>` на всю ширину — раскрытие размножило
+    одно значение по каждой колонке.  Такая строка не данные, а подпись:
+    единый детектор для подписи НАД шапкой (`_promote_caption_row`) и для
+    подписи группы в СЕРЕДИНЕ таблицы (`_linearize_table`).
+    """
+    if not row:
+        return None
+    value = row[0]
+    if not value.strip() or any(cell != value for cell in row):
+        return None
+    return value
+
+
+def _drop_blank_rows(
+    body: list[list[str]], origins: list[list[int]]
+) -> tuple[list[list[str]], list[list[int]]]:
+    """Строка без единого значения не выводится вовсе.
+
+    Пустой `<th colspan=7>` (строка-прокладка в реестре потоков) раскрывался в
+    полную строку пустых ячеек и линеаризовался в «запись», где каждое поле —
+    пустота: шум и в тексте, и в индексе.  Терять нечего — в строке нет ни
+    одного значения по определению.  Сетка происхождения прореживается синхронно;
+    id ячеек при этом не меняются, так что rowspan, накрывающий выброшенную
+    строку, остаётся сцепленным.
+    """
+    if not origins:
+        return [row for row in body if any(cell.strip() for cell in row)], []
+    kept = [
+        (row, org)
+        for row, org in zip(body, origins)
+        if any(cell.strip() for cell in row)
+    ]
+    return [row for row, _org in kept], [org for _row, org in kept]
+
+
+def _carried_grid(
+    body: list[list[str]], origins: list[list[int]]
+) -> list[list[bool]]:
+    """`carried[r][c]` — ячейка скопирована rowspan'ом из строки выше.
+
+    Считается по id происхождения соседних ОСТАВШИХСЯ строк: совпадение id —
+    это одна исходная ячейка, размноженная span'ом, а не совпадение текста.
+    Без сетки происхождения (колонки перекроены `_collapse_span_columns`)
+    возвращается «ничего не скопировано» — группировка тогда выключена.
+    """
+    if not origins or len(origins) != len(body):
+        return [[False] * len(row) for row in body]
+    carried: list[list[bool]] = [[False] * len(body[0])] if body else []
+    for r in range(1, len(body)):
+        prev, cur = origins[r - 1], origins[r]
+        carried.append(
+            [c < len(prev) and c < len(cur) and prev[c] == cur[c] for c in range(len(body[r]))]
+        )
+    return carried
 
 
 def _promote_caption_row(
@@ -1025,8 +1146,8 @@ def _promote_caption_row(
     """
     if len(header) < 2 or not body:
         return header, body, caption
-    value = header[0]
-    if not value.strip() or any(cell != value for cell in header):
+    value = _uniform_row_value(header)
+    if value is None:
         return header, body, caption
     # Если следующая строка такая же полноширинная, это не «подпись + шапка»,
     # а таблица из объединённых строк — трогать её нечего.
@@ -1311,8 +1432,9 @@ def _render_table(
     placeholders: dict,
     wide: bool,
     budget: int,
+    origins: list[list[int]] | None = None,
 ) -> str:
-    rendered = _render_table_body(header, body, caption, placeholders, wide)
+    rendered = _render_table_body(header, body, caption, placeholders, wide, origins)
     rendered = _with_notice(rendered, dropped, budget)
     # Ни один плейсхолдер не должен пережить рендер таблицы: сама таблица тоже
     # плейсхолдер, а восстановление в Stage C однопроходное и вложенный ключ
@@ -1326,6 +1448,7 @@ def _render_table_body(
     caption: str,
     placeholders: dict,
     wide: bool,
+    origins: list[list[int]] | None = None,
 ) -> str:
     if not header and not body:
         return ""
@@ -1338,7 +1461,7 @@ def _render_table_body(
         return _render_single_row(header, caption, placeholders)
 
     if wide:
-        return _linearize_table(header, body, caption, placeholders)
+        return _linearize_table(header, body, caption, placeholders, origins)
 
     header = [_inline_code_cell(c, placeholders) for c in header]
     body = [[_inline_code_cell(c, placeholders) for c in row] for row in body]
@@ -1432,26 +1555,186 @@ def _split_body(header: list[str], body: list[list[str]]) -> list[list[list[str]
 
 
 def _linearize_table(
-    header: list[str], body: list[list[str]], caption: str, placeholders: dict
+    header: list[str],
+    body: list[list[str]],
+    caption: str,
+    placeholders: dict,
+    origins: list[list[int]] | None = None,
 ) -> str:
+    """Широкая таблица — по записи на строку, но БЕЗ дословного повтора rowspan.
+
+    Дословная линеаризация раскрытой сетки повторяла запись целиком на каждую
+    строку исходника: на «Стриминговых потоках» реестр из ~50 потоков давал
+    262 записи (поток с 26 таблицами-источниками — 26 почти одинаковых записей
+    с полным текстом назначения и всеми ссылками), страница — 277 КБ markdown
+    и 262 чанка в одном разделе, а по корпусу — 32 кросс-файловых кластера
+    почти-дубликатов (6.8% чанков).  Для BM25 термины назначения такого потока
+    получали 26-кратную частоту.  Поэтому подряд идущие строки, чьи общие
+    колонки — КОПИИ одной объединённой ячейки (по сетке происхождения, не по
+    совпадению текста), сворачиваются: общая часть выводится один раз,
+    различающиеся значения — списком рядом, в исходном порядке строк.
+    Результат замера на том же дампе: 262 записи → 80, страница 277 → 107 тыс.
+    знаков, 103 чанка вместо 267; пословный recall корпуса не изменился (0.9993).
+    """
     paras: list[str] = []
     if caption:
         paras.append(f"**Таблица: {caption}**")
     heads = [_inline_code_cell(h, placeholders) for h in header]
+    width = len(heads)
+    carried = _carried_grid(body, origins or [])
     seen: set[str] = set()
-    for row in body:
-        parts: list[str] = []
-        blocks: list[str] = []
-        for i, head in enumerate(heads):
-            value = row[i] if i < len(row) else ""
-            value, extracted = _split_code_blocks(value, placeholders, seen)
-            blocks.extend(extracted)
-            parts.append(f"**{head}:** {value}")
-        paras.append(". ".join(parts) + ".")
-        # Забор идёт отдельным абзацем сразу за своей строкой: внутри
-        # предложения он бы сломал и разметку, и дословность кода.
-        paras.extend(blocks)
+    idx = 0
+    while idx < len(body):
+        row = body[idx]
+        # Полноширинная строка в СЕРЕДИНЕ таблицы — подпись группы («FinEffect»,
+        # «BMPF»), тот же приём, что у `_promote_caption_row` над шапкой.
+        # Дословное раскрытие давало запись, где КАЖДОЕ поле — слово-подпись.
+        # При наличии сетки происхождения дополнительно требуется, чтобы вся
+        # строка была ОДНОЙ ячейкой (colspan): строка данных, где одно значение
+        # честно написано в каждой колонке, подписью не считается.
+        value = _uniform_row_value(row)
+        one_cell = not origins or idx >= len(origins) or len(set(origins[idx])) == 1
+        if value is not None and width >= 2 and one_cell:
+            text, blocks = _split_code_blocks(value, placeholders, seen)
+            if text:
+                paras.append(f"**{text}**")
+            paras.extend(blocks)
+            idx += 1
+            continue
+        group_len, varying = _take_rowspan_group(body, carried, idx, width)
+        _emit_linearized_group(
+            paras,
+            heads,
+            body[idx : idx + group_len],
+            carried[idx : idx + group_len],
+            varying,
+            placeholders,
+            seen,
+        )
+        idx += group_len
     return "\n\n".join(paras)
+
+
+def _take_rowspan_group(
+    body: list[list[str]],
+    carried: list[list[bool]],
+    start: int,
+    width: int,
+) -> tuple[int, list[int]]:
+    """Длина ряда строк, сворачиваемых в одну запись, и их СВОИ колонки.
+
+    Строка присоединяется к группе, только если БОЛЬШИНСТВО её колонок —
+    rowspan-копии строки выше (`carried`), т.е. повтор изготовлен раскрытием,
+    а не написан в исходнике.  Собственная ПУСТАЯ ячейка (`<td><br/></td>` —
+    визуальная прокладка под записью с rowspan) строку от группы не отрывает и
+    в ``varying`` не попадает: на реальном реестре именно такие прокладки
+    оставляли запись продублированной целиком.  Собственные НЕпустые колонки
+    накапливаются в ``varying`` по всей группе; их должно оставаться строгое
+    меньшинство ширины — иначе запись почти целиком своя и выгоды нет.  Замер
+    реестра «Стриминговые потоки» (12 колонок, 262 строки): внутри потока
+    у строки 1–3 своих непустых колонки, на границе потоков — 6–12; пороги
+    их разделяют.
+    """
+    varying: set[int] = set()
+    length = 1
+    for r in range(start + 1, len(body)):
+        row = body[r]
+        row_carried = carried[r]
+        carried_cols = {c for c in range(width) if c < len(row_carried) and row_carried[c]}
+        if 2 * len(carried_cols) <= width:
+            break  # строка в основном своя — это следующая запись
+        own_nonempty = {
+            c
+            for c in range(width)
+            if c not in carried_cols and (row[c] if c < len(row) else "").strip()
+        }
+        cand = varying | own_nonempty
+        if 2 * len(cand) >= width:
+            break
+        base = body[start]
+        shared = (i for i in range(width) if i not in cand)
+        if not any((base[i] if i < len(base) else "").strip() for i in shared):
+            break  # общего содержимого нет — сворачивать не вокруг чего
+        varying = cand
+        length += 1
+    return length, sorted(varying)
+
+
+def _emit_linearized_group(
+    paras: list[str],
+    heads: list[str],
+    group: list[list[str]],
+    group_carried: list[list[bool]],
+    varying: list[int],
+    placeholders: dict,
+    seen: set[str],
+) -> None:
+    """Одна запись на группу: общие поля один раз, различия — вместе, по порядку.
+
+    Значения различающихся колонок не выбрасываются, даже повторы: повтор в
+    СВОЕЙ ячейке — это разные строки исходника с одинаковым значением («int» в
+    колонке типа), их дедуп ронял пословный recall корпуса 0.9993 → 0.9977.
+    Пропускается только значение, скопированное rowspan'ом из строки выше
+    (`carried`), — его изготовило раскрытие, в исходнике оно один раз.  Для
+    одной различающейся колонки значения перечисляются через `;` в порядке
+    строк, для нескольких — пунктами списка по строке на исходную строку,
+    чтобы соответствие значений внутри строки (источник ↔ путь) не рвалось.
+    """
+    base = group[0]
+    varying_set = set(varying)
+    parts: list[str] = []
+    blocks: list[str] = []
+    for i, head in enumerate(heads):
+        if i in varying_set:
+            continue
+        value = base[i] if i < len(base) else ""
+        value, extracted = _split_code_blocks(value, placeholders, seen)
+        blocks.extend(extracted)
+        parts.append(f"**{head}:** {value}")
+    if parts:
+        paras.append(". ".join(parts) + ".")
+    # Забор идёт отдельным абзацем сразу за своей строкой: внутри
+    # предложения он бы сломал и разметку, и дословность кода.
+    paras.extend(blocks)
+    if not varying:
+        return  # единственная строка группы уже выведена целиком
+
+    if len(varying) == 1:
+        col = varying[0]
+        values: list[str] = []
+        tail_blocks: list[str] = []
+        for r, row in enumerate(group):
+            if r > 0 and col < len(group_carried[r]) and group_carried[r][col]:
+                continue  # копия из rowspan — в исходнике значения нет
+            value = row[col] if col < len(row) else ""
+            value, extracted = _split_code_blocks(value, placeholders, seen)
+            tail_blocks.extend(extracted)
+            if value:
+                values.append(value)
+        paras.append(f"**{heads[col]}:** " + "; ".join(values) + ".")
+        paras.extend(tail_blocks)
+        return
+
+    items: list[str] = []
+    tail_blocks = []
+    for r, row in enumerate(group):
+        own = [
+            col
+            for col in varying
+            if not (r > 0 and col < len(group_carried[r]) and group_carried[r][col])
+            and (row[col] if col < len(row) else "").strip()
+        ]
+        if r > 0 and not own:
+            continue  # копии и пустые прокладки; собственных значений нет
+        rendered: list[tuple[int, str]] = []
+        for col in varying:
+            value = row[col] if col < len(row) else ""
+            value, extracted = _split_code_blocks(value, placeholders, seen)
+            tail_blocks.extend(extracted)
+            rendered.append((col, value))
+        items.append("- " + ". ".join(f"**{heads[c]}:** {v}" for c, v in rendered) + ".")
+    paras.append("\n".join(items))
+    paras.extend(tail_blocks)
 
 
 # ===========================================================================

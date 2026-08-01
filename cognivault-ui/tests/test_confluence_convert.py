@@ -597,6 +597,136 @@ def test_code_repeated_by_rowspan_is_fenced_once():
     assert convert._PH_OPEN not in md and convert._PH_CLOSE not in md
 
 
+def _flow_registry(rows: str) -> str:
+    """Широкая (9 колонок -> линеаризация) таблица-реестр для тестов ниже."""
+    heads = (
+        "<tr><th>ID</th><th>Статус</th><th>Наименование потока</th>"
+        "<th>Тип источника</th><th>Источник данных</th><th>Путь</th>"
+        "<th>Получатель</th><th>Назначение потока</th><th>Ссылки</th></tr>"
+    )
+    return f"<table><tbody>{heads}{rows}</tbody></table>"
+
+
+def test_rowspan_group_collapses_to_single_record():
+    """rowspan-группа — ОДНА запись: общее один раз, различия списком.
+
+    Дословная линеаризация повторяла назначение потока и все ссылки на каждую
+    таблицу-источник: 26 источников — 26 почти одинаковых записей.
+    """
+    purpose = "Поток читает данные из всех таблиц-источников и пишет в топик"
+    rows = (
+        '<tr><td rowspan="3">3067</td><td rowspan="3">ACTIVE</td>'
+        '<td rowspan="3">models_monitoring_simple</td><td rowspan="3">Hive</td>'
+        "<td>afpc_sss_inc.tr_out_ext</td>"
+        '<td rowspan="3">-</td><td rowspan="3">Топик oasis-monitoring</td>'
+        f'<td rowspan="3">{purpose}</td><td rowspan="3">BB: ссылка</td></tr>'
+        "<tr><td>afpc_sss_inc.tr_out_cards_ext</td></tr>"
+        "<tr><td>afcc_sss_inc.tr_out_jur_ext</td></tr>"
+    )
+    md = _md(_flow_registry(rows))
+    # Общая часть записи не размножена по строкам-источникам.
+    assert md.count(purpose) == 1
+    assert md.count("**Наименование потока:** models_monitoring_simple") == 1
+    # Все различающиеся значения на месте, вместе и в исходном порядке.
+    assert (
+        "**Источник данных:** afpc_sss_inc.tr_out_ext; "
+        "afpc_sss_inc.tr_out_cards_ext; afcc_sss_inc.tr_out_jur_ext." in md
+    )
+
+
+def test_rowspan_group_with_two_varying_columns_keeps_row_pairs():
+    """Две свои колонки — пункты списка: пара «источник ↔ путь» не рвётся."""
+    rows = (
+        '<tr><td rowspan="2">4832</td><td rowspan="2">ACTIVE</td>'
+        '<td rowspan="2">safp_rsa_mapping</td><td rowspan="2">Hive</td>'
+        "<td>src/cards_event</td><td>inc/cards_event</td>"
+        '<td rowspan="2">afpc_sss_inc</td><td rowspan="2">Маппинг RSA</td>'
+        '<td rowspan="2">BB: ссылка</td></tr>'
+        "<tr><td>src/uko_event</td><td>inc/uko_event</td></tr>"
+    )
+    md = _md(_flow_registry(rows))
+    assert md.count("Маппинг RSA") == 1
+    # Значения одной исходной строки остаются в одном пункте.
+    assert "- **Источник данных:** src/cards_event. **Путь:** inc/cards_event." in md
+    assert "- **Источник данных:** src/uko_event. **Путь:** inc/uko_event." in md
+
+
+def test_mid_table_caption_row_becomes_group_label():
+    """Полноширинная строка в середине таблицы — подпись группы, не запись.
+
+    Раскрытие копировало подпись в каждую колонку, и в индекс уходила запись,
+    где каждое поле — слово «FinEffect».
+    """
+    rows = (
+        "<tr><td>1</td><td>ACTIVE</td><td>поток-один</td><td>Hive</td>"
+        "<td>src.a</td><td>/p</td><td>tgt.a</td><td>Первый</td><td>BB</td></tr>"
+        '<tr><td colspan="9">FinEffect</td></tr>'
+        "<tr><td>2</td><td>ACTIVE</td><td>поток-два</td><td>Hive</td>"
+        "<td>src.b</td><td>/p</td><td>tgt.b</td><td>Второй</td><td>BB</td></tr>"
+    )
+    md = _md(_flow_registry(rows))
+    assert "**FinEffect**" in md
+    assert md.count("FinEffect") == 1
+    # Записи вокруг подписи уцелели.
+    assert "**Наименование потока:** поток-один" in md
+    assert "**Наименование потока:** поток-два" in md
+
+
+def test_empty_full_width_row_is_not_emitted():
+    """Пустой `<th colspan=N>` — не запись из пустых полей, а ничего."""
+    rows = (
+        '<tr><th colspan="9"></th></tr>'
+        "<tr><td>1</td><td>ACTIVE</td><td>поток-один</td><td>Hive</td>"
+        "<td>src.a</td><td>/p</td><td>tgt.a</td><td>Описание</td><td>BB</td></tr>"
+    )
+    md = _md(_flow_registry(rows))
+    assert "**Наименование потока:** поток-один" in md
+    # Ровно одна запись: пустая строка не дала «**ID:** . **Статус:** …».
+    assert md.count("**ID:**") == 1
+
+
+def test_genuinely_different_rows_are_not_collapsed():
+    """Строки без rowspan — разные записи; сворачивать их нельзя.
+
+    Совпадение текста в отдельных колонках (общий статус, общий тип) — не
+    повод склеивать потоки: правило требует, чтобы общие колонки были
+    КОПИЯМИ одной объединённой ячейки, а не просто одинаковыми словами.
+    """
+    rows = (
+        "<tr><td>1</td><td>ACTIVE</td><td>поток-один</td><td>Hive</td>"
+        "<td>src.a</td><td>/p1</td><td>tgt.a</td><td>Первое назначение</td><td>BB</td></tr>"
+        "<tr><td>2</td><td>ACTIVE</td><td>поток-два</td><td>Hive</td>"
+        "<td>src.b</td><td>/p2</td><td>tgt.b</td><td>Второе назначение</td><td>BB</td></tr>"
+        "<tr><td>3</td><td>ACTIVE</td><td>поток-три</td><td>Hive</td>"
+        "<td>src.c</td><td>/p3</td><td>tgt.c</td><td>Третье назначение</td><td>BB</td></tr>"
+    )
+    md = _md(_flow_registry(rows))
+    # Каждая строка осталась полной записью со своим статусом и типом.
+    assert md.count("**Статус:** ACTIVE") == 3
+    assert md.count("**Тип источника:** Hive") == 3
+    for name in ("поток-один", "поток-два", "поток-три"):
+        assert f"**Наименование потока:** {name}" in md
+
+
+def test_same_value_written_per_row_is_not_deduplicated():
+    """«int» в каждой строке исходника — настоящие вхождения, не копии span'а.
+
+    По тексту это неотличимо от rowspan-повтора, поэтому решает сетка
+    происхождения: дедуп таких значений ронял пословный recall корпуса
+    0.9993 → 0.9977.
+    """
+    long_cell = "х" * 250  # широкая ячейка -> линеаризация при 2 колонках
+    md = _md(
+        "<table><tbody>"
+        "<tr><th>Атрибут</th><th>Тип</th><th>Описание</th></tr>"
+        f"<tr><td>a</td><td>int</td><td>{long_cell}</td></tr>"
+        "<tr><td>b</td><td>int</td><td>второй атрибут</td></tr>"
+        "<tr><td>c</td><td>int</td><td>третий атрибут</td></tr>"
+        "</tbody></table>"
+    )
+    assert md.count("int") == 3
+
+
 def test_short_code_in_cell_stays_inline_and_keeps_gfm():
     md = _md(
         "<table><tbody>"
