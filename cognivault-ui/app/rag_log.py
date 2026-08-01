@@ -232,6 +232,7 @@ _RAG_SNAPSHOT_KEYS = (
     "min_score",
     "rerank_candidates",
     "condense_enabled",
+    "condense_first_turn",
     "grader_enabled",
     "grader_threshold",
     "grader_keep_top",

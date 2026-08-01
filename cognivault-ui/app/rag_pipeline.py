@@ -22,9 +22,9 @@ import asyncio
 import logging
 import math
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
-from . import gigachat
+from . import corpus_scope, gigachat
 
 log = logging.getLogger("cognivault-ui.rag_pipeline")
 
@@ -117,8 +117,13 @@ _CONDENSE_TASKS = """
 - При любом сомнении выбирай "kb_question". "smalltalk" — только для чистых
   приветствий, благодарностей и прощаний, где нет ни одного вопроса по существу;
   если в реплике есть вопрос или просьба что-то объяснить — это "kb_question".
+- Определи охват вопроса: "document" — ответ целиком лежит в одном документе
+  (поля витрины, шаги инструкции, значения параметра, описание одного сервиса);
+  "corpus" — вопрос про базу в целом (какие вообще есть продукты, разделы,
+  документы; перечисление по всей базе, а не по одной странице).
+  При сомнении выбирай "document".
 
-Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null}"""
+Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null, "scope": "document" | "corpus"}"""
 
 _GRADE_SCALE = """
 Оцени КАЖДЫЙ фрагмент по шкале:
@@ -132,10 +137,16 @@ _GRADE_SCALE = """
 
 
 def _condense_prompt(question: str, history: list[dict[str, Any]]) -> str:
-    rendered = "\n".join(
-        f"{_ROLE_LABELS.get(str(m.get('role')), str(m.get('role')))}: "
-        f"{str(m.get('content', '') or '').strip()}"
-        for m in history
+    rendered = (
+        "\n".join(
+            f"{_ROLE_LABELS.get(str(m.get('role')), str(m.get('role')))}: "
+            f"{str(m.get('content', '') or '').strip()}"
+            for m in history
+        )
+        # An empty history is a real case since `condense_first_turn`: saying so
+        # beats an empty section, which reads like a truncated prompt and invites
+        # the model to invent the missing turns.
+        or "(пусто — это первая реплика пользователя)"
     )
     head = (
         f"История диалога:\n{rendered}\n"
@@ -376,22 +387,50 @@ def _too_substantive_for_smalltalk(question: str) -> bool:
     return "?" in text or len(text.split()) > _SMALLTALK_MAX_WORDS
 
 
-def _parse_condense(data: dict[str, Any], question: str) -> tuple[str, str]:
-    """Map the model's JSON onto ``(intent, standalone_question)``."""
+class Condensed(NamedTuple):
+    """What one condense call yields.
+
+    A named tuple rather than a bare pair: ``scope`` was added later and a
+    positional third element would have been invisible at every call site.
+    ``scope`` is :data:`app.corpus_scope.DEFAULT_SCOPE` whenever the model did
+    not say (old prompt, trimmed prompt, failed call), which is the behaviour
+    that predates the field.
+    """
+
+    intent: str
+    question: str
+    scope: str = corpus_scope.DEFAULT_SCOPE
+
+
+def _fallback(question: str) -> Condensed:
+    """The safe verdict every failure path lands on: today's behaviour."""
+    return Condensed(_DEFAULT_INTENT, question, corpus_scope.DEFAULT_SCOPE)
+
+
+def _parse_condense(data: dict[str, Any], question: str) -> Condensed:
+    """Map the model's JSON onto ``(intent, standalone_question, scope)``.
+
+    ``scope`` is parsed independently of ``intent``: a turn whose intent had to
+    be corrected is still allowed to carry a usable scope, and a missing scope
+    never invalidates an otherwise good verdict (the condense prompt is
+    user-editable — a user who trimmed the scope sentence out of it must keep
+    the routing they had).
+    """
+    scope = corpus_scope.parse_scope(data.get("scope"))
     intent = str(data.get("intent", "") or "").strip().strip('"').lower()
     if intent not in _INTENTS:
         log.warning("condense: неизвестный intent %r — фолбэк на kb_question", intent)
-        return _DEFAULT_INTENT, question
+        return Condensed(_DEFAULT_INTENT, question, scope)
     if intent == "smalltalk" and _too_substantive_for_smalltalk(question):
         log.warning(
             "condense: smalltalk на содержательной реплике — переклассифицирую в %s",
             _DEFAULT_INTENT,
         )
-        return _DEFAULT_INTENT, question
+        return Condensed(_DEFAULT_INTENT, question, scope)
     raw = data.get("standalone_question")
     if intent == "kb_question" and isinstance(raw, str) and raw.strip():
-        return intent, raw.strip()
-    return intent, question
+        return Condensed(intent, raw.strip(), scope)
+    return Condensed(intent, question, scope)
 
 
 async def condense(
@@ -399,23 +438,37 @@ async def condense(
     messages: list[dict[str, Any]] | None,
     rcfg: dict[str, Any],
     gcfg: dict[str, Any] | None,
-) -> tuple[str, str]:
+) -> Condensed:
     """Classify the user's turn and rewrite it into a self-contained question.
 
-    Returns ``(intent, standalone_question)``. ``intent`` is one of
-    ``smalltalk`` / ``clarify`` / ``kb_question``; for the first two the caller
-    skips retrieval entirely and lets the model answer from the history.
+    Returns a :class:`Condensed`. ``intent`` is one of ``smalltalk`` /
+    ``clarify`` / ``kb_question``; for the first two the caller skips retrieval
+    entirely and lets the model answer from the history. ``scope`` is
+    ``document`` / ``corpus`` and only ever adds a caveat downstream.
 
-    The call is skipped — yielding ``("kb_question", question)`` — when the
-    feature flag is off or there is no history yet (nothing to resolve against).
-    Every failure degrades to that same safe pair.
+    The call is skipped — yielding the fail-closed triple — when the feature
+    flag is off, and, unless ``rag.condense_first_turn`` is on, when there is no
+    history yet. Every failure degrades to that same safe triple.
+
+    **The first turn is deliberately different.** With no history there is
+    nothing to resolve a pronoun against, so the rewrite has no work to do and
+    the classification has no context to do it with — a first-message
+    "smalltalk" verdict on «Расскажи про Fincert» would silently cost the user
+    their retrieval. So when the call does run on turn 1, only ``scope`` is
+    taken from it: the intent stays ``kb_question`` and the question stays
+    verbatim, exactly as before. The call can then add a caveat and nothing
+    else. Its price is one extra GigaChat call on every OPENING message, which
+    is why it is off by default — the first-turn case the plan actually cared
+    about («что ты знаешь?») is handled with no call at all by
+    :func:`app.corpus_scope.match_meta`.
     """
     if not bool(rcfg.get("condense_enabled", True)):
-        return _DEFAULT_INTENT, question
+        return _fallback(question)
 
     history = _history_turns(messages, question)
-    if not history:
-        return _DEFAULT_INTENT, question
+    first_turn = not history
+    if first_turn and not bool(rcfg.get("condense_first_turn", False)):
+        return _fallback(question)
 
     try:
         data = await _call(
@@ -426,12 +479,16 @@ async def condense(
         )
     except Exception as exc:  # noqa: BLE001 — any failure => raw question
         log.warning("condense: вызов не удался (%s) — вопрос идёт как есть", exc)
-        return _DEFAULT_INTENT, question
+        return _fallback(question)
 
     if not isinstance(data, dict):
         log.warning("condense: ответ не объект — вопрос идёт как есть")
-        return _DEFAULT_INTENT, question
-    return _parse_condense(data, question)
+        return _fallback(question)
+
+    parsed = _parse_condense(data, question)
+    if first_turn:
+        return Condensed(_DEFAULT_INTENT, question, parsed.scope)
+    return parsed
 
 
 # --------------------------------------------------------------------------- #

@@ -183,6 +183,8 @@ REQUEST_KEYS = {
     "intent",
     "question_raw",
     "question_standalone",
+    "scope",
+    "hedge",
     "candidates",
     "grades",
     "sources",

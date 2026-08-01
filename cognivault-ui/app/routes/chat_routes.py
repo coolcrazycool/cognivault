@@ -293,6 +293,12 @@ async def chat(request: Request) -> Any:
       answers chit-chat from its own parametric memory;
     * ``kb_question`` — the normal path: rules system turn + history without its
       last user turn + the user turn carrying the sources block.
+
+    A fourth outcome (step 2) rides on the ``kb_question`` shape: ``meta`` — a
+    question about the base itself. The user turn carries the section tree
+    instead of «Источники», so ``sources`` is empty and the frame order is
+    unchanged. On the normal path the answer may be followed by one extra
+    ``token`` frame carrying ``RagContext.hedge``.
     """
     body = await request.json()
     if not isinstance(body, dict):
@@ -378,6 +384,11 @@ async def chat(request: Request) -> Any:
         question_standalone: str | None = None
         candidates: list[dict[str, Any]] | None = None
         grades: list[dict[str, Any]] | None = None
+        # Шаг 2: охват вопроса из condense и оговорка по концентрации
+        # доказательств. Оговорка дописывается ПОСЛЕ ответа модели — она его
+        # уточняет, а не заменяет.
+        scope: str | None = None
+        hedge: str | None = None
         # Стадии конвейера. `condense`/`search`/`grade`/`content` приходят из
         # инструментированных seams (см. верх модуля), остальное меряем здесь.
         turn_started = time.perf_counter()
@@ -408,6 +419,8 @@ async def chat(request: Request) -> Any:
                     candidates = getattr(ctx, "candidates", None)
                     grades = getattr(ctx, "grades", None)
                     answer_override = getattr(ctx, "answer_override", None)
+                    scope = getattr(ctx, "scope", None)
+                    hedge = getattr(ctx, "hedge", None)
 
                     if answer_override:
                         # Ответ уже готов (шаблонный отказ: ни один кандидат не
@@ -493,6 +506,16 @@ async def chat(request: Request) -> Any:
                     yield format_sse("token", {"text": delta})
                 stages["stream"] = _elapsed_ms(stream_started)
 
+                # Оговорка по концентрации доказательств (шаг 2в): вопрос был
+                # про базу целиком, а все выбранные фрагменты пришли из одного
+                # документа. Дописывается ПОСЛЕ ответа — она его уточняет, а не
+                # подменяет, и никогда не подменяет отказ (у отказа источников
+                # нет, значит и оговорки нет). Ноль токенов: чистый Python,
+                # текст уезжает тем же кадром `token`, что и обычный дельта.
+                if hedge and full_text.strip():
+                    full_text += f"\n\n{hedge}"
+                    yield format_sse("token", {"text": f"\n\n{hedge}"})
+
                 # Серверная валидация цитат: номера вне 1..len(sources) — признак
                 # галлюцинации. Значение уезжает и в assistant-сообщение (history),
                 # и в JSONL-лог запросов.
@@ -558,6 +581,11 @@ async def chat(request: Request) -> Any:
                         "intent": intent,
                         "question_raw": question_raw,
                         "question_standalone": question_standalone,
+                        # Шаг 2: охват вопроса ("document"/"corpus") и текст
+                        # оговорки, если она была показана. Без этой пары долю
+                        # ложных оговорок на живом стенде посчитать нечем.
+                        "scope": scope,
+                        "hedge": hedge,
                         # Кандидаты поиска ДО отбора ({id, path, chunk_index,
                         # score, rank}) и оценки батч-грейдера ({id, path,
                         # chunk_index, score}) — вход и выход волны-2 реранкинга.

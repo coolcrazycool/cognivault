@@ -181,6 +181,9 @@ def server_config() -> dict[str, Any]:
             "condense_enabled": _env_bool(
                 "RAG_CONDENSE_ENABLED", bool(rag["condense_enabled"])
             ),
+            "condense_first_turn": _env_bool(
+                "RAG_CONDENSE_FIRST_TURN", bool(rag["condense_first_turn"])
+            ),
             "grader_enabled": _env_bool(
                 "RAG_GRADER_ENABLED", bool(rag["grader_enabled"])
             ),
@@ -252,6 +255,7 @@ USER_EDITABLE_KEYS: tuple[str, ...] = (
     "rag.section_max_chars",
     "rag.max_expanded_files",
     "rag.condense_enabled",
+    "rag.condense_first_turn",
     "rag.grader_enabled",
     "rag.grader_threshold",
     "rag.grader_keep_top",
@@ -432,7 +436,12 @@ def validate_user_overrides(
 
     rag = out.get("rag")
     if isinstance(rag, dict):
-        for key in ("default_on", "condense_enabled", "grader_enabled"):
+        for key in (
+            "default_on",
+            "condense_enabled",
+            "condense_first_turn",
+            "grader_enabled",
+        ):
             if key in rag:
                 rag[key] = _strict_bool(f"rag.{key}", rag[key])
         for key, low, high in (

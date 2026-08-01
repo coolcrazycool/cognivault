@@ -160,6 +160,11 @@
         <label for="cfg-rag-condense-enabled">Уточнять вопрос по истории чата</label>
       </div>
       <small class="hint sub-hint">Переписывает вопрос с учётом предыдущих реплик перед поиском</small>
+      <div class="checkline">
+        <input type="checkbox" id="cfg-rag-condense-first-turn">
+        <label for="cfg-rag-condense-first-turn">Разбирать и первый вопрос в чате</label>
+      </div>
+      <small class="hint sub-hint">Плюс один вызов модели на каждое первое сообщение: определяет, вопрос про один документ или про базу целиком</small>
       <div class="field">
         <label for="cfg-rag-max-context-chars">Бюджет контекста, символов</label>
         <input class="input" id="cfg-rag-max-context-chars" type="number" min="1" step="1" placeholder="24000">

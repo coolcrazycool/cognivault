@@ -394,11 +394,15 @@ def test_block_reaches_the_model_and_survives_trimming(monkeypatch, tmp_path):
     history = [
         {"role": "user", "content": f"вопрос {i} " * 200} for i in range(30)
     ]
+    # Обычный вопрос по содержанию, НЕ метавопрос: «о каких проектах знаешь»
+    # теперь уходит в ветку `corpus_scope.match_meta` и до блока «Источники»
+    # не доходит вовсе (см. `tests/test_corpus_scope.py`).
+    question = "какие поля у витрины fincert_feeds"
     with TestClient(create_app()) as client:
         resp = client.post(
             "/api/chat",
             json={
-                "messages": [*history, {"role": "user", "content": "о каких проектах знаешь"}],
+                "messages": [*history, {"role": "user", "content": question}],
                 "rag": True,
             },
         )
@@ -407,7 +411,7 @@ def test_block_reaches_the_model_and_survives_trimming(monkeypatch, tmp_path):
     last = captured[0][-1]["content"]
     assert last.startswith("Состав базы знаний")
     assert last.index("Всего документов в базе: 127.") < last.index("Источники:")
-    assert last.endswith("Вопрос: о каких проектах знаешь")
+    assert last.endswith(f"Вопрос: {question}")
 
 
 # --------------------------------------------------------------------------- #

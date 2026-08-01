@@ -19,11 +19,14 @@ sources remain for backward compatibility.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import cognivault, corpus_map, rag_pipeline
+from . import cognivault, corpus_map, corpus_scope, rag_pipeline
 from .tokens import CHARS_PER_TOKEN, estimate_messages_tokens
+
+log = logging.getLogger("cognivault-ui.rag")
 
 # Order in which grouped ``/context`` buckets are flattened.
 _CONTEXT_GROUP_ORDER = (
@@ -79,6 +82,35 @@ NO_RAG_SYSTEM_PROMPT = """Ты — ассистент по базе знаний
   задать вопрос отдельной репликой.
 - Отвечай на русском языке, кратко и по делу."""
 
+# System turn for a question about the base ITSELF — «что ты знаешь?», «о чём
+# эта база?» — recognised deterministically by `corpus_scope.match_meta`.
+#
+# It cannot be `NO_RAG_SYSTEM_PROMPT`: that one forbids stating anything absent
+# from the dialogue history, which forbids describing the assistant's own scope
+# — exactly the answer being asked for. It cannot be `SYSTEM_PROMPT` either:
+# there is no «Источники» block to answer from and no [Источник N] to cite.
+#
+# Deliberately NOT user-editable. A new editable prompt key would have to be
+# registered in four places and would then be frozen for anyone who saves it —
+# while this text's whole job is to keep an ungrounded answer from being
+# generated. The material it points at (the tree) IS configurable, by the vault.
+META_SYSTEM_PROMPT = """Ты — ассистент по базе знаний пользователя. Этот вопрос — о том, что вообще есть
+в базе, а не о содержании конкретного документа. Поиск по документам для него не
+выполнялся: вместо блока «Источники» ниже дана структура базы — реальные названия
+разделов и число документов в каждом.
+
+- Ответь по структуре ниже: какого объёма база, из каких разделов состоит и что
+  в них лежит.
+- Опирайся ТОЛЬКО на эту структуру. Не придумывай разделов, продуктов и
+  документов, которых в ней нет.
+- Это названия страниц и папок, а не пересказ их содержимого: не утверждай, что
+  написано внутри раздела — только что такой раздел есть и сколько в нём
+  документов.
+- Не ставь [Источник N]: в этом ходе источников нет.
+- В конце предложи задать конкретный вопрос по нужному разделу — тогда будет
+  выполнен поиск по документам.
+- Отвечай на русском языке, кратко и по делу."""
+
 # Backwards-compatible aliases (the private names predate the config API).
 _SYSTEM_PROMPT = SYSTEM_PROMPT
 _CONTEXT_REMINDER = CONTEXT_REMINDER
@@ -105,6 +137,12 @@ _RERANK_CANDIDATES = 40
 
 # Intents that skip retrieval entirely — the model answers from the history.
 _NO_RAG_INTENTS = ("smalltalk", "clarify")
+
+# Intent recorded for a turn routed by `corpus_scope.match_meta`. Not part of the
+# condense taxonomy (`rag_pipeline._INTENTS`) — the model never emits it; it is
+# assigned by code, and the query log needs it to be distinguishable from a
+# `kb_question` that happened to find nothing.
+_META_INTENT = "meta"
 
 # Hard cap on blocks in the context (expanded + bare combined). Beyond ~5 the
 # tail is mostly noise that dilutes attention and invites wrong citations.
@@ -157,7 +195,13 @@ class RagContext:
       (``path``, ``chunk_index``, ``score``, ``rank``), for the query log;
     * ``grades`` — grader output (``id``, ``path``, ``chunk_index``, ``score``),
       ``None`` when grading was skipped;
-    * ``answer_override`` — ready-made answer; the route must skip generation.
+    * ``answer_override`` — ready-made answer; the route must skip generation;
+    * ``scope`` — ``document`` / ``corpus`` from the condense step (see
+      :mod:`app.corpus_scope`); ``document`` whenever the model did not say;
+    * ``hedge`` — the evidence-concentration caveat, appended to the generated
+      answer by the route. ``None`` on all but a corpus-wide question whose
+      fragments collapsed to one document. It QUALIFIES the answer; it never
+      replaces one, and it is never the refusal (that is the grader's alone).
     """
 
     system_message: dict[str, Any] | None = None
@@ -170,6 +214,8 @@ class RagContext:
     candidates: list[dict[str, Any]] | None = None
     grades: list[dict[str, Any]] | None = None
     answer_override: str | None = None
+    scope: str = corpus_scope.DEFAULT_SCOPE
+    hedge: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -447,6 +493,47 @@ def _system_message(prompt: str | None = None) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# Meta branch — a question about the base itself
+# --------------------------------------------------------------------------- #
+
+
+async def _build_meta(
+    query: str, kind: str, cv: dict[str, Any] | None
+) -> RagContext | None:
+    """Context for a recognised meta question, or ``None`` to fall through.
+
+    ``None`` is the fail-closed outcome and it is not an edge case: without a
+    vault listing there is no structure to answer from, and answering anyway
+    would mean generating the shape of the base from the model's imagination.
+    The caller then routes the turn exactly as it did before — retrieval, grader,
+    and the grader's refusal if the base really has nothing.
+
+    No model call, no retrieval, no sources: the message is the rendered tree
+    plus the question. The user's ``prompts.system`` is *not* applied here on
+    purpose — it is the ruleset for answering from «Источники», and this turn has
+    none; applying it would order the model to refuse.
+    """
+    overview = await corpus_map.overview_block(cv)
+    if not overview:
+        log.info(
+            "meta-вопрос (%s) распознан, но структура базы недоступна — "
+            "ход идёт обычным путём",
+            kind,
+        )
+        return None
+    return RagContext(
+        system_message=_system_message(META_SYSTEM_PROMPT),
+        user_message={
+            "role": "user",
+            "content": f"{overview}\n\nВопрос: {query}",
+        },
+        intent=_META_INTENT,
+        standalone_question=query,
+        scope=corpus_scope.CORPUS_SCOPE,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Auto pipeline
 # --------------------------------------------------------------------------- #
 
@@ -466,8 +553,23 @@ async def _build_auto(
     limit = int(rcfg.get("rerank_candidates", _RERANK_CANDIDATES))
     budget = _compute_budget(rcfg, gcfg, messages)
 
-    # 0. Hidden call 1: route the turn and rewrite it into a standalone query.
-    intent, rq = await rag_pipeline.condense(query, messages, rcfg, gcfg)
+    # 0a. A question about the base itself, recognised by anchored patterns —
+    # zero model calls, and therefore the only step that works on the FIRST turn,
+    # where condense is skipped for want of a history. That is not an
+    # optimisation: «что ты знаешь?» is almost always the opening message.
+    #
+    # This branch does not weaken the refusal. The grader refuses when the base
+    # has no answer to a question about its CONTENT; this question is about the
+    # base's shape, which no document in it was ever going to contain, and the
+    # answer is built from the real tree rather than generated freely.
+    meta_kind = corpus_scope.match_meta(query)
+    if meta_kind:
+        meta = await _build_meta(query, meta_kind, cv)
+        if meta is not None:
+            return meta
+
+    # 0b. Hidden call 1: route the turn and rewrite it into a standalone query.
+    intent, rq, scope = await rag_pipeline.condense(query, messages, rcfg, gcfg)
     if intent in _NO_RAG_INTENTS:
         # Chit-chat / "say that again": no retrieval, the model answers from the
         # untouched history — but NOT without rules. A misrouted knowledge-base
@@ -478,6 +580,7 @@ async def _build_auto(
             system_message=_system_message(NO_RAG_SYSTEM_PROMPT),
             intent=intent,
             standalone_question=rq,
+            scope=scope,
         )
 
     # 1. Retrieve with hybrid search, graceful fallback to semantic.
@@ -501,7 +604,10 @@ async def _build_auto(
             raw = await cognivault.semantic_search(rq, limit, cv=cv)
     except Exception:  # noqa: BLE001 — any retrieval failure => graceful fallback
         return RagContext(
-            notice=_RETRIEVAL_UNAVAILABLE, intent=intent, standalone_question=rq
+            notice=_RETRIEVAL_UNAVAILABLE,
+            intent=intent,
+            standalone_question=rq,
+            scope=scope,
         )
 
     fragments = _norm_semantic(raw.get("results") or [])
@@ -509,7 +615,7 @@ async def _build_auto(
         f for f in fragments if _passes_min_score(f.get("score"), min_score)
     ]
     if not fragments:
-        return RagContext(intent=intent, standalone_question=rq)
+        return RagContext(intent=intent, standalone_question=rq, scope=scope)
 
     candidates = [
         {
@@ -550,6 +656,7 @@ async def _build_auto(
             candidates=candidates,
             grades=grades_meta,
             answer_override=_NO_ANSWER,
+            scope=scope,
         )
 
     # 2-4. Group by file, rank files by their best hit: the grader's verdict
@@ -677,11 +784,23 @@ async def _build_auto(
             standalone_question=rq,
             candidates=candidates,
             grades=grades_meta,
+            scope=scope,
         )
 
     # Corpus footprint: fetched only now, so a turn that ended in a refusal or
     # found nothing never pays for it. Cached per vault; `None` on any failure.
     corpus = await corpus_map.corpus_block(cv, len(sources))
+
+    # Evidence-concentration caveat. Pure Python, zero tokens, and — because
+    # `scope` is `document` unless the model explicitly said otherwise — it
+    # cannot fire on a question about one document, which is what the whole
+    # control group of 56 enumerations is. `document_count` reads the listing
+    # cache the footprint just filled, so it costs no request.
+    hedge_text = (
+        corpus_scope.hedge(scope, sources, await corpus_map.document_count(cv))
+        if scope == corpus_scope.CORPUS_SCOPE
+        else None
+    )
 
     user_message, context_chars = _render_context_message(
         blocks,
@@ -700,6 +819,8 @@ async def _build_auto(
         standalone_question=rq,
         candidates=candidates,
         grades=grades_meta,
+        scope=scope,
+        hedge=hedge_text,
     )
 
 
@@ -807,7 +928,14 @@ async def build_rag_context(
     Returns a :class:`RagContext`. A ``user_message`` always comes with a
     ``system_message`` (RAG applies); the deliberate no-retrieval intents
     (``smalltalk``/``clarify``) return a ``system_message`` alone — the
-    no-sources ruleset — and everything else returns neither. In that last case
+    no-sources ruleset — and everything else returns neither.
+
+    One branch runs before any of that: a question recognised by
+    :func:`app.corpus_scope.match_meta` as being about the base itself is
+    answered from the rendered section tree (``intent="meta"``, no sources, no
+    model calls before generation). It falls through to the normal path when the
+    vault listing is unavailable — and, by construction, for anything the narrow
+    pattern list does not match. In that last case
     ``notice`` explains a retrieval failure, ``answer_override`` carries the
     canned refusal when the grader graded every candidate and rejected them all
     (the rank insurance does not override a total refusal — an invented answer

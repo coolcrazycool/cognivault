@@ -239,7 +239,7 @@ def test_condense_skipped_without_history(monkeypatch):
     """Первая реплика: истории нет — вызов не делается вовсе."""
     calls = _install_complete_json(monkeypatch, lambda p: {"intent": "smalltalk"})
 
-    intent, question = asyncio.run(
+    intent, question, _ = asyncio.run(
         rag_pipeline.condense("первый вопрос", None, {}, {})
     )
 
@@ -252,7 +252,7 @@ def test_condense_skipped_when_only_current_question_in_messages(monkeypatch):
     calls = _install_complete_json(monkeypatch, lambda p: {"intent": "smalltalk"})
     messages = [{"role": "user", "content": "первый вопрос"}]
 
-    intent, question = asyncio.run(
+    intent, question, _ = asyncio.run(
         rag_pipeline.condense("первый вопрос", messages, {}, {})
     )
 
@@ -274,7 +274,7 @@ def test_condense_rewrites_question(monkeypatch):
         lambda p: {"intent": "kb_question", "standalone_question": "как настроить SberOSC"},
     )
 
-    intent, question = asyncio.run(
+    intent, question, _ = asyncio.run(
         rag_pipeline.condense("а как его настроить", _history(), {}, {})
     )
 
@@ -282,7 +282,10 @@ def test_condense_rewrites_question(monkeypatch):
     assert len(calls) == 1
     # Промпт из плана, дословно.
     assert "Определи тип реплики" in calls[0]
-    assert 'Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null}' in calls[0]
+    assert (
+        'Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null,'
+        ' "scope": "document" | "corpus"}'
+    ) in calls[0]
     assert "Последняя реплика пользователя: а как его настроить" in calls[0]
     assert "что такое SberOSC" in calls[0]
 
@@ -311,7 +314,7 @@ def test_condense_bad_json_falls_back_to_raw_question(monkeypatch, caplog):
     _install_complete_json(monkeypatch, handler)
 
     with caplog.at_level(logging.WARNING, logger="cognivault-ui.rag_pipeline"):
-        intent, question = asyncio.run(
+        intent, question, _ = asyncio.run(
             rag_pipeline.condense("а как его настроить", _history(), {}, {})
         )
 
@@ -328,7 +331,7 @@ def test_condense_call_failure_falls_back(monkeypatch, caplog):
     )
 
     with caplog.at_level(logging.WARNING, logger="cognivault-ui.rag_pipeline"):
-        intent, question = asyncio.run(
+        intent, question, _ = asyncio.run(
             rag_pipeline.condense("а как его настроить", _history(), {}, {})
         )
 
@@ -339,12 +342,106 @@ def test_condense_call_failure_falls_back(monkeypatch, caplog):
 def test_condense_disabled_by_flag(monkeypatch):
     calls = _install_complete_json(monkeypatch, lambda p: {"intent": "smalltalk"})
 
-    intent, question = asyncio.run(
+    intent, question, _ = asyncio.run(
         rag_pipeline.condense("спасибо", _history(), {"condense_enabled": False}, {})
     )
 
     assert (intent, question) == ("kb_question", "спасибо")
     assert calls == []
+
+
+def test_condense_reads_the_scope_field(monkeypatch):
+    """Шаг 2б: охват — ещё несколько выходных токенов в ТОМ ЖЕ вызове."""
+    calls = _install_complete_json(
+        monkeypatch,
+        lambda p: {"intent": "kb_question", "standalone_question": None, "scope": "corpus"},
+    )
+
+    result = asyncio.run(rag_pipeline.condense("какие продукты есть", _history(), {}, {}))
+
+    assert result.scope == "corpus"
+    assert len(calls) == 1, "новых вызовов модели быть не должно"
+    assert '"scope": "document" | "corpus"' in calls[0]
+    assert "При сомнении выбирай \"document\"" in calls[0]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"intent": "kb_question"},
+        {"intent": "kb_question", "scope": None},
+        {"intent": "kb_question", "scope": "по всей базе"},
+    ],
+    ids=["field-absent", "null", "unknown-value"],
+)
+def test_condense_without_a_usable_scope_keeps_todays_behaviour(monkeypatch, data):
+    """Промпт редактируем: вырезанная фраза про охват не должна ничего менять."""
+    _install_complete_json(monkeypatch, lambda p: data)
+
+    result = asyncio.run(rag_pipeline.condense("вопрос", _history(), {}, {}))
+
+    assert result.scope == "document"
+
+
+def test_condense_scope_survives_a_corrected_intent(monkeypatch):
+    """Интент поправлен эвристикой — охват из того же ответа всё равно годен."""
+    _install_complete_json(
+        monkeypatch, lambda p: {"intent": "smalltalk", "scope": "corpus"}
+    )
+
+    result = asyncio.run(rag_pipeline.condense("а что вообще есть?", _history(), {}, {}))
+
+    assert (result.intent, result.scope) == ("kb_question", "corpus")
+
+
+def test_first_turn_condense_is_off_by_default(monkeypatch):
+    """Цена включения — вызов на КАЖДОЕ первое сообщение; по умолчанию не платим."""
+    calls = _install_complete_json(monkeypatch, lambda p: {"intent": "kb_question"})
+
+    result = asyncio.run(rag_pipeline.condense("первый вопрос", None, {}, {}))
+
+    assert calls == []
+    assert result == ("kb_question", "первый вопрос", "document")
+
+
+def test_first_turn_condense_takes_the_scope_and_nothing_else(monkeypatch):
+    """Включённый первый ход отдаёт ТОЛЬКО охват.
+
+    Без истории разрешать нечего, а ошибочный `smalltalk` на первой реплике
+    стоил бы пользователю поиска — поэтому интент и переписанный вопрос с
+    первого хода не берутся вовсе.
+    """
+    calls = _install_complete_json(
+        monkeypatch,
+        lambda p: {
+            "intent": "smalltalk",
+            "standalone_question": "совсем другой вопрос",
+            "scope": "corpus",
+        },
+    )
+
+    result = asyncio.run(
+        rag_pipeline.condense(
+            "расскажи про Fincert", None, {"condense_first_turn": True}, {}
+        )
+    )
+
+    assert len(calls) == 1
+    assert "первая реплика" in calls[0]
+    assert result == ("kb_question", "расскажи про Fincert", "corpus")
+
+
+def test_first_turn_condense_failure_changes_nothing(monkeypatch):
+    async def boom(messages, gcfg, **kwargs):
+        raise RuntimeError("GIGACHAT_TIMEOUT")
+
+    monkeypatch.setattr(rag_pipeline.gigachat, "complete_json", boom, raising=False)
+
+    result = asyncio.run(
+        rag_pipeline.condense("вопрос", None, {"condense_first_turn": True}, {})
+    )
+
+    assert result == ("kb_question", "вопрос", "document")
 
 
 def test_condense_smalltalk_keeps_raw_question(monkeypatch):
@@ -353,7 +450,7 @@ def test_condense_smalltalk_keeps_raw_question(monkeypatch):
         lambda p: {"intent": "smalltalk", "standalone_question": None},
     )
 
-    intent, question = asyncio.run(
+    intent, question, _ = asyncio.run(
         rag_pipeline.condense("спасибо большое", _history(), {}, {})
     )
 
@@ -863,7 +960,7 @@ def test_substantive_reply_never_stays_smalltalk(monkeypatch, question):
     """Вопрос с «?» или длиннее шести слов не пускаем в smalltalk."""
     _install_complete_json(monkeypatch, lambda p: {"intent": "smalltalk"})
 
-    intent, rq = asyncio.run(rag_pipeline.condense(question, _history(), {}, {}))
+    intent, rq, _ = asyncio.run(rag_pipeline.condense(question, _history(), {}, {}))
 
     assert (intent, rq) == ("kb_question", question)
 
@@ -874,7 +971,7 @@ def test_substantive_reply_never_stays_smalltalk(monkeypatch, question):
 def test_greetings_stay_smalltalk(monkeypatch, question):
     _install_complete_json(monkeypatch, lambda p: {"intent": "smalltalk"})
 
-    intent, _ = asyncio.run(rag_pipeline.condense(question, _history(), {}, {}))
+    intent, _, _ = asyncio.run(rag_pipeline.condense(question, _history(), {}, {}))
 
     assert intent == "smalltalk"
 
@@ -884,7 +981,7 @@ def test_clarify_is_not_demoted_by_the_heuristic(monkeypatch):
     _install_complete_json(monkeypatch, lambda p: {"intent": "clarify"})
     question = "объясни попроще, я не понял вот этот кусок ответа, можно проще?"
 
-    intent, _ = asyncio.run(rag_pipeline.condense(question, _history(), {}, {}))
+    intent, _, _ = asyncio.run(rag_pipeline.condense(question, _history(), {}, {}))
 
     assert intent == "clarify"
 
@@ -1211,7 +1308,7 @@ def test_hidden_call_is_bounded_by_a_wall_clock_deadline(
         result = asyncio.run(
             rag_pipeline.condense("а как его настроить", _history(), {}, {})
         )
-        assert result == ("kb_question", "а как его настроить")
+        assert result == ("kb_question", "а как его настроить", "document")
     else:
         grades = asyncio.run(rag_pipeline.grade("вопрос", [_frag(1)], {}, {}))
         assert grades == [None]

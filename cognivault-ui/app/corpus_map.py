@@ -57,6 +57,17 @@ _MAX_SECTIONS = 12
 _MAX_CHILDREN = 4
 _MAX_MAP_CHARS = 700
 
+# The same fold, rendered for the OTHER caller: a question about the base itself
+# (:func:`render_overview`). There the tree is not navigation furniture next to
+# the sources — it IS the material the answer is built from, so it gets a bigger
+# budget: every top section, every sub-section it has, ~600 tokens. It is still
+# O(1) in the size of the corpus in the sense that matters (no document bodies,
+# no annotations, hard char ceiling); a flat listing of 127 paths would be 11k
+# tokens and would not fit the chat budget at all.
+_MAX_OVERVIEW_SECTIONS = 20
+_MAX_OVERVIEW_CHILDREN = 24
+_MAX_OVERVIEW_CHARS = 2400
+
 # How many single-folder levels the fold may descend through before it gives up
 # (see :func:`_fold`). A guard against a pathological vault, not a design limit:
 # a Confluence sync needs 4.
@@ -79,6 +90,20 @@ _CAPTION = (
     "него нельзя, [Источник N] — только на блок «Источники» ниже."
 )
 _TAIL = "Это объёмы разделов, а не перечень их содержимого."
+
+# The overview's own two sentences. The «не источник» clause is deliberately
+# ABSENT here: on a meta turn there is no «Источники» block to defer to, and a
+# caption that calls the block un-citable talks the model out of the only
+# material it has. What stays is the honest provenance — these are page and
+# folder names from the tree, not a summary of what the pages say.
+_OVERVIEW_CAPTION = (
+    "Структура базы знаний. Построена по дереву разделов (названия страниц и "
+    "папок, число документов), не по тексту документов."
+)
+_OVERVIEW_TAIL = (
+    "Это названия и объёмы разделов, а не перечень их содержимого: о том, что "
+    "написано внутри, по этому списку судить нельзя."
+)
 
 _DOC_FORMS = ("документ", "документа", "документов")
 _FRAGMENT_FORMS = ("фрагмент", "фрагмента", "фрагментов")
@@ -206,11 +231,11 @@ def _fold(docs: list[list[str]]) -> tuple[list[_Section], str]:
     return sections, "/".join(prefix)
 
 
-def _children_suffix(section: _Section) -> str:
+def _children_suffix(section: _Section, max_children: int = _MAX_CHILDREN) -> str:
     """``" (Fincert: 12, ППРБ: 9, ещё 6 подразделов)"`` — or empty."""
     if not section.children:
         return ""
-    shown = section.children[:_MAX_CHILDREN]
+    shown = section.children[:max_children]
     parts = [f"{name}: {count}" for name, count in shown]
     hidden = len(section.children) - len(shown)
     if hidden:
@@ -225,8 +250,18 @@ def _compose(
     shown: int,
     prefix: str,
     with_children: bool,
+    *,
+    caption: str = _CAPTION,
+    tail: str = _TAIL,
+    max_children: int = _MAX_CHILDREN,
 ) -> str:
-    """Render the block with ``shown`` sections, optionally with sub-sections."""
+    """Render the block with ``shown`` sections, optionally with sub-sections.
+
+    ``caption``/``tail`` are the two fixed sentences around the numbers; they are
+    parameters because the same fold serves two callers with opposite contracts
+    — the footprint next to the sources («не источник, ссылаться нельзя») and
+    the overview that answers a question about the base itself.
+    """
     line = f"Всего документов в базе: {total}."
     if isinstance(n_sources, int) and n_sources > 0:
         line += (
@@ -234,14 +269,14 @@ def _compose(
             f"{_plural(n_sources, _FRAGMENT_FORMS)}; остальное содержимое базы "
             "не показано."
         )
-    caption = (
+    heading = (
         f"Разделы внутри «{prefix}» (число документов):"
         if prefix
         else "Разделы верхнего уровня (число документов):"
     )
-    lines = [_CAPTION, line, caption]
+    lines = [caption, line, heading]
     for section in sections[:shown]:
-        suffix = _children_suffix(section) if with_children else ""
+        suffix = _children_suffix(section, max_children) if with_children else ""
         lines.append(f"- {section.label} — {section.count}{suffix}")
     rest = sections[shown:]
     if rest:
@@ -250,8 +285,66 @@ def _compose(
             f"- ещё {len(rest)} {_plural(len(rest), _SECTION_FORMS)} — "
             f"{docs} {_plural(docs, _DOC_FORMS)}"
         )
-    lines.append(_TAIL)
+    lines.append(tail)
     return "\n".join(lines)
+
+
+def _squeeze(
+    total: int,
+    n_sources: int | None,
+    sections: list[_Section],
+    prefix: str,
+    *,
+    max_chars: int,
+    max_sections: int,
+    max_children: int,
+    caption: str,
+    tail: str,
+) -> str:
+    """Render under ``max_chars`` by degrading in a fixed order.
+
+    Sub-sections go first, then sections from the smallest up — their documents
+    stay counted in the trailing «ещё N разделов» line, so the total always adds
+    up. One section still over the cap (an absurdly long folder name) is
+    returned anyway: the honest numbers are worth more than the ceiling, and the
+    block is still O(1) in the size of the corpus.
+    """
+    shown = min(len(sections), max_sections)
+    for with_children in (True, False):
+        text = _compose(
+            total,
+            n_sources,
+            sections,
+            shown,
+            prefix,
+            with_children,
+            caption=caption,
+            tail=tail,
+            max_children=max_children,
+        )
+        if len(text) <= max_chars:
+            return text
+    while shown > 1:
+        shown -= 1
+        text = _compose(
+            total, n_sources, sections, shown, prefix, False, caption=caption, tail=tail
+        )
+        if len(text) <= max_chars:
+            return text
+    return _compose(
+        total, n_sources, sections, 1, prefix, False, caption=caption, tail=tail
+    )
+
+
+def _folded(paths: list[Any]) -> tuple[int, list[_Section], str] | None:
+    """``(total, sections, prefix)`` for a listing, or ``None`` if it says nothing."""
+    docs = _documents(paths)
+    if not docs:
+        return None
+    sections, prefix = _fold(docs)
+    if not sections:
+        return None
+    return len(docs), sections, prefix
 
 
 def render(
@@ -264,34 +357,50 @@ def render(
     ``n_sources`` is the number of blocks in the «Источники» section of the same
     message; it is what turns the block from trivia into a scale statement
     («127 documents, you were given 5 fragments»). ``None`` omits that sentence.
-
-    The result is squeezed under ``max_chars`` by degrading in a fixed order:
-    sub-sections first, then sections from the smallest up (their documents are
-    still counted in a trailing «ещё N разделов» line, so the total always adds
-    up).
     """
-    docs = _documents(paths)
-    if not docs:
+    folded = _folded(paths)
+    if folded is None:
         return None
-    sections, prefix = _fold(docs)
-    if not sections:
-        return None
-    total = len(docs)
+    total, sections, prefix = folded
+    return _squeeze(
+        total,
+        n_sources,
+        sections,
+        prefix,
+        max_chars=max_chars,
+        max_sections=_MAX_SECTIONS,
+        max_children=_MAX_CHILDREN,
+        caption=_CAPTION,
+        tail=_TAIL,
+    )
 
-    shown = min(len(sections), _MAX_SECTIONS)
-    for with_children in (True, False):
-        text = _compose(total, n_sources, sections, shown, prefix, with_children)
-        if len(text) <= max_chars:
-            return text
-    while shown > 1:
-        shown -= 1
-        text = _compose(total, n_sources, sections, shown, prefix, False)
-        if len(text) <= max_chars:
-            return text
-    # One section and still over the cap: an absurdly long folder name. The
-    # honest numbers are worth more than the ceiling, and the block is still
-    # O(1) in the size of the corpus.
-    return _compose(total, n_sources, sections, 1, prefix, False)
+
+def render_overview(
+    paths: list[Any], max_chars: int = _MAX_OVERVIEW_CHARS
+) -> str | None:
+    """Render the base's structure as the ANSWER material, or ``None``.
+
+    Same fold, same counts, same degradation ladder as :func:`render` — only the
+    budget and the two framing sentences differ. Used by the meta-question
+    branch (:mod:`app.corpus_scope`), where the tree is not navigation next to
+    the sources but the only grounded thing the model has: retrieval was not run,
+    and there is no document in the corpus that lists the corpus.
+    """
+    folded = _folded(paths)
+    if folded is None:
+        return None
+    total, sections, prefix = folded
+    return _squeeze(
+        total,
+        None,
+        sections,
+        prefix,
+        max_chars=max_chars,
+        max_sections=_MAX_OVERVIEW_SECTIONS,
+        max_children=_MAX_OVERVIEW_CHILDREN,
+        caption=_OVERVIEW_CAPTION,
+        tail=_OVERVIEW_TAIL,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -363,4 +472,37 @@ async def corpus_block(
     try:
         return render(paths, n_sources)
     except Exception:  # noqa: BLE001 — pure code, but the turn is worth more
+        return None
+
+
+async def overview_block(cv: dict[str, Any] | None = None) -> str | None:
+    """The base's structure for a meta turn, or ``None`` when unavailable.
+
+    ``None`` is what makes the meta branch fail closed: no listing means no
+    grounded material, and the caller must then route the question exactly as it
+    did before this feature existed (retrieval + grader) rather than answer from
+    the model's own imagination.
+    """
+    paths = await files(cv)
+    if not paths:
+        return None
+    try:
+        return render_overview(paths)
+    except Exception:  # noqa: BLE001 — pure code, but the turn is worth more
+        return None
+
+
+async def document_count(cv: dict[str, Any] | None = None) -> int | None:
+    """How many documents the vault holds, or ``None`` when unknown.
+
+    Reads the SAME cached listing as :func:`corpus_block`, so asking for the
+    number next to the footprint costs no extra request. Used by the evidence
+    hedge, which says "one document out of N" and must not invent N.
+    """
+    paths = await files(cv)
+    if not paths:
+        return None
+    try:
+        return len(_documents(paths)) or None
+    except Exception:  # noqa: BLE001 — the turn is worth more than the number
         return None
