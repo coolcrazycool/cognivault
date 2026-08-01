@@ -15,12 +15,14 @@
 Namespace: `ci05490208-oasis-cognivault`.
 Образы пинятся на конкретный тег `sha-<gitsha>`. Теги бэкенда и UI могут расходиться —
 образы собираются независимо, каждый из своего пути, и компонент, который не менялся,
-остаётся на прежнем коммите. Сейчас они совпадают: оба собраны из `fd27f9f`.
+остаётся на прежнем коммите. Сейчас они РАЗНЫЕ: последние правки затронули только `src/`,
+поэтому образ UI не пересобирался и остался на `977445a`. Это нормально — катите оба тега
+как есть, не пытайтесь «подтянуть» UI к тегу бэкенда: образа с таким тегом не существует.
 
 | Компонент | Образ |
 |-----------|-------|
-| бэкенд | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-fd27f9f` |
-| UI | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-fd27f9f` |
+| бэкенд | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-b5d3c60` |
+| UI | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-977445a` |
 
 ### Что нового в `sha-fd27f9f`
 
