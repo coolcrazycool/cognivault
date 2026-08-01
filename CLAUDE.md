@@ -34,6 +34,7 @@ src/
     search/           #   /api/vault/search/{semantic,hybrid,lexical}
     context/          #   /api/vault/context
     vault/            #   /api/vault/* CRUD + /upload
+    catalog/          #   /api/vault/catalog — что вообще есть в базе (indexed_files ⋈ doc_summaries)
     admin/            #   /api/admin/reindex[/status], /api/admin/collection[/rebuild]
   lib/
     bm25.ts           # sparse vectors: tokenizer + vendored ru Snowball stemmer, FNV-1a, BM25 tf
