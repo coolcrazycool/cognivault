@@ -109,6 +109,27 @@ const configSchema = z
     GIGACHAT_MAX_RETRIES: z.coerce.number().int().positive().default(5),
     GIGACHAT_RETRY_BASE_DELAY_MS: z.coerce.number().int().positive().default(1_000),
 
+    // GigaChat chat/completions — used at INDEX time only, for the summaries below.
+    // Same mTLS certificate and base URL as the embeddings endpoint; the model name
+    // is a different one (a chat model, not EmbeddingsGigaR).
+    GIGACHAT_CHAT_MODEL: z.string().default('GigaChat'),
+    GIGACHAT_CHAT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+    GIGACHAT_CHAT_MAX_TOKENS: z.coerce.number().int().positive().default(300),
+
+    // Indexing-time enrichment (requires EMBEDDING_PROVIDER=gigachat — the chat client
+    // shares the embedder's certificate). Both are best-effort: a failed call is logged
+    // and the chunk is indexed without the extra text.
+    // Extra retrievable point describing a table that had to be split into row groups.
+    INDEX_TABLE_SUMMARY: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((v) => v === 'true'),
+    // One-paragraph document annotation prepended to every chunk (cached in SQLite).
+    INDEX_DOC_SUMMARY: z
+      .enum(['true', 'false'])
+      .default('true')
+      .transform((v) => v === 'true'),
+
     OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
   })
   .superRefine((cfg, ctx) => {

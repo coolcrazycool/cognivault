@@ -2,7 +2,8 @@ import { EventEmitter } from 'node:events';
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { sections } from '../../db/schema.js';
+import { docSummaries, sections } from '../../db/schema.js';
+import { buildSparseVector } from '../../lib/bm25.js';
 import { ChunkParseError } from '../../lib/chunk-errors.js';
 import type { FileChangeEvent } from '../../lib/indexer.js';
 
@@ -78,6 +79,13 @@ function createMockQueue() {
   return queue;
 }
 
+/** Shape of a cached doc_summaries row as the pipeline reads it back. */
+interface DocSummaryRow {
+  path: string;
+  contentHash: string;
+  summary: string;
+}
+
 // Creates a minimal Fastify app with mocked services
 async function buildTestApp(opts?: {
   readContent?: ReturnType<typeof vi.fn>;
@@ -86,6 +94,10 @@ async function buildTestApp(opts?: {
   qdrantDelete?: ReturnType<typeof vi.fn>;
   setPayload?: ReturnType<typeof vi.fn>;
   vaultRootPath?: string;
+  /** Injected chat client; absent means "summaries unavailable" (the openai case). */
+  summarize?: ReturnType<typeof vi.fn>;
+  /** Row returned by the doc_summaries cache lookup. */
+  docSummaryRow?: DocSummaryRow;
 }): Promise<{
   app: FastifyInstance;
   readContent: ReturnType<typeof vi.fn>;
@@ -98,7 +110,10 @@ async function buildTestApp(opts?: {
   dbDelete: ReturnType<typeof vi.fn>;
   dbInsert: ReturnType<typeof vi.fn>;
   dbInsertValues: ReturnType<typeof vi.fn>;
+  dbInsertOnConflict: ReturnType<typeof vi.fn>;
+  dbSelectGet: ReturnType<typeof vi.fn>;
   dbTransaction: ReturnType<typeof vi.fn>;
+  summarize: ReturnType<typeof vi.fn>;
   confirmIndexed: ReturnType<typeof vi.fn>;
   failIndexed: ReturnType<typeof vi.fn>;
   fileFailed: FileFailedRecord[];
@@ -131,9 +146,13 @@ async function buildTestApp(opts?: {
   const dbDeleteWhere = vi.fn().mockReturnValue({ run: dbDeleteRun });
   const dbDelete = vi.fn().mockReturnValue({ where: dbDeleteWhere });
 
-  // db.insert(table).values(rows).run() — used to write a path's sections
+  // db.insert(table).values(rows).run() — used to write a path's sections.
+  // The doc_summaries cache goes through .onConflictDoUpdate(...).run() instead.
   const dbInsertRun = vi.fn();
-  const dbInsertValues = vi.fn().mockReturnValue({ run: dbInsertRun });
+  const dbInsertOnConflict = vi.fn().mockReturnValue({ run: dbInsertRun });
+  const dbInsertValues = vi
+    .fn()
+    .mockReturnValue({ run: dbInsertRun, onConflictDoUpdate: dbInsertOnConflict });
   const dbInsert = vi.fn().mockReturnValue({ values: dbInsertValues });
 
   // db.transaction(cb) runs the callback synchronously against the same chains, which
@@ -146,9 +165,10 @@ async function buildTestApp(opts?: {
     }),
   );
 
-  // Build db.select chain mock for processImage
+  // Build db.select chain mock for processImage (.all) and the doc_summaries cache (.get)
   const dbSelectAll = vi.fn().mockReturnValue([]);
-  const dbSelectWhere = vi.fn().mockReturnValue({ all: dbSelectAll });
+  const dbSelectGet = vi.fn().mockReturnValue(opts?.docSummaryRow);
+  const dbSelectWhere = vi.fn().mockReturnValue({ all: dbSelectAll, get: dbSelectGet });
   const dbSelectFrom = vi.fn().mockReturnValue({ where: dbSelectWhere });
   const dbSelect = vi.fn().mockReturnValue({ from: dbSelectFrom });
 
@@ -241,6 +261,15 @@ async function buildTestApp(opts?: {
           'pipelineEvents',
           pipelineEvents as unknown as FastifyInstance['pipelineEvents'],
         );
+
+        // Chat client for index-time summaries. Decorating it here (before the pipeline
+        // plugin registers) is what stops the plugin from building a real GigaChat one.
+        f.decorate(
+          'summarizer',
+          (opts?.summarize
+            ? { complete: opts.summarize }
+            : undefined) as unknown as FastifyInstance['summarizer'],
+        );
       },
       { name: 'test-deps' },
     ),
@@ -274,7 +303,10 @@ async function buildTestApp(opts?: {
     dbDelete,
     dbInsert,
     dbInsertValues,
+    dbInsertOnConflict,
+    dbSelectGet,
     dbTransaction,
+    summarize: opts?.summarize ?? vi.fn(),
     confirmIndexed,
     failIndexed,
     fileFailed,
@@ -881,6 +913,327 @@ describe('pipeline plugin (per-user)', () => {
       expect(dbSet).toHaveBeenCalledWith({ path: 'notes/new-location.md' });
 
       await app.close();
+    });
+  });
+
+  // ── index-time summaries (table_summary + doc annotation) ──
+
+  describe('index-time summaries', () => {
+    type Point = { payload: Record<string, unknown>; vector: Record<string, unknown> };
+
+    const CSV_EVENT: FileChangeEvent = {
+      path: 'data/table.csv',
+      type: 'updated',
+      contentHash: 'hash-v1',
+    };
+    const MD_EVENT: FileChangeEvent = {
+      path: 'notes/my-note.md',
+      type: 'created',
+      contentHash: 'abc123',
+    };
+
+    /** Two row groups of the same split table, as the table-aware chunker emits them. */
+    function splitTableChunks() {
+      return [
+        {
+          text: 'Отчёт > Таблица\n| a | b |\n| --- | --- |\n| 1 | 2 |',
+          sectionPath: 'Отчёт > Таблица',
+          chunkIndex: 0,
+          parentId: 'parent-table',
+          contentKind: 'table_rows',
+        },
+        {
+          text: 'Отчёт > Таблица\n| a | b |\n| --- | --- |\n| 3 | 4 |',
+          sectionPath: 'Отчёт > Таблица',
+          chunkIndex: 1,
+          parentId: 'parent-table',
+          contentKind: 'table_rows',
+        },
+      ];
+    }
+
+    function pointsOf(upsert: ReturnType<typeof vi.fn>): Point[] {
+      const call = upsert.mock.calls[0] as [{ points: Point[] }] | undefined;
+      return call?.[0].points ?? [];
+    }
+
+    it('stamps content_kind text on chunks that do not declare one', async () => {
+      const { app, upsert } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [MD_EVENT]);
+
+      expect(pointsOf(upsert)[0]?.payload.content_kind).toBe('text');
+
+      await app.close();
+    });
+
+    it('adds a table_summary point for a table split into row groups', async () => {
+      mockChunkCsv.mockReturnValueOnce(splitTableChunks());
+      const summarize = vi.fn().mockResolvedValue('Таблица о продажах: колонки a и b.');
+      const { app, upsert, embed } = await buildTestApp({
+        summarize,
+        embed: vi.fn().mockResolvedValue([[0.1], [0.2], [0.3]]),
+      });
+
+      await processChanges(app, TEST_USER_ID, [CSV_EVENT]);
+
+      const points = pointsOf(upsert);
+      expect(points).toHaveLength(3);
+      const summaryPoint = points[2] as Point;
+      expect(summaryPoint.payload.content_kind).toBe('table_summary');
+      expect(summaryPoint.payload.parent_id).toBe('parent-table');
+      expect(summaryPoint.payload.text).toContain('Таблица о продажах');
+
+      // The table prompt sees the header rows of the first group.
+      const tablePrompt = summarize.mock.calls
+        .map((c) => c[0] as string)
+        .find((p) => p.includes('Опиши таблицу'));
+      expect(tablePrompt).toContain('| a | b |');
+
+      // The extra point is embedded like any other chunk.
+      expect((embed.mock.calls[0]?.[0] as string[]).length).toBe(3);
+
+      await app.close();
+    });
+
+    it('costs two chat calls for a document of many chunks with one split table', async () => {
+      // Indexing cost has to stay per-document, not per-chunk: one annotation call for
+      // the file plus one description call for the table, however many chunks it made.
+      const manyChunks = [
+        ...splitTableChunks(),
+        ...Array.from({ length: 8 }, (_, i) => ({
+          text: `Отчёт > Пояснения ${i}`,
+          sectionPath: 'Отчёт > Пояснения',
+          chunkIndex: 2 + i,
+          parentId: 'parent-prose',
+          contentKind: 'text',
+        })),
+      ];
+      mockChunkCsv.mockReturnValueOnce(manyChunks);
+      const summarize = vi.fn().mockResolvedValue('описание');
+      const { app } = await buildTestApp({
+        summarize,
+        embed: vi.fn().mockResolvedValue(manyChunks.concat({} as never).map(() => [0.1])),
+      });
+
+      await processChanges(app, TEST_USER_ID, [CSV_EVENT]);
+
+      expect(summarize).toHaveBeenCalledTimes(2);
+      const prompts = summarize.mock.calls.map((c) => c[0] as string);
+      expect(prompts.filter((p) => p.includes('Опиши таблицу'))).toHaveLength(1);
+      expect(prompts.filter((p) => p.includes('Аннотация 1–2 предложения'))).toHaveLength(1);
+
+      await app.close();
+    });
+
+    it('does not summarize a table that fit into a single chunk', async () => {
+      mockChunkCsv.mockReturnValueOnce([
+        {
+          text: 'Отчёт > Таблица\n| a | b |\n| --- | --- |\n| 1 | 2 |',
+          sectionPath: 'Отчёт > Таблица',
+          chunkIndex: 0,
+          parentId: 'parent-table',
+          contentKind: 'table_rows',
+        },
+      ]);
+      const summarize = vi.fn().mockResolvedValue('аннотация');
+      const { app, upsert } = await buildTestApp({ summarize });
+
+      await processChanges(app, TEST_USER_ID, [CSV_EVENT]);
+
+      const points = pointsOf(upsert);
+      expect(points).toHaveLength(1);
+      expect(points[0]?.payload.content_kind).toBe('table_rows');
+      expect(summarize.mock.calls.some((c) => (c[0] as string).includes('Опиши таблицу'))).toBe(
+        false,
+      );
+
+      await app.close();
+    });
+
+    it('prefixes the document annotation to the embedded text and the payload', async () => {
+      const summarize = vi.fn().mockResolvedValue('Документ про mTLS.');
+      const { app, upsert, embed } = await buildTestApp({ summarize });
+
+      await processChanges(app, TEST_USER_ID, [MD_EVENT]);
+
+      const embedded = embed.mock.calls[0]?.[0] as string[];
+      expect(embedded[0]).toContain('Аннотация документа: Документ про mTLS.\n\n');
+      expect(pointsOf(upsert)[0]?.payload.text).toBe(embedded[0]);
+
+      await app.close();
+    });
+
+    it('keeps the annotation out of the BM25 vector', async () => {
+      // The annotation is identical in every chunk of a document. In the sparse vector
+      // that would make every chunk match on the annotation's terms and would stretch
+      // the BM25 length normalizer, damping the terms the chunk is really about — so
+      // the lexical side is built from the chunk's own text only.
+      const summarize = vi.fn().mockResolvedValue('Документ про сертификаты взаимодействия.');
+      const { app, upsert, embed } = await buildTestApp({ summarize });
+
+      await processChanges(app, TEST_USER_ID, [MD_EVENT]);
+
+      const embedded = (embed.mock.calls[0]?.[0] as string[])[0] as string;
+      const point = pointsOf(upsert)[0];
+      const chunkText = embedded.slice(
+        embedded.indexOf('\n\n', 'Аннотация документа: '.length) + 2,
+      );
+
+      expect(embedded).toContain('Аннотация документа: ');
+      expect(chunkText).not.toContain('Аннотация документа');
+      expect(point?.vector.bm25).toEqual(buildSparseVector(chunkText));
+      // A term that occurs only in the annotation must not be in the sparse vector.
+      const annotationOnly = buildSparseVector('сертификаты взаимодействия');
+      const sparse = point?.vector.bm25 as { indices: number[] };
+      expect(annotationOnly.indices.length).toBeGreaterThan(0);
+      for (const index of annotationOnly.indices) {
+        expect(sparse.indices).not.toContain(index);
+      }
+
+      await app.close();
+    });
+
+    it('caches the annotation and skips the chat call when the hash is unchanged', async () => {
+      const summarize = vi.fn().mockResolvedValue('свежая аннотация');
+      const { app, upsert, dbInsert, dbSelectGet } = await buildTestApp({
+        summarize,
+        docSummaryRow: {
+          path: MD_EVENT.path,
+          contentHash: MD_EVENT.contentHash,
+          summary: 'кэшированная аннотация',
+        },
+      });
+
+      await processChanges(app, TEST_USER_ID, [MD_EVENT]);
+
+      expect(dbSelectGet).toHaveBeenCalled();
+      expect(summarize).not.toHaveBeenCalled();
+      expect(pointsOf(upsert)[0]?.payload.text).toContain(
+        'Аннотация документа: кэшированная аннотация',
+      );
+      expect(dbInsert).not.toHaveBeenCalledWith(docSummaries);
+
+      await app.close();
+    });
+
+    it('recomputes and re-caches the annotation when the content hash changed', async () => {
+      const summarize = vi.fn().mockResolvedValue('новая аннотация');
+      const { app, upsert, dbInsert, dbInsertValues, dbInsertOnConflict } = await buildTestApp({
+        summarize,
+        docSummaryRow: {
+          path: MD_EVENT.path,
+          contentHash: 'stale-hash',
+          summary: 'старая аннотация',
+        },
+      });
+
+      await processChanges(app, TEST_USER_ID, [MD_EVENT]);
+
+      expect(summarize).toHaveBeenCalledTimes(1);
+      expect(dbInsert).toHaveBeenCalledWith(docSummaries);
+      expect(dbInsertValues).toHaveBeenCalledWith({
+        path: MD_EVENT.path,
+        contentHash: MD_EVENT.contentHash,
+        summary: 'новая аннотация',
+      });
+      expect(dbInsertOnConflict).toHaveBeenCalled();
+      expect(pointsOf(upsert)[0]?.payload.text).toContain('Аннотация документа: новая аннотация');
+
+      await app.close();
+    });
+
+    it('indexes the file normally when the chat client fails', async () => {
+      const summarize = vi.fn().mockRejectedValue(new Error('gateway down'));
+      const { app, upsert, confirmIndexed, failIndexed, fileFailed } = await buildTestApp({
+        summarize,
+      });
+
+      await processChanges(app, TEST_USER_ID, [MD_EVENT]);
+
+      expect(confirmIndexed).toHaveBeenCalledWith(MD_EVENT.path);
+      expect(failIndexed).not.toHaveBeenCalled();
+      expect(fileFailed).toHaveLength(0);
+      expect(pointsOf(upsert)[0]?.payload.text).not.toContain('Аннотация документа');
+
+      await app.close();
+    });
+
+    it('skips a table summary that fails without dropping the row-group chunks', async () => {
+      mockChunkCsv.mockReturnValueOnce(splitTableChunks());
+      const summarize = vi.fn().mockRejectedValue(new Error('gateway down'));
+      const { app, upsert, confirmIndexed } = await buildTestApp({ summarize });
+
+      await processChanges(app, TEST_USER_ID, [CSV_EVENT]);
+
+      expect(pointsOf(upsert)).toHaveLength(2);
+      expect(confirmIndexed).toHaveBeenCalledWith(CSV_EVENT.path);
+
+      await app.close();
+    });
+
+    it('makes no chat call at all when no summarizer is configured', async () => {
+      const { app, upsert, dbSelectGet } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [MD_EVENT]);
+
+      expect(dbSelectGet).not.toHaveBeenCalled();
+      expect(pointsOf(upsert)[0]?.payload.text).not.toContain('Аннотация документа');
+
+      await app.close();
+    });
+
+    it('drops the cached annotation of a deleted file', async () => {
+      const { app, dbDelete } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'notes/to-delete.md', type: 'deleted', contentHash: 'abc123' },
+      ]);
+
+      expect(dbDelete).toHaveBeenCalledWith(sections);
+      expect(dbDelete).toHaveBeenCalledWith(docSummaries);
+
+      await app.close();
+    });
+
+    it('carries the cached annotation over to the new path on a move', async () => {
+      const { app, dbUpdate, dbSet } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [
+        {
+          path: 'notes/new-location.md',
+          type: 'moved',
+          contentHash: 'abc123',
+          oldPath: 'notes/old-location.md',
+        },
+      ]);
+
+      expect(dbUpdate).toHaveBeenCalledWith(docSummaries);
+      expect(dbSet).toHaveBeenCalledWith({ path: 'notes/new-location.md' });
+
+      await app.close();
+    });
+
+    // Last on purpose: the flag is read at config-parse time, so the module registry has
+    // to be reset — after which the table objects imported here are no longer the ones
+    // the freshly loaded pipeline compares against.
+    it('INDEX_DOC_SUMMARY=false leaves chunk text untouched', async () => {
+      process.env.INDEX_DOC_SUMMARY = 'false';
+      vi.resetModules();
+      try {
+        const summarize = vi.fn().mockResolvedValue('аннотация');
+        const { app, upsert } = await buildTestApp({ summarize });
+
+        await processChanges(app, TEST_USER_ID, [MD_EVENT]);
+
+        expect(summarize).not.toHaveBeenCalled();
+        expect(pointsOf(upsert)[0]?.payload.text).not.toContain('Аннотация документа');
+
+        await app.close();
+      } finally {
+        delete process.env.INDEX_DOC_SUMMARY;
+        vi.resetModules();
+      }
     });
   });
 });

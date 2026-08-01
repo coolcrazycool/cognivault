@@ -46,3 +46,18 @@ export const sections = sqliteTable(
 
 export type Section = typeof sections.$inferSelect;
 export type NewSection = typeof sections.$inferInsert;
+
+/**
+ * Cached one-paragraph annotations of whole documents, prepended to every chunk of the
+ * file before it is embedded. The cache is keyed by path and validated by
+ * `content_hash`: an unchanged file never pays for the LLM call again, which is what
+ * makes a full reindex cheap (the table lives on the backend's persistent volume).
+ */
+export const docSummaries = sqliteTable('doc_summaries', {
+  path: text('path').primaryKey(),
+  contentHash: text('content_hash').notNull(),
+  summary: text('summary').notNull(),
+});
+
+export type DocSummary = typeof docSummaries.$inferSelect;
+export type NewDocSummary = typeof docSummaries.$inferInsert;

@@ -4,8 +4,8 @@ import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDatabase } from '../client.js';
-import type { IndexedFile, NewIndexedFile, NewSection } from '../schema.js';
-import { indexedFiles, sections } from '../schema.js';
+import type { IndexedFile, NewDocSummary, NewIndexedFile, NewSection } from '../schema.js';
+import { docSummaries, indexedFiles, sections } from '../schema.js';
 
 describe('Drizzle schema and DB client', () => {
   let db: ReturnType<typeof createDatabase>['db'];
@@ -272,6 +272,65 @@ describe('Drizzle schema and DB client', () => {
       expect(
         db.select().from(sections).where(eq(sections.path, '/archive/moved.md')).all(),
       ).toHaveLength(2);
+    });
+  });
+
+  describe('doc_summaries table (annotation cache)', () => {
+    const makeSummary = (overrides: Partial<NewDocSummary> = {}): NewDocSummary => ({
+      path: '/notes/annotated.md',
+      contentHash: 'hash-v1',
+      summary: 'Документ о настройке mTLS.',
+      ...overrides,
+    });
+
+    it('creates the doc_summaries table', () => {
+      const result = sqlite
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='doc_summaries'")
+        .get();
+      expect(result).toBeDefined();
+    });
+
+    it('has path, content_hash, summary columns with path as primary key', () => {
+      const cols = sqlite.prepare('PRAGMA table_info(doc_summaries)').all() as Array<{
+        name: string;
+        notnull: number;
+        pk: number;
+      }>;
+      expect(cols.map((c) => c.name)).toEqual(['path', 'content_hash', 'summary']);
+      expect(cols.find((c) => c.name === 'path')?.pk).toBe(1);
+      for (const name of ['content_hash', 'summary']) {
+        expect(cols.find((c) => c.name === name)?.notnull, `${name} NOT NULL`).toBe(1);
+      }
+    });
+
+    it('refreshes the cached summary on conflict with the path', () => {
+      db.insert(docSummaries).values(makeSummary()).run();
+      db.insert(docSummaries)
+        .values(makeSummary({ contentHash: 'hash-v2', summary: 'Обновлённая аннотация.' }))
+        .onConflictDoUpdate({
+          target: docSummaries.path,
+          set: { contentHash: 'hash-v2', summary: 'Обновлённая аннотация.' },
+        })
+        .run();
+
+      const rows = db
+        .select()
+        .from(docSummaries)
+        .where(eq(docSummaries.path, '/notes/annotated.md'))
+        .all();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.contentHash).toBe('hash-v2');
+      expect(rows[0]?.summary).toBe('Обновлённая аннотация.');
+    });
+
+    it('drops the cached summary of a deleted path', () => {
+      db.insert(docSummaries)
+        .values(makeSummary({ path: '/notes/gone.md' }))
+        .run();
+      db.delete(docSummaries).where(eq(docSummaries.path, '/notes/gone.md')).run();
+      expect(
+        db.select().from(docSummaries).where(eq(docSummaries.path, '/notes/gone.md')).all(),
+      ).toEqual([]);
     });
   });
 });

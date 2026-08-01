@@ -7,7 +7,7 @@ import fp from 'fastify-plugin';
 import matter from 'gray-matter';
 import { v5 as uuidv5 } from 'uuid';
 import { config } from '../config.js';
-import { indexedFiles, type NewSection, sections } from '../db/schema.js';
+import { docSummaries, indexedFiles, type NewSection, sections } from '../db/schema.js';
 import { BM25_VECTOR_NAME, buildSparseVector, DENSE_VECTOR_NAME } from '../lib/bm25.js';
 import { chunkCanvas } from '../lib/canvas-chunker.js';
 import { isChunkParseError } from '../lib/chunk-errors.js';
@@ -15,19 +15,45 @@ import type { MarkdownSection } from '../lib/chunker.js';
 import { chunkMarkdownWithSections } from '../lib/chunker.js';
 import { chunkCsv } from '../lib/csv-chunker.js';
 import { chunkExcalidraw } from '../lib/excalidraw-chunker.js';
+import { GigaChatChatClient } from '../lib/gigachat-chat.js';
 import { extractImageBacklinks, IMAGE_EXTENSIONS } from '../lib/image-tracker.js';
 import type { FileChangeEvent } from '../lib/indexer.js';
 import { chunkPdf } from '../lib/pdf-chunker.js';
 import type { VaultManager } from '../lib/vault.js';
 
+/**
+ * The only thing the pipeline needs from a chat model. Narrow on purpose: it keeps the
+ * summarization paths testable with a two-line fake and independent of GigaChat.
+ */
+export interface Summarizer {
+  complete(prompt: string, opts?: { system?: string }): Promise<string>;
+}
+
 declare module 'fastify' {
   interface FastifyInstance {
     processFileChanges: (userId: string, events: FileChangeEvent[]) => void;
+    /** Chat model used for index-time summaries; undefined when unavailable/disabled. */
+    summarizer: Summarizer | undefined;
   }
 }
 
 // UUID v5 DNS namespace constant
 const UUID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+
+const DOC_SUMMARY_PREFIX = 'Аннотация документа: ';
+const DOC_SUMMARY_PROMPT =
+  'Аннотация 1–2 предложения: о чём документ. Ответь только текстом аннотации.\n\nДокумент:\n';
+/** How much of a document the annotation prompt sees — the opening is the informative part. */
+const DOC_SUMMARY_MAX_CHARS = 4_000;
+
+const TABLE_SUMMARY_PROMPT =
+  'Опиши таблицу 1–2 предложениями: о чём она, перечисли колонки и по 1–2 примера значений. ' +
+  'Ответь только текстом описания.\n\nТаблица (заголовок и первые строки):\n';
+/** Context prefix + header + separator + ~10 rows of the table's first chunk. */
+const TABLE_SUMMARY_HEAD_LINES = 14;
+
+/** Number of chat calls made since start — logged so indexing cost stays visible. */
+let summaryCallCount = 0;
 
 interface Chunk {
   text: string;
@@ -35,6 +61,23 @@ interface Chunk {
   chunkIndex: number;
   /** Only markdown is section-aware; other formats have no parent document. */
   parentId?: string;
+  /**
+   * What the chunk holds: `'text'`, `'table_rows'` (a row group of a split table) or
+   * `'table_summary'` (the generated description below). Chunkers that predate the
+   * field simply leave it out, hence the tolerant `?? 'text'` at every read.
+   */
+  contentKind?: string;
+  /**
+   * The chunk's own text, without the document annotation {@link enrichChunks} prepends.
+   *
+   * Only the lexical (BM25) vector uses it. The annotation is identical across every
+   * chunk of a document, so feeding it to the sparse encoder would give each chunk the
+   * same block of annotation terms — every chunk of the document would then fire on any
+   * query touching them — and would inflate the BM25 length normalizer, damping the
+   * terms the chunk is actually about. The dense vector and the payload keep the
+   * annotation: that is where the extra context helps.
+   */
+  lexicalText?: string;
 }
 
 /** Payload keys every non-markdown format shares (markdown fills them from frontmatter). */
@@ -112,6 +155,177 @@ function writeSections(
 }
 
 /**
+ * Runs one summarization call. Never throws: every caller treats a summary as an
+ * optional bonus, so a dead gateway degrades indexing quality instead of stopping it.
+ */
+async function summarize(
+  fastify: FastifyInstance,
+  userId: string,
+  filePath: string,
+  prompt: string,
+  what: string,
+): Promise<string | undefined> {
+  const summarizer = fastify.summarizer;
+  if (!summarizer) {
+    return undefined;
+  }
+  try {
+    const text = await summarizer.complete(prompt);
+    summaryCallCount += 1;
+    fastify.log.info({ userId, path: filePath, what, summaryCallCount }, 'Summary generated');
+    return text.trim().length > 0 ? text.trim() : undefined;
+  } catch (err) {
+    fastify.log.warn({ userId, path: filePath, what, err }, 'Summary call failed — skipping');
+    return undefined;
+  }
+}
+
+/**
+ * Groups of consecutive chunks that came from the SAME split table: same parent section,
+ * same section path, `content_kind: 'table_rows'`. A table small enough to survive as one
+ * chunk produces a run of length 1 and gets no summary — the chunk already is the table.
+ */
+function splitTableRuns(chunks: Chunk[]): Chunk[][] {
+  const runs: Chunk[][] = [];
+  let current: Chunk[] = [];
+  const keyOf = (chunk: Chunk) => `${chunk.parentId ?? ''}::${chunk.sectionPath}`;
+
+  for (const chunk of chunks) {
+    if ((chunk.contentKind ?? 'text') !== 'table_rows') {
+      current = [];
+      continue;
+    }
+    const previous = current[current.length - 1];
+    if (previous && keyOf(previous) === keyOf(chunk)) {
+      current.push(chunk);
+    } else {
+      current = [chunk];
+      runs.push(current);
+    }
+  }
+
+  return runs.filter((run) => run.length > 1);
+}
+
+/**
+ * Adds one `table_summary` point per split table: a short description of what the table
+ * holds, carrying the table's own `parent_id` so a hit expands to the whole table.
+ */
+async function appendTableSummaries(
+  fastify: FastifyInstance,
+  userId: string,
+  event: FileChangeEvent,
+  chunks: Chunk[],
+): Promise<Chunk[]> {
+  const runs = splitTableRuns(chunks);
+  if (runs.length === 0) {
+    return chunks;
+  }
+
+  const result = [...chunks];
+  for (const run of runs) {
+    const head = run[0] as Chunk;
+    const excerpt = head.text.split('\n').slice(0, TABLE_SUMMARY_HEAD_LINES).join('\n');
+    const summary = await summarize(
+      fastify,
+      userId,
+      event.path,
+      `${TABLE_SUMMARY_PROMPT}${excerpt}`,
+      'table_summary',
+    );
+    if (summary === undefined) {
+      continue;
+    }
+    result.push({
+      text: summary,
+      sectionPath: head.sectionPath,
+      chunkIndex: result.length,
+      parentId: head.parentId,
+      contentKind: 'table_summary',
+    });
+  }
+  return result;
+}
+
+/**
+ * The document's annotation, from cache when the file's content hash is unchanged.
+ * The cache survives a reindex (SQLite lives on the persistent volume), which is what
+ * keeps re-embedding a whole vault free of chat calls.
+ */
+async function resolveDocSummary(
+  fastify: FastifyInstance,
+  userId: string,
+  event: FileChangeEvent,
+  chunks: Chunk[],
+): Promise<string | undefined> {
+  const db = fastify.getUserDbById(userId);
+  const cached = db.select().from(docSummaries).where(eq(docSummaries.path, event.path)).get();
+  if (cached && cached.contentHash === event.contentHash) {
+    return cached.summary;
+  }
+
+  const body = chunks
+    .map((chunk) => chunk.text)
+    .join('\n\n')
+    .slice(0, DOC_SUMMARY_MAX_CHARS);
+  const summary = await summarize(
+    fastify,
+    userId,
+    event.path,
+    `${DOC_SUMMARY_PROMPT}${body}`,
+    'doc_summary',
+  );
+  if (summary === undefined) {
+    return undefined;
+  }
+
+  db.insert(docSummaries)
+    .values({ path: event.path, contentHash: event.contentHash, summary })
+    .onConflictDoUpdate({
+      target: docSummaries.path,
+      set: { contentHash: event.contentHash, summary },
+    })
+    .run();
+
+  return summary;
+}
+
+/**
+ * Enriches a file's chunks before they are embedded: a description point for every
+ * split table, and the document annotation prepended to every chunk's text (the same
+ * text is embedded and stored in the payload, so retrieval and generation agree).
+ */
+async function enrichChunks(
+  fastify: FastifyInstance,
+  userId: string,
+  event: FileChangeEvent,
+  chunks: Chunk[],
+): Promise<Chunk[]> {
+  if (!fastify.summarizer) {
+    return chunks;
+  }
+
+  let enriched = chunks;
+  if (config.INDEX_TABLE_SUMMARY) {
+    enriched = await appendTableSummaries(fastify, userId, event, chunks);
+  }
+
+  if (config.INDEX_DOC_SUMMARY) {
+    const summary = await resolveDocSummary(fastify, userId, event, chunks);
+    if (summary !== undefined) {
+      enriched = enriched.map((chunk) => ({
+        ...chunk,
+        text: `${DOC_SUMMARY_PREFIX}${summary}\n\n${chunk.text}`,
+        // Kept for the sparse vector — see Chunk.lexicalText.
+        lexicalText: chunk.text,
+      }));
+    }
+  }
+
+  return enriched;
+}
+
+/**
  * Embed chunks and upsert to tenant Qdrant, then clean up stale vectors.
  */
 async function embedAndUpsert(
@@ -143,20 +357,25 @@ async function embedAndUpsert(
     return;
   }
 
+  // Table descriptions and the document annotation are added BEFORE embedding, so the
+  // dense vector and the payload text are the same string. The sparse vector is the one
+  // exception and is built from the un-annotated text — see Chunk.lexicalText.
+  const enriched = await enrichChunks(fastify, userId, event, chunks);
+
   const embedder = fastify.getUserEmbedder(userId);
-  const embeddings = await embedder.embed(chunks.map((c) => c.text));
+  const embeddings = await embedder.embed(enriched.map((c) => c.text));
   fastify.metrics.embeddingRequests.inc({ user_id: userId });
-  fastify.metrics.chunksProcessed.inc({ user_id: userId }, chunks.length);
+  fastify.metrics.chunksProcessed.inc({ user_id: userId }, enriched.length);
 
   const ext = path.extname(event.path);
   const title = path.basename(event.path, ext);
 
-  const points = chunks.map((chunk, i) => ({
+  const points = enriched.map((chunk, i) => ({
     id: chunkId(userId, event.path, i),
     // Named vectors: dense embedding for semantic recall, BM25 sparse vector for lexical.
     vector: {
       [DENSE_VECTOR_NAME]: embeddings[i] as number[],
-      [BM25_VECTOR_NAME]: buildSparseVector(chunk.text),
+      [BM25_VECTOR_NAME]: buildSparseVector(chunk.lexicalText ?? chunk.text),
     },
     payload: {
       path: event.path,
@@ -164,6 +383,7 @@ async function embedAndUpsert(
       chunk_index: i,
       section_path: chunk.sectionPath,
       parent_id: chunk.parentId ?? null,
+      content_kind: chunk.contentKind ?? 'text',
       content_hash: event.contentHash,
       text: chunk.text,
       ...extraPayload,
@@ -177,7 +397,7 @@ async function embedAndUpsert(
     filter: {
       must: [
         { key: 'path', match: { value: event.path } },
-        { key: 'chunk_index', range: { gte: chunks.length } },
+        { key: 'chunk_index', range: { gte: enriched.length } },
       ],
     },
   });
@@ -381,9 +601,11 @@ async function processDeleted(
   });
 
   // Vectors are gone, so the parent sections they expand into must go too — otherwise
-  // the table grows forever with rows nothing can ever reference.
+  // the table grows forever with rows nothing can ever reference. The cached document
+  // annotation is dead weight for the same reason.
   const db = fastify.getUserDbById(userId);
   db.delete(sections).where(eq(sections.path, event.path)).run();
+  db.delete(docSummaries).where(eq(docSummaries.path, event.path)).run();
 }
 
 async function processMoved(
@@ -426,9 +648,49 @@ async function processMoved(
   // rows — no re-chunking, no re-embedding, and existing chunk payloads stay valid.
   const db = fastify.getUserDbById(userId);
   db.update(sections).set({ path: event.path }).where(eq(sections.path, oldPath)).run();
+  // The annotation describes the content, not the location — carry the cache row over
+  // so a move does not silently pay for a fresh chat call on the next update.
+  db.update(docSummaries).set({ path: event.path }).where(eq(docSummaries.path, oldPath)).run();
+}
+
+/**
+ * The shared chat client for index-time summaries, or undefined when summaries are off
+ * or unreachable. It exists only for GigaChat: the mTLS certificate is what authorizes
+ * the call, and an OpenAI deployment has no equivalent credential here.
+ */
+function createSummarizer(fastify: FastifyInstance): Summarizer | undefined {
+  if (!config.INDEX_DOC_SUMMARY && !config.INDEX_TABLE_SUMMARY) {
+    return undefined;
+  }
+  if (config.EMBEDDING_PROVIDER !== 'gigachat') {
+    return undefined;
+  }
+  if (!config.GIGACHAT_CERT_PATH || !config.GIGACHAT_KEY_PATH) {
+    fastify.log.warn('Index summaries enabled but GigaChat certificate is missing — disabled');
+    return undefined;
+  }
+  return new GigaChatChatClient({
+    baseUrl: config.GIGACHAT_BASE_URL,
+    model: config.GIGACHAT_CHAT_MODEL,
+    certPath: config.GIGACHAT_CERT_PATH,
+    keyPath: config.GIGACHAT_KEY_PATH,
+    keyPassphrase: config.GIGACHAT_KEY_PASSPHRASE,
+    caPath: config.GIGACHAT_CA_PATH,
+    verifySsl: config.GIGACHAT_VERIFY_SSL,
+    maxTokens: config.GIGACHAT_CHAT_MAX_TOKENS,
+    timeoutMs: config.GIGACHAT_CHAT_TIMEOUT_MS,
+    maxRetries: config.GIGACHAT_MAX_RETRIES,
+    retryBaseDelayMs: config.GIGACHAT_RETRY_BASE_DELAY_MS,
+  });
 }
 
 async function pipelinePlugin(fastify: FastifyInstance): Promise<void> {
+  // A decoration already in place wins: that is how tests (and any future plugin)
+  // supply their own chat client without reaching into this module.
+  if (!fastify.hasDecorator('summarizer')) {
+    fastify.decorate('summarizer', createSummarizer(fastify));
+  }
+
   function processFileChanges(userId: string, events: FileChangeEvent[]): void {
     const indexerEntry = fastify.indexers.get(userId);
     if (!indexerEntry) {
