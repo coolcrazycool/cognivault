@@ -111,9 +111,28 @@ describe('chunkCsv - edge cases', () => {
     );
     const chunks = chunkCsv(csv, 'test.csv');
     expect(chunks).toHaveLength(1);
+    // Line 0 is the breadcrumb, line 1 the blank line that closes it.
     const lines = chunks[0]?.text.split('\n') ?? [];
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain('Alice');
-    expect(lines[1]).toContain('Bob');
+    expect(lines).toHaveLength(4);
+    expect(lines[2]).toContain('Alice');
+    expect(lines[3]).toContain('Bob');
+  });
+});
+
+describe('chunkCsv - breadcrumb', () => {
+  it('opens every chunk with its sectionPath so the file name is searchable', () => {
+    const csv = makeCsv(
+      ['Name', 'Age'],
+      Array.from({ length: 45 }, (_, i) => [`Person${i + 1}`, `${20 + i}`]),
+    );
+    const chunks = chunkCsv(csv, 'tariffs');
+
+    expect(chunks).toHaveLength(2);
+    for (const chunk of chunks) {
+      // Without this a row batch says "Name: Person7, Age: 26" and nothing else — the
+      // file name and the row range live only in the payload, so neither is findable.
+      expect(chunk.text.startsWith(`${chunk.sectionPath}\n\n`)).toBe(true);
+      expect(chunk.text).toContain('tariffs');
+    }
   });
 });

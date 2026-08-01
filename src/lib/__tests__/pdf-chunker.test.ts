@@ -10,6 +10,7 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', () => {
 
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { ChunkParseError } from '../chunk-errors.js';
+import { countTokens, MAX_CHUNK_TOKENS } from '../chunker.js';
 import { chunkPdf, extractPdfPages } from '../pdf-chunker.js';
 
 // Helper to create a mock page with given text content
@@ -176,12 +177,37 @@ describe('chunkPdf', () => {
     });
   });
 
-  it('returns correct text content in each chunk', async () => {
+  it('returns correct text content in each chunk, behind the breadcrumb', async () => {
     const pageText = generateText(50);
     setupMockDoc([pageText]);
     const buffer = Buffer.from('fake pdf');
     const chunks = await chunkPdf(buffer, 'test.pdf');
     expect(chunks).toHaveLength(1);
-    expect(chunks[0]?.text).toBe(pageText);
+    expect(chunks[0]?.text).toBe(`test.pdf > Page 1\n\n${pageText}`);
+  });
+
+  it('opens every chunk of a split page with its breadcrumb', async () => {
+    setupMockDoc([`${generateText(300)}\n\n${generateText(350)}`]);
+    const buffer = Buffer.from('fake pdf');
+    const chunks = await chunkPdf(buffer, 'report.pdf');
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      // The page number is the only handle on a PDF chunk; payload-only it is invisible
+      // to both the dense and the sparse vector.
+      expect(chunk.text.startsWith('report.pdf > Page 1\n\n')).toBe(true);
+    }
+  });
+
+  it('cuts a page that has no paragraph breaks at all', async () => {
+    // Extracted PDF text is joined with spaces, so a whole page is often one "paragraph".
+    setupMockDoc([generateText(1400)]);
+    const buffer = Buffer.from('fake pdf');
+    const chunks = await chunkPdf(buffer, 'wall.pdf');
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(countTokens(chunk.text)).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+    }
   });
 });

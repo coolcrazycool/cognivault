@@ -2,12 +2,14 @@
 // Parses .excalidraw files and extracts text elements as chunks.
 // Very short adjacent text elements (<5 tokens each) are merged into a single chunk.
 
-import { getEncoding } from 'js-tiktoken';
 import { ChunkParseError } from './chunk-errors.js';
-import { type ContentKind, MAX_CHUNK_TOKENS, splitTextByTokenBudget } from './chunker.js';
-
-// Initialize encoder once at module level (matches chunker.ts)
-const enc = getEncoding('cl100k_base');
+import {
+  breadcrumbBodyBudget,
+  type ContentKind,
+  countTokens,
+  splitTextByTokenBudget,
+  withBreadcrumb,
+} from './chunker.js';
 
 // ── Type guards ──
 
@@ -39,10 +41,6 @@ export interface ExcalidrawChunk {
 // ── Token counting ──
 
 const SHORT_ELEMENT_TOKEN_THRESHOLD = 5;
-
-function countTokens(text: string): number {
-  return enc.encode(text).length;
-}
 
 // ── Main export ──
 
@@ -141,12 +139,19 @@ export function chunkExcalidraw(content: string, drawingName: string): Excalidra
 
   // Build chunks from groups. A single element (or a long run of merged short ones)
   // can outgrow the chunk budget, so each group is cut on paragraph boundaries; all
-  // parts of a group keep its path and are told apart by chunkIndex.
+  // parts of a group keep its path and are told apart by chunkIndex. The breadcrumb
+  // opens every part: a few words on a diagram are only findable through the drawing's
+  // name, which lives nowhere else in the text.
   const chunks: ExcalidrawChunk[] = [];
   groups.forEach((group, idx) => {
     const sectionPath = `${drawingName} > Text ${idx + 1}`;
-    for (const text of splitTextByTokenBudget(group, MAX_CHUNK_TOKENS)) {
-      chunks.push({ text, sectionPath, chunkIndex: chunks.length, contentKind: 'text' });
+    for (const text of splitTextByTokenBudget(group, breadcrumbBodyBudget(sectionPath))) {
+      chunks.push({
+        text: withBreadcrumb(sectionPath, text),
+        sectionPath,
+        chunkIndex: chunks.length,
+        contentKind: 'text',
+      });
     }
   });
 

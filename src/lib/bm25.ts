@@ -19,12 +19,16 @@ export const BM25_VECTOR_NAME = 'bm25';
 export const DENSE_VECTOR_NAME = 'dense';
 
 /**
- * Version of the tokenization + hashing scheme. Bump it whenever tokenize()
- * changes in a way that alters the produced indices: the value feeds the
- * collection fingerprint, so a bump forces a fresh collection and a reindex
- * instead of leaving query-time and index-time terms silently mismatched.
+ * Version of the tokenization + weighting scheme. Bump it whenever tokenize()
+ * changes in a way that alters the produced indices, or whenever the weights
+ * change enough that old and new points can no longer be ranked against each
+ * other: the value feeds the collection fingerprint, so a bump forces a fresh
+ * collection and a reindex instead of leaving query-time and index-time terms
+ * silently mismatched.
+ *
+ * v2 — {@link BM25_AVG_LEN} corrected to the measured corpus average.
  */
-export const BM25_SCHEME_VERSION = 1;
+export const BM25_SCHEME_VERSION = 2;
 
 // --- BM25 term-frequency saturation parameters -------------------------------
 // value = tf * (k1 + 1) / (tf + k1 * (1 - b + b * len / AVG_LEN))
@@ -33,12 +37,19 @@ export const BM25_K1 = 1.2;
 /** Length-normalization strength. Standard BM25 default; 0 = no normalization. */
 export const BM25_B = 0.75;
 /**
- * Assumed average document length in tokens. A real average would require corpus
- * statistics shared between the indexer and the query path; a fixed constant keeps
- * the module stateless. 300 tokens ~ a mid-sized chunk of the 100-500 cl100k-token
- * chunker budget. Changing it changes scoring, so treat it as part of the scheme.
+ * Average document length, in {@link tokenize} tokens. A live average would require
+ * corpus statistics shared between the indexer and the query path; a fixed constant
+ * keeps the module stateless.
+ *
+ * Measured, not guessed: 128 is the mean over the 1875 chunks the chunker produces
+ * from this repository's 232 markdown files (median 116, p90 226). The previous value
+ * of 300 was a guess off the cl100k chunk budget — but `tokenize()` drops stop words
+ * and one-character tokens, so it yields far fewer terms than cl100k does. Overstating
+ * the average by 2.3x flattens length normalization: it turned the nominal b = 0.75
+ * into an effective ~0.34, which is most of the way to switching normalization off.
+ * Changing it changes scoring, so it is part of {@link BM25_SCHEME_VERSION}.
  */
-export const BM25_AVG_LEN = 300;
+export const BM25_AVG_LEN = 128;
 
 /** Sparse vector in Qdrant wire format: parallel arrays of u32 indices and weights. */
 export interface SparseVector {

@@ -15,6 +15,11 @@ function paragraph(marker: string): string {
   return `${marker} ${Array.from({ length: 60 }, (_, i) => `w${i}`).join(' ')}`;
 }
 
+/** Chunk text with its breadcrumb line stripped off. */
+function bodyOf(chunk: { text: string; sectionPath: string }): string {
+  return chunk.text.slice(`${chunk.sectionPath}\n\n`.length);
+}
+
 // Helper: build a minimal Excalidraw JSON string
 function makeExcalidraw(elements: object[]): string {
   return JSON.stringify({
@@ -82,7 +87,7 @@ describe('chunkExcalidraw - text element extraction', () => {
   it('includes trimmed element text in chunk text', () => {
     const file = makeExcalidraw([textElement('1', '  Hello excalidraw  ')]);
     const chunks = chunkExcalidraw(file, 'MyDrawing');
-    expect(chunks[0]?.text).toBe('Hello excalidraw');
+    expect(chunks[0]?.text).toBe('MyDrawing > Text 1\n\nHello excalidraw');
   });
 });
 
@@ -92,7 +97,7 @@ describe('chunkExcalidraw - element type filtering', () => {
 
     const chunks = chunkExcalidraw(file, 'MyDrawing');
     expect(chunks.length).toBe(1);
-    expect(chunks[0]?.text).toBe('Only text');
+    expect(chunks[0]?.text).toBe('MyDrawing > Text 1\n\nOnly text');
   });
 
   it('skips arrow elements', () => {
@@ -117,7 +122,7 @@ describe('chunkExcalidraw - element type filtering', () => {
 
     const chunks = chunkExcalidraw(file, 'MyDrawing');
     expect(chunks.length).toBe(1);
-    expect(chunks[0]?.text).toBe('Live text');
+    expect(chunks[0]?.text).toBe('MyDrawing > Text 1\n\nLive text');
   });
 
   it('skips empty text elements', () => {
@@ -156,7 +161,7 @@ describe('chunkExcalidraw - short element merging', () => {
     const file = makeExcalidraw([textElement('1', 'OK'), textElement('2', 'Yes')]);
 
     const chunks = chunkExcalidraw(file, 'MyDrawing');
-    expect(chunks[0]?.text).toBe('OK\nYes');
+    expect(chunks[0]?.text).toBe('MyDrawing > Text 1\n\nOK\nYes');
   });
 
   it('does not merge elements that exceed 5 tokens', () => {
@@ -202,11 +207,17 @@ describe('chunkExcalidraw - chunk size budget', () => {
     const chunks = chunkExcalidraw(drawingWithLongElement(), 'MyDrawing');
     const parts = chunks.filter((chunk) => chunk.sectionPath === 'MyDrawing > Text 1');
 
-    expect(parts.map((part) => part.text).join('\n\n')).toBe(longText);
+    expect(parts.map(bodyOf).join('\n\n')).toBe(longText);
     for (const part of parts) {
-      for (const line of part.text.split('\n\n')) {
+      for (const line of bodyOf(part).split('\n\n')) {
         expect(paragraphs).toContain(line);
       }
+    }
+  });
+
+  it('opens every part with the breadcrumb, not only the first', () => {
+    for (const chunk of chunkExcalidraw(drawingWithLongElement(), 'MyDrawing')) {
+      expect(chunk.text.startsWith(`${chunk.sectionPath}\n\n`)).toBe(true);
     }
   });
 

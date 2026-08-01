@@ -490,6 +490,108 @@ describe('chunkMarkdown - table-aware chunking', () => {
   });
 });
 
+describe('chunkMarkdown - block boundaries', () => {
+  it('keeps list items apart instead of gluing them into one nonsense word', () => {
+    const body = '## Настройка\n\n- открыть настройки\n- указать адрес сервера\n- сохранить';
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    const text = chunks[0]?.text ?? '';
+    expect(text).toContain('- открыть настройки\n- указать адрес сервера\n- сохранить');
+    // The glued form is the defect: it is a token no query can ever match.
+    expect(text).not.toContain('настройкиуказать');
+  });
+
+  it('numbers an ordered list and indents a nested one under its item', () => {
+    const body = '## Шаги\n\n1. первый шаг\n2. второй шаг\n   - вложенный пункт';
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks[0]?.text).toContain('1. первый шаг\n2. второй шаг\n   - вложенный пункт');
+  });
+
+  it('keeps task-list checkboxes and separates blockquote paragraphs', () => {
+    const body =
+      '## Разное\n\n- [ ] не сделано\n- [x] сделано\n\n> первый абзац\n>\n> второй абзац';
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    const text = chunks[0]?.text ?? '';
+    expect(text).toContain('- [ ] не сделано\n- [x] сделано');
+    expect(text).toContain('первый абзац\n\nвторой абзац');
+  });
+
+  it('honours a hard line break inside a paragraph', () => {
+    const chunks = chunkMarkdown('## Перенос\n\nпервая строка  \nвторая строка', { title: 'Док' });
+
+    expect(chunks[0]?.text).toContain('первая строка\nвторая строка');
+  });
+});
+
+describe('chunkMarkdown - heading of a merged short section', () => {
+  it('keeps the heading of a sub-MIN_CHUNK_TOKENS section in the merged chunk text', () => {
+    const body = [
+      '## Хранилище',
+      '',
+      generateLongParagraph(110),
+      '',
+      '### Квота арендатора',
+      '',
+      'до 20 ГБ.',
+    ].join('\n');
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks).toHaveLength(1);
+    // The short section has no sectionPath of its own, so the body is the only place
+    // its heading words can survive.
+    expect(chunks[0]?.sectionPath).toBe('Док > Хранилище');
+    expect(chunks[0]?.text).toContain('### Квота арендатора');
+    expect(chunks[0]?.text).toContain('до 20 ГБ.');
+  });
+
+  it('keeps the merged heading on the parent section as well', () => {
+    const body = `## Big\n\n${generateLongParagraph(110)}\n\n## Приложение Б\n\nкоротко.`;
+    const { sections } = chunkMarkdownWithSections(body, { title: 'Док' });
+
+    expect(sections).toHaveLength(1);
+    expect(sections[0]?.text).toContain('## Приложение Б');
+  });
+});
+
+describe('chunkMarkdown - oversized single node', () => {
+  it('cuts a paragraph larger than the budget instead of emitting it whole', () => {
+    const body = `## Стена текста\n\n${generateLongParagraph(1000)}`;
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(countTokens(chunk.text)).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+      expect(chunk.text.startsWith('Док > Стена текста\n\n')).toBe(true);
+    }
+    // The tail used to reach the payload but not the vector — the embedder truncated it.
+    expect(chunks[chunks.length - 1]?.text).toContain('word999');
+  });
+
+  it('cuts an oversized code block on line boundaries and keeps every part in budget', () => {
+    const lines = Array.from({ length: 400 }, (_, i) => `const value${i} = compute(${i});`);
+    const body = `## Листинг\n\n\`\`\`ts\n${lines.join('\n')}\n\`\`\``;
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(countTokens(chunk.text)).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+    }
+    expect(chunks.map((chunk) => chunk.text).join('\n')).toContain(
+      'const value399 = compute(399);',
+    );
+  });
+
+  it('keeps a table on the table path even when the prose budget is tighter', () => {
+    const { markdown } = makeTable(100);
+    const chunks = chunkMarkdown(`## Тарифы\n\n${markdown}`, { title: 'Док' });
+
+    // Row-preserving table splitting must win over the generic oversized-node cut.
+    expect(chunks.every((chunk) => chunk.contentKind === 'table_rows')).toBe(true);
+  });
+});
+
 describe('chunkMarkdown - undersized tail handling', () => {
   it('merges a short trailing section into the last chunk of its predecessor', () => {
     const body = [
@@ -505,8 +607,7 @@ describe('chunkMarkdown - undersized tail handling', () => {
     ].join('\n');
     const chunks = chunkMarkdown(body, { title: 'T' });
 
-    expect(chunks).toHaveLength(2);
-    const last = chunks[1];
+    const last = chunks[chunks.length - 1];
     // The tail rides along with the previous chunk instead of forming a stub.
     expect(last?.text).toContain('word299');
     expect(last?.text).toContain('tiny tail sentence.');
@@ -524,7 +625,6 @@ describe('chunkMarkdown - undersized tail handling', () => {
     ].join('\n');
     const chunks = chunkMarkdown(body, { title: 'T' });
 
-    expect(chunks).toHaveLength(2);
     const last = chunks[chunks.length - 1];
     expect(last?.text).toContain('short closing remark.');
     expect(countTokens(last?.text ?? '')).toBeGreaterThanOrEqual(MIN_CHUNK_TOKENS);

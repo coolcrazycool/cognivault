@@ -15,6 +15,11 @@ function paragraph(marker: string): string {
   return `${marker} ${Array.from({ length: 60 }, (_, i) => `w${i}`).join(' ')}`;
 }
 
+/** Chunk text with its breadcrumb line stripped off. */
+function bodyOf(chunk: { text: string; sectionPath: string }): string {
+  return chunk.text.slice(`${chunk.sectionPath}\n\n`.length);
+}
+
 describe('chunkCanvas - text node extraction', () => {
   it('produces one chunk per text node', () => {
     const canvas = JSON.stringify({
@@ -73,7 +78,7 @@ describe('chunkCanvas - text node extraction', () => {
     });
 
     const chunks = chunkCanvas(canvas, 'MyCanvas');
-    expect(chunks[0]?.text).toBe('Hello canvas world');
+    expect(chunks[0]?.text).toBe('MyCanvas > Node 1\n\nHello canvas world');
   });
 });
 
@@ -106,11 +111,17 @@ describe('chunkCanvas - chunk size budget', () => {
     const chunks = chunkCanvas(canvasWithLongNode(), 'MyCanvas');
     const parts = chunks.filter((chunk) => chunk.sectionPath === 'MyCanvas > Node 1');
 
-    expect(parts.map((part) => part.text).join('\n\n')).toBe(longText);
+    expect(parts.map(bodyOf).join('\n\n')).toBe(longText);
     for (const part of parts) {
-      for (const line of part.text.split('\n\n')) {
+      for (const line of bodyOf(part).split('\n\n')) {
         expect(paragraphs).toContain(line);
       }
+    }
+  });
+
+  it('opens every part with the breadcrumb, not only the first', () => {
+    for (const chunk of chunkCanvas(canvasWithLongNode(), 'MyCanvas')) {
+      expect(chunk.text.startsWith(`${chunk.sectionPath}\n\n`)).toBe(true);
     }
   });
 
@@ -141,7 +152,7 @@ describe('chunkCanvas - node type filtering', () => {
 
     const chunks = chunkCanvas(canvas, 'MyCanvas');
     expect(chunks.length).toBe(1);
-    expect(chunks[0]?.text).toBe('Text only');
+    expect(chunks[0]?.text).toBe('MyCanvas > Node 1\n\nText only');
   });
 
   it('skips link nodes (type="link")', () => {
@@ -188,7 +199,7 @@ describe('chunkCanvas - empty and whitespace handling', () => {
 
     const chunks = chunkCanvas(canvas, 'MyCanvas');
     expect(chunks.length).toBe(1);
-    expect(chunks[0]?.text).toBe('Valid text');
+    expect(chunks[0]?.text).toBe('MyCanvas > Node 1\n\nValid text');
   });
 
   it('skips text nodes with whitespace-only text', () => {

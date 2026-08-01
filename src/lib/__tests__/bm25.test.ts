@@ -22,14 +22,26 @@ describe('constants', () => {
     expect(DENSE_VECTOR_NAME).toBe('dense');
   });
 
-  it('exposes a scheme version so tokenization changes can force a reindex', () => {
-    expect(BM25_SCHEME_VERSION).toBe(1);
+  it('exposes a scheme version so scoring changes can force a reindex', () => {
+    // v2: BM25_AVG_LEN moved from a guessed 300 to the measured 128.
+    expect(BM25_SCHEME_VERSION).toBe(2);
   });
 
   it('uses the standard BM25 parameters', () => {
     expect(BM25_K1).toBe(1.2);
     expect(BM25_B).toBe(0.75);
-    expect(BM25_AVG_LEN).toBe(300);
+  });
+
+  it('pins the average length to the measured corpus average', () => {
+    // Mean over the 1875 chunks of this repository's 232 markdown files. An inflated
+    // value silently weakens length normalization: at 300 the effective b was ~0.34.
+    expect(BM25_AVG_LEN).toBe(128);
+  });
+
+  it('normalizes an average-length document to the nominal b', () => {
+    // A document of exactly the average length must get the un-normalized saturation,
+    // which is the property the constant exists for.
+    expect(tfComponent(1, BM25_AVG_LEN)).toBeCloseTo((1 * (BM25_K1 + 1)) / (1 + BM25_K1), 10);
   });
 });
 
@@ -217,10 +229,10 @@ describe('buildSparseVector', () => {
     const value1 = vOnce.values[vOnce.indices.indexOf(index)] as number;
     const value5 = vFive.values[vFive.indices.indexOf(index)] as number;
 
-    // norm = 1.2 * (1 - 0.75 + 0.75 * 10 / 300) = 0.33
-    // tf=1 -> 1 * 2.2 / 1.33 = 1.65413...   tf=5 -> 5 * 2.2 / 5.33 = 2.06378...
-    expect(value1).toBeCloseTo(1.6541353, 6);
-    expect(value5).toBeCloseTo(2.0637898, 6);
+    // norm = 1.2 * (1 - 0.75 + 0.75 * 10 / 128) = 0.3703125
+    // tf=1 -> 2.2 / 1.3703125 = 1.60547...   tf=5 -> 11 / 5.3703125 = 2.04829...
+    expect(value1).toBeCloseTo(1.6054732, 6);
+    expect(value5).toBeCloseTo(2.0482979, 6);
     expect(value1).toBeCloseTo(tfComponent(1, 10), 12);
     expect(value5).toBeCloseTo(tfComponent(5, 10), 12);
 

@@ -12,7 +12,7 @@ import { BM25_VECTOR_NAME, buildSparseVector, DENSE_VECTOR_NAME } from '../lib/b
 import { chunkCanvas } from '../lib/canvas-chunker.js';
 import { isChunkParseError } from '../lib/chunk-errors.js';
 import type { MarkdownSection } from '../lib/chunker.js';
-import { chunkMarkdownWithSections } from '../lib/chunker.js';
+import { chunkMarkdownWithSections, DOC_SUMMARY_PREFIX } from '../lib/chunker.js';
 import { chunkCsv } from '../lib/csv-chunker.js';
 import { chunkExcalidraw } from '../lib/excalidraw-chunker.js';
 import { GigaChatChatClient } from '../lib/gigachat-chat.js';
@@ -40,7 +40,6 @@ declare module 'fastify' {
 // UUID v5 DNS namespace constant
 const UUID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
 
-const DOC_SUMMARY_PREFIX = 'Аннотация документа: ';
 const DOC_SUMMARY_PROMPT =
   'Аннотация 1–2 предложения: о чём документ. Ответь только текстом аннотации.\n\nДокумент:\n';
 /** How much of a document the annotation prompt sees — the opening is the informative part. */

@@ -1,4 +1,5 @@
 import Papa from 'papaparse';
+import { withBreadcrumb } from './chunker.js';
 
 export interface CsvChunkOptions {
   batchSize?: number;
@@ -11,7 +12,9 @@ const DEFAULT_BATCH_SIZE = 30;
  *
  * - Parses with PapaParse (header mode)
  * - Default batch size: 30 rows per chunk
- * - sectionPath format: "filename > Rows N-M" (1-based row numbers)
+ * - sectionPath format: "filename > Rows N-M" (1-based row numbers), repeated as the
+ *   chunk's first line: a batch of rows says nothing about which file it came from,
+ *   so without the breadcrumb in the text the file name is unsearchable
  * - Each row formatted as "Header1: val1, Header2: val2" (empty values skipped)
  * - Empty/header-only CSV returns zero chunks
  * - Malformed rows logged as warnings; valid rows still chunked
@@ -57,8 +60,8 @@ export function chunkCsv(
       return parts.join(', ');
     });
 
-    const text = lines.join('\n');
     const sectionPath = `${filename} > Rows ${startRow}-${endRow}`;
+    const text = withBreadcrumb(sectionPath, lines.join('\n'));
 
     chunks.push({ text, sectionPath, chunkIndex });
     chunkIndex++;

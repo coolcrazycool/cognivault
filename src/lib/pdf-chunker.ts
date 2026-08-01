@@ -1,15 +1,18 @@
-import { getEncoding } from 'js-tiktoken';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import type { TextItem } from 'pdfjs-dist/types/src/display/api.js';
 import { ChunkParseError } from './chunk-errors.js';
+import {
+  breadcrumbBodyBudget,
+  countTokens,
+  MAX_CHUNK_TOKENS,
+  splitTextByTokenBudget,
+  withBreadcrumb,
+} from './chunker.js';
 
 // Disable worker for server-side usage
 pdfjsLib.GlobalWorkerOptions.workerSrc = '';
 
-// Initialize encoder once at module level (expensive initialization)
-const enc = getEncoding('cl100k_base');
-
-export const MAX_CHUNK_TOKENS = 500;
+export { MAX_CHUNK_TOKENS };
 export const MIN_PAGE_TOKENS = 10;
 
 export interface PdfPage {
@@ -22,10 +25,6 @@ export interface PdfMetadata {
   title?: string;
   author?: string;
   subject?: string;
-}
-
-function countTokens(text: string): number {
-  return enc.encode(text).length;
 }
 
 /**
@@ -68,44 +67,15 @@ export async function extractPdfPages(
 }
 
 /**
- * Splits text at paragraph boundaries (double newline) to stay within MAX_CHUNK_TOKENS.
- * Each sub-chunk gets the same sectionPath.
- */
-function splitPageAtParagraphs(text: string): string[] {
-  const paragraphs = text.split(/\n\n+/);
-  const chunks: string[] = [];
-  let current = '';
-  let currentTokens = 0;
-
-  for (const para of paragraphs) {
-    const trimmed = para.trim();
-    if (!trimmed) continue;
-
-    const paraTokens = countTokens(trimmed);
-
-    if (currentTokens > 0 && currentTokens + paraTokens > MAX_CHUNK_TOKENS) {
-      // Flush current chunk
-      chunks.push(current.trim());
-      current = trimmed;
-      currentTokens = paraTokens;
-    } else {
-      current = current ? `${current}\n\n${trimmed}` : trimmed;
-      currentTokens += paraTokens;
-    }
-  }
-
-  if (current.trim()) {
-    chunks.push(current.trim());
-  }
-
-  return chunks;
-}
-
-/**
  * Chunks a PDF buffer into page-based chunks matching the MarkdownChunk shape.
  *
  * - Pages with fewer than MIN_PAGE_TOKENS tokens are skipped (scanned headers/footers)
- * - Pages exceeding MAX_CHUNK_TOKENS are split at paragraph boundaries
+ * - Pages exceeding the budget are cut on the largest natural boundary that fits —
+ *   paragraph, then line, then word. Extracted PDF text often has no paragraph breaks
+ *   at all, and a page left whole would be truncated by the embedder: its tail would
+ *   sit in the payload while missing from the vector
+ * - Every chunk opens with its `sectionPath`, so the file name and page number are part
+ *   of the embedded and tokenized text rather than payload-only metadata
  * - sectionPath format: "filename > Page N"
  * - A PDF that parses but has no extractable text yields zero chunks
  * - A PDF that cannot be parsed at all throws {@link ChunkParseError}
@@ -136,15 +106,8 @@ export async function chunkPdf(
 
     const sectionPath = `${filename} > Page ${page.pageNum}`;
 
-    if (page.tokenCount > MAX_CHUNK_TOKENS) {
-      // Split large pages at paragraph boundaries
-      const subChunks = splitPageAtParagraphs(page.text);
-      for (const subText of subChunks) {
-        chunks.push({ text: subText, sectionPath, chunkIndex });
-        chunkIndex++;
-      }
-    } else {
-      chunks.push({ text: page.text, sectionPath, chunkIndex });
+    for (const text of splitTextByTokenBudget(page.text, breadcrumbBodyBudget(sectionPath))) {
+      chunks.push({ text: withBreadcrumb(sectionPath, text), sectionPath, chunkIndex });
       chunkIndex++;
     }
   }

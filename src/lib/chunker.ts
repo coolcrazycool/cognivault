@@ -1,6 +1,17 @@
 import { createHash } from 'node:crypto';
 import { getEncoding } from 'js-tiktoken';
-import type { Code, Heading, Node, Paragraph, Parent, Root, Table, TableRow } from 'mdast';
+import type {
+  Code,
+  Heading,
+  List,
+  Node,
+  Paragraph,
+  Parent,
+  Root,
+  Table,
+  TableRow,
+  Text,
+} from 'mdast';
 import remarkGfm from 'remark-gfm';
 import remarkParse from 'remark-parse';
 import { unified } from 'unified';
@@ -86,12 +97,44 @@ export function normalizeObsidianSyntax(text: string): string {
   return text;
 }
 
-function countTokens(text: string): number {
+/** cl100k token count — the one measure every chunker budgets against. */
+export function countTokens(text: string): number {
   return enc.encode(text).length;
+}
+
+/**
+ * The breadcrumb every chunk of every format carries as its first line.
+ *
+ * It lives in the *text*, not only in the payload, so the path is embedded in the
+ * dense vector and tokenized into the sparse one: without it a CSV row batch or a PDF
+ * page cannot be found by its file name or page number.
+ */
+export function withBreadcrumb(sectionPath: string, body: string): string {
+  return `${sectionPath}\n\n${body}`;
+}
+
+/**
+ * Prefix the indexer puts in front of every chunk of a document when `INDEX_DOC_SUMMARY`
+ * is on. Defined next to {@link withBreadcrumb} because the two together are the whole
+ * difference between a stored chunk and the section body it was cut from — anything that
+ * has to map one back onto the other (search's `section_text` window) strips both.
+ */
+export const DOC_SUMMARY_PREFIX = 'Аннотация документа: ';
+
+/** Tokens a chunk body may use once {@link withBreadcrumb} has taken its share. */
+export function breadcrumbBodyBudget(
+  sectionPath: string,
+  maxTokens: number = MAX_CHUNK_TOKENS,
+): number {
+  return Math.max(1, maxTokens - countTokens(`${sectionPath}\n\n`));
 }
 
 function isHeading(node: Node): node is Heading {
   return node.type === 'heading';
+}
+
+function isList(node: Node): node is List {
+  return node.type === 'list';
 }
 
 function isCode(node: Node): node is Code {
@@ -106,6 +149,50 @@ function isParagraph(node: Node): node is Paragraph {
   return node.type === 'paragraph';
 }
 
+/**
+ * Nodes whose children are blocks rather than inline phrasing, so their texts must be
+ * kept apart. Concatenating them edge-to-edge is what used to turn two list items into
+ * one nonsense word ("открыть настройкиуказать адрес") — a token that exists in no
+ * query and drags the whole chunk's embedding off target.
+ */
+const BLOCK_SEPARATORS: ReadonlyMap<string, string> = new Map([
+  ['root', '\n\n'],
+  ['blockquote', '\n\n'],
+  ['footnoteDefinition', '\n\n'],
+  // A list item's own paragraph and any list nested under it are consecutive lines.
+  ['listItem', '\n'],
+]);
+
+function childrenToText(node: Parent, separator: string): string {
+  return node.children
+    .map((child) => nodeToText(child))
+    .filter((text) => text.length > 0)
+    .join(separator);
+}
+
+/** `[x] ` / `[ ] ` for a task-list item, nothing for a plain one. */
+function taskMarker(checked: boolean | null | undefined): string {
+  if (checked === true) return '[x] ';
+  if (checked === false) return '[ ] ';
+  return '';
+}
+
+/** Render a list back to markdown: one line per item, continuation lines indented. */
+function listToText(list: List): string {
+  const start = list.start ?? 1;
+  const items: string[] = [];
+
+  list.children.forEach((item, index) => {
+    const body = nodeToText(item).trim();
+    if (body.length === 0) return;
+    const marker = list.ordered === true ? `${start + index}.` : '-';
+    const indent = ' '.repeat(marker.length + 1);
+    items.push(`${marker} ${taskMarker(item.checked)}${body.replaceAll('\n', `\n${indent}`)}`);
+  });
+
+  return items.join('\n');
+}
+
 function nodeToText(node: Node): string {
   if (isCode(node)) {
     return node.value;
@@ -117,11 +204,18 @@ function nodeToText(node: Node): string {
     const rendered = renderTable(node);
     return [rendered.header, rendered.delimiter, ...rendered.rows].join('\n');
   }
+  if (isList(node)) {
+    return listToText(node);
+  }
+  // A hard line break is a boundary the author typed; dropping it glues two lines.
+  if (node.type === 'break') {
+    return '\n';
+  }
   if ('value' in node && typeof (node as { value: string }).value === 'string') {
     return (node as { value: string }).value;
   }
   if ('children' in node && Array.isArray((node as Parent).children)) {
-    return (node as Parent).children.map(nodeToText).join('');
+    return childrenToText(node as Parent, BLOCK_SEPARATORS.get(node.type) ?? '');
   }
   return '';
 }
@@ -278,32 +372,9 @@ function buildSectionPath(title: string, headingStack: string[]): string {
 interface Section {
   depth: number; // Heading depth that introduced this section (0 = before any heading)
   headingStack: string[]; // H2+ heading texts in order
+  /** Text of the heading that opened this section; null for the pre-heading section. */
+  heading: string | null;
   nodes: Node[];
-}
-
-// Split oversized text by lines to stay within MAX_CHUNK_TOKENS
-function splitTextByLines(text: string, headerText: string, maxTokens: number): string[] {
-  const lines = text.split('\n');
-  const chunks: string[] = [];
-  let currentLines: string[] = [];
-  let currentTokens = countTokens(headerText);
-
-  for (const line of lines) {
-    const lineTokens = countTokens(line);
-    if (currentLines.length > 0 && currentTokens + lineTokens > maxTokens) {
-      chunks.push(`${headerText}\n\n${normalizeObsidianSyntax(currentLines.join('\n'))}`);
-      currentLines = [];
-      currentTokens = countTokens(headerText);
-    }
-    currentLines.push(line);
-    currentTokens += lineTokens;
-  }
-
-  if (currentLines.length > 0) {
-    chunks.push(`${headerText}\n\n${normalizeObsidianSyntax(currentLines.join('\n'))}`);
-  }
-
-  return chunks;
 }
 
 interface ChunkPiece {
@@ -331,10 +402,12 @@ function mergeUndersizedTail(pieces: ChunkPiece[], headerText: string): ChunkPie
     if (last.contentKind !== 'text' || previous.contentKind !== 'text') break;
     if (countTokens(bodyOf(last)) >= MIN_CHUNK_TOKENS) break;
 
-    merged.splice(merged.length - 2, 2, {
-      text: `${previous.text}\n\n${bodyOf(last)}`,
-      contentKind: 'text',
-    });
+    const text = `${previous.text}\n\n${bodyOf(last)}`;
+    // Absorbing the tail must not push the chunk past the budget — the embedder would
+    // truncate it and the very text we were trying to keep would fall out of the vector.
+    if (countTokens(text) > MAX_CHUNK_TOKENS) break;
+
+    merged.splice(merged.length - 2, 2, { text, contentKind: 'text' });
   }
 
   return merged;
@@ -419,17 +492,21 @@ export function splitTextByTokenBudget(
 // Split a list of nodes at paragraph boundaries to stay within MAX_CHUNK_TOKENS
 function splitAtParagraphBoundaries(nodes: Node[], headerText: string): ChunkPiece[] {
   const pieces: ChunkPiece[] = [];
+  // The breadcrumb is repeated in every piece, so the body budget is what is left of
+  // the chunk budget after it.
+  const bodyBudget = breadcrumbBodyBudget(headerText);
+  const separatorTokens = countTokens('\n\n');
   let currentNodes: Node[] = [];
-  let currentTokens = countTokens(headerText);
+  let currentTokens = 0;
 
   const flush = (): void => {
     if (currentNodes.length === 0) return;
     pieces.push({
-      text: `${headerText}\n\n${normalizeObsidianSyntax(sectionNodesToText(currentNodes))}`,
+      text: withBreadcrumb(headerText, normalizeObsidianSyntax(sectionNodesToText(currentNodes))),
       contentKind: 'text',
     });
     currentNodes = [];
-    currentTokens = countTokens(headerText);
+    currentTokens = 0;
   };
 
   nodes.forEach((node, index) => {
@@ -439,7 +516,7 @@ function splitAtParagraphBoundaries(nodes: Node[], headerText: string): ChunkPie
     // A table too large to share a chunk with prose is cut on its own terms: whole
     // rows, header repeated. Line-splitting it would hand the model values with no
     // column names — the failure mode this replaces.
-    if (isTable(node) && nodeTokens > MAX_CHUNK_TOKENS) {
+    if (isTable(node) && nodeTokens > bodyBudget) {
       const caption = tableCaption(nodes[index - 1]);
       // The caption paragraph is reproduced in full in every one of this table's
       // chunks, so emitting it again on its own would only add a stub chunk.
@@ -450,7 +527,7 @@ function splitAtParagraphBoundaries(nodes: Node[], headerText: string): ChunkPie
         currentNodes[0] === nodes[index - 1];
       if (captionIsPending) {
         currentNodes = [];
-        currentTokens = countTokens(headerText);
+        currentTokens = 0;
       }
       flush();
       for (const text of chunkTable(node, headerText, caption)) {
@@ -459,20 +536,27 @@ function splitAtParagraphBoundaries(nodes: Node[], headerText: string): ChunkPie
       return;
     }
 
-    // Oversized code block — nothing better than line boundaries to cut on.
-    if (isCode(node) && nodeTokens > MAX_CHUNK_TOKENS) {
+    // A single node over the budget — a wall-of-text paragraph, a long code block — has
+    // to be cut *inside* itself. Splitting only between nodes leaves a chunk the
+    // embedder silently truncates: its tail survives in the payload but never reaches
+    // the vector, so the text is stored and yet unfindable.
+    if (nodeTokens > bodyBudget) {
       flush();
-      for (const text of splitTextByLines(nodeText, headerText, MAX_CHUNK_TOKENS)) {
-        pieces.push({ text, contentKind: 'text' });
+      for (const part of splitTextByTokenBudget(normalizeObsidianSyntax(nodeText), bodyBudget)) {
+        pieces.push({ text: withBreadcrumb(headerText, part), contentKind: 'text' });
       }
       return;
     }
 
-    if (currentNodes.length > 0 && currentTokens + nodeTokens > MAX_CHUNK_TOKENS) {
+    const cost = (currentNodes.length > 0 ? separatorTokens : 0) + nodeTokens;
+    if (currentNodes.length > 0 && currentTokens + cost > bodyBudget) {
       flush();
+      currentNodes.push(node);
+      currentTokens = nodeTokens;
+      return;
     }
     currentNodes.push(node);
-    currentTokens += nodeTokens;
+    currentTokens += cost;
   });
 
   flush();
@@ -492,6 +576,20 @@ function splitAtParagraphBoundaries(nodes: Node[], headerText: string): ChunkPie
  */
 function sectionParentId(ordinal: number, sectionPath: string): string {
   return createHash('sha1').update(`${ordinal}\0${sectionPath}`).digest('hex');
+}
+
+/**
+ * The heading line of a section that is about to be folded into its predecessor.
+ *
+ * Such a section gets no `sectionPath` of its own, so without this its heading would
+ * appear nowhere — not in the breadcrumb, not in the body — and every word that only
+ * occurs in that heading would drop out of the index entirely.
+ */
+function headingNodes(section: Section): Node[] {
+  const heading = section.heading?.trim() ?? '';
+  if (heading.length === 0) return [];
+  const node: Text = { type: 'text', value: `${'#'.repeat(section.depth)} ${heading}` };
+  return [node];
 }
 
 function sectionsToChunks(
@@ -543,10 +641,10 @@ function sectionsToChunks(
     parents.push({
       parentId,
       sectionPath: ps.sectionPath,
-      text: `${header}\n\n${text}`,
+      text: withBreadcrumb(header, text),
     });
 
-    if (tokenCount > MAX_CHUNK_TOKENS) {
+    if (tokenCount > breadcrumbBodyBudget(header)) {
       // Every piece — prose or table rows — keeps the section's parentId: a table is
       // a region of its section, so all of its row groups expand to the same parent.
       for (const piece of splitAtParagraphBoundaries(ps.nodes, header)) {
@@ -560,7 +658,7 @@ function sectionsToChunks(
     } else {
       result.push({
         sectionPath: ps.sectionPath,
-        text: `${header}\n\n${text}`,
+        text: withBreadcrumb(header, text),
         parentId,
         contentKind: 'text',
       });
@@ -576,9 +674,9 @@ function sectionsToChunks(
       // Short section: merge into the last pending section that is at a higher or equal level
       // OR start a new pending with this section's path if no suitable pending exists
       if (pending.length > 0) {
-        // Merge into the last pending section
+        // Merge into the last pending section, carrying the lost heading with it.
         const last = pending[pending.length - 1] as PendingSection;
-        last.nodes = [...last.nodes, ...section.nodes];
+        last.nodes = [...last.nodes, ...headingNodes(section), ...section.nodes];
       } else {
         // No pending yet — start one with this section's path
         pending.push({
@@ -631,7 +729,7 @@ export function chunkMarkdownWithSections(body: string, opts: ChunkOptions): Mar
   // H1 headings are TRANSPARENT — they create section boundaries but are NOT added to section path
   // H2+ headings are added to the heading stack
   const sections: Section[] = [];
-  let currentSection: Section = { depth: 0, headingStack: [], nodes: [] };
+  let currentSection: Section = { depth: 0, headingStack: [], heading: null, nodes: [] };
 
   // Track current heading stack for H2+: array indexed by depth
   // headingByDepth[2] = H2 heading text, headingByDepth[3] = H3 text, etc.
@@ -644,10 +742,12 @@ export function chunkMarkdownWithSections(body: string, opts: ChunkOptions): Mar
         sections.push({ ...currentSection, nodes: [...currentSection.nodes] });
       }
 
+      const headingText = nodeToText(node);
+
       if (node.depth === 1) {
         // H1 is transparent — clears all heading state, starts fresh section at root level
         headingByDepth.clear();
-        currentSection = { depth: 1, headingStack: [], nodes: [] };
+        currentSection = { depth: 1, headingStack: [], heading: headingText, nodes: [] };
       } else {
         // H2+: clear all depths >= current depth
         for (const depth of headingByDepth.keys()) {
@@ -655,13 +755,18 @@ export function chunkMarkdownWithSections(body: string, opts: ChunkOptions): Mar
             headingByDepth.delete(depth);
           }
         }
-        headingByDepth.set(node.depth, nodeToText(node));
+        headingByDepth.set(node.depth, headingText);
 
         // Build heading stack from depth map sorted by depth
         const sortedDepths = [...headingByDepth.keys()].sort((a, b) => a - b);
         const newStack = sortedDepths.map((d) => headingByDepth.get(d) as string);
 
-        currentSection = { depth: node.depth, headingStack: newStack, nodes: [] };
+        currentSection = {
+          depth: node.depth,
+          headingStack: newStack,
+          heading: headingText,
+          nodes: [],
+        };
       }
     } else {
       currentSection.nodes.push(node);
