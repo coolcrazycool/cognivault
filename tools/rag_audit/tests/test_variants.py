@@ -433,7 +433,8 @@ def test_rank_changes_counts_moved_questions_with_direction() -> None:
     assert changes["improved"] == 1
     assert changes["regressed"] == 2
     assert {c["id"] for c in changes["changes"]} == {"q1", "q2", "q4"}
-    assert {"id": "q2", "was": 3, "now": None} in changes["changes"]
+    # запись о смене ранга несёт и origin (строки без поля — customer)
+    assert {"id": "q2", "origin": "customer", "was": 3, "now": None} in changes["changes"]
 
 
 def test_delta_says_plainly_when_one_question_is_noise() -> None:

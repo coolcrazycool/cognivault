@@ -134,6 +134,10 @@ RRF_K = 2
 #: Отсечки, по которым печатается hit@k.
 HIT_KS = (1, 3, 5, 10)
 
+#: Происхождение golden-строки без поля `origin`. Приёмочные 39 вопросов заказчика
+#: этого поля не имеют — они и есть `customer`.
+DEFAULT_ORIGIN = "customer"
+
 
 # --------------------------------------------------------------------------- #
 # Данные
@@ -169,6 +173,10 @@ class Query:
     #: засчитывается (один и тот же факт живёт в нескольких документах). Строки без
     #: поля работают как раньше — кортеж просто пуст.
     alt_source_paths: tuple[str, ...] = ()
+    #: Происхождение строки: `customer` — приёмочный набор заказчика, `generated` —
+    #: сгенерированные вопросы. Строка БЕЗ поля `origin` — заказчик: приёмочные 39
+    #: написаны до появления поля, и их число не должно разбавляться сгенерированными.
+    origin: str = DEFAULT_ORIGIN
 
 
 @dataclass
@@ -228,9 +236,32 @@ def to_queries(rows: Iterable[dict[str, Any]]) -> list[Query]:
                 section_path=str(section) if section else None,
                 expected_refusal=bool(row.get("expected_refusal")),
                 alt_source_paths=tuple(str(p) for p in alts if p),
+                origin=str(row.get("origin") or DEFAULT_ORIGIN),
             )
         )
     return queries
+
+
+def load_golden_files(paths: Sequence[Path]) -> list[dict[str, Any]]:
+    """Несколько golden-файлов одним набором (`--golden` повторяемый).
+
+    Правила чтения каждого файла — те же, что у харнесса (`load_golden`). Повтор id
+    между файлами — громкая ошибка: метрики по вопросу перестали бы быть однозначными,
+    а дельта сравнивала бы «какую-то из копий».
+    """
+    rows: list[dict[str, Any]] = []
+    seen: dict[str, str] = {}
+    for path in paths:
+        for row in load_golden(str(path)):
+            row_id = str(row.get("id", ""))
+            if row_id in seen:
+                raise SystemExit(
+                    f"id {row_id!r} встречается и в {seen[row_id]}, и в {path} — "
+                    "golden-файлы обязаны не пересекаться"
+                )
+            seen[row_id] = str(path)
+            rows.append(row)
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -1253,9 +1284,18 @@ def evaluate(
     file_pairs: dict[str, list[tuple[str, int | None]]] = {b: [] for b in BRANCHES}
     section_ranks: dict[str, list[int | None]] = {b: [] for b in BRANCHES}
     section_pairs: dict[str, list[tuple[str, int | None]]] = {b: [] for b in BRANCHES}
+    # Разрез по origin: приёмочные вопросы заказчика против сгенерированных.
+    # Аггрегат по всем строкам сразу разбавил бы приёмочное число — оно считается
+    # ТОЛЬКО на своих n, и шум у каждого origin свой (1/n своего набора).
+    file_origin_pairs: dict[str, list[tuple[str, int | None]]] = {b: [] for b in BRANCHES}
+    section_origin_pairs: dict[str, list[tuple[str, int | None]]] = {b: [] for b in BRANCHES}
+    file_origin_category: dict[str, dict[str, list[tuple[str, int | None]]]] = {
+        b: {} for b in BRANCHES
+    }
     top_scores: dict[str, dict[str, list[float]]] = {
         b: {"answerable": [], "trap": []} for b in BRANCHES
     }
+    origin_scores: dict[str, dict[str, dict[str, list[float]]]] = {b: {} for b in BRANCHES}
 
     for position, query in enumerate(queries):
         runs = run_branches(
@@ -1270,6 +1310,7 @@ def evaluate(
         record: dict[str, Any] = {
             "id": query.id,
             "category": query.category,
+            "origin": query.origin,
             "expected_refusal": query.expected_refusal,
             "branches": {},
         }
@@ -1292,13 +1333,35 @@ def evaluate(
             if query in answerable:
                 file_ranks[branch].append(file_rank)
                 file_pairs[branch].append((query.category, file_rank))
+                file_origin_pairs[branch].append((query.origin, file_rank))
+                file_origin_category[branch].setdefault(query.origin, []).append(
+                    (query.category, file_rank)
+                )
                 top_scores[branch]["answerable"].append(run.raw_top_score)
+                origin_scores[branch].setdefault(
+                    query.origin, {"answerable": [], "trap": []}
+                )["answerable"].append(run.raw_top_score)
             if query in reachable:
                 section_ranks[branch].append(section_rank)
                 section_pairs[branch].append((query.category, section_rank))
+                section_origin_pairs[branch].append((query.origin, section_rank))
             if query.expected_refusal:
                 top_scores[branch]["trap"].append(run.raw_top_score)
+                origin_scores[branch].setdefault(
+                    query.origin, {"answerable": [], "trap": []}
+                )["trap"].append(run.raw_top_score)
         per_query.append(record)
+
+    def _refusal_stats(positive: list[float], negative: list[float]) -> dict[str, Any]:
+        overlap = bool(positive and negative and max(negative) >= min(positive))
+        auc = roc_auc(positive, negative)
+        return {
+            "answerable": distribution(positive),
+            "traps": distribution(negative),
+            "roc_auc": None if auc is None else round(auc, 4),
+            "separated": not overlap,
+            "best_threshold": best_threshold(positive, negative),
+        }
 
     branches: dict[str, Any] = {}
     refusal: dict[str, Any] = {}
@@ -1306,20 +1369,24 @@ def evaluate(
         branches[branch] = {
             "file": summarize_ranks(file_ranks[branch]),
             "file_by_category": group_by_category(file_pairs[branch]),
+            "file_by_origin": group_by_category(file_origin_pairs[branch]),
+            "file_by_origin_category": {
+                origin: group_by_category(pairs)
+                for origin, pairs in sorted(file_origin_category[branch].items())
+            },
             "section": summarize_ranks(section_ranks[branch]),
             "section_by_category": group_by_category(section_pairs[branch]),
+            "section_by_origin": group_by_category(section_origin_pairs[branch]),
         }
-        positive = top_scores[branch]["answerable"]
-        negative = top_scores[branch]["trap"]
-        overlap = bool(positive and negative and max(negative) >= min(positive))
-        refusal[branch] = {
-            "answerable": distribution(positive),
-            "traps": distribution(negative),
-            "roc_auc": None if roc_auc(positive, negative) is None else round(roc_auc(positive, negative), 4),
-            "separated": not overlap,
-            "best_threshold": best_threshold(positive, negative),
+        refusal[branch] = _refusal_stats(
+            top_scores[branch]["answerable"], top_scores[branch]["trap"]
+        )
+        refusal[branch]["by_origin"] = {
+            origin: _refusal_stats(scores["answerable"], scores["trap"])
+            for origin, scores in sorted(origin_scores[branch].items())
         }
 
+    origins = sorted({q.origin for q in queries})
     return {
         "golden": {
             "rows": len(queries),
@@ -1331,6 +1398,16 @@ def evaluate(
             "section_labels": [q.id for q in section_rows],
             "section_labels_reachable": len(reachable),
             "section_labels_missing_in_corpus": [q.id for q in unreachable],
+            # Разрез по происхождению: приёмочный набор заказчика не разбавляется
+            # сгенерированным — у каждого origin свои n и свой шум.
+            "by_origin": {
+                origin: {
+                    "rows": sum(1 for q in queries if q.origin == origin),
+                    "answerable": sum(1 for q in answerable if q.origin == origin),
+                    "refusal_traps": sum(1 for q in traps if q.origin == origin),
+                }
+                for origin in origins
+            },
         },
         "branches": branches,
         "refusal": refusal,
@@ -1399,10 +1476,28 @@ def print_summary(report: dict[str, Any]) -> None:
         )
         + "\n"
     )
+    by_origin = golden.get("by_origin") or {}
+    if len(by_origin) > 1:
+        parts = [
+            f"{origin}: {stats['rows']} строк ({stats['answerable']} отвечаемых, "
+            f"{stats['refusal_traps']} ловушек)"
+            for origin, stats in sorted(by_origin.items())
+        ]
+        out("origin: " + "; ".join(parts) + "\n")
 
     out("\n=== ПОПАДАНИЕ ПО ФАЙЛУ (путь чанка = source_path или alt_source_paths) ===\n")
     for branch in BRANCHES:
         out(_fmt_row(branch, report["branches"][branch]["file"]) + "\n")
+
+    origins = sorted(report["branches"]["hybrid"].get("file_by_origin", {}))
+    if len(origins) > 1:
+        out("\n=== ПО ORIGIN (по файлу; customer — приёмочное число заказчика) ===\n")
+        for origin in origins:
+            out(f"{origin}:\n")
+            for branch in BRANCHES:
+                stats = report["branches"][branch]["file_by_origin"].get(origin)
+                if stats:
+                    out("  " + _fmt_row(branch, stats) + "\n")
 
     out("\n=== ПОПАДАНИЕ ПО РАЗДЕЛУ (path + section_path) ===\n")
     if golden["section_labels_missing_in_corpus"]:
@@ -1496,15 +1591,36 @@ def print_delta(delta: dict[str, Any], out: Callable[[str], Any]) -> None:
             f"{branch:<10} hit@1 {row['hit_at']['1']:+.3f}  hit@5 {row['hit_at']['5']:+.3f}  "
             f"hit@10 {row['hit_at']['10']:+.3f}  MRR {row['mrr']:+.4f}{suffix}\n"
         )
+    for branch in BRANCHES:
+        by_origin = delta["branches"][branch].get("file_by_origin") or {}
+        if len(by_origin) > 1:
+            for origin, row in sorted(by_origin.items()):
+                out(
+                    f"  {branch}/{origin:<10} hit@1 {row['hit_at']['1']:+.3f}  "
+                    f"hit@5 {row['hit_at']['5']:+.3f}  MRR {row['mrr']:+.4f} (n={row['n']})\n"
+                )
     noise = delta.get("noise")
     if noise:
-        out(
-            f"\nшум: 1 вопрос из {noise['answerable_n']} = ±{noise['one_question']:.3f} к hit@*.\n"
-        )
-        for branch in BRANCHES:
-            verdict = noise["verdicts"].get(branch)
-            if verdict:
-                out(f"  {branch}: {verdict}\n")
+        by_origin = noise.get("by_origin") or {}
+        if by_origin:
+            out("\nшум (на n своего origin, не общего набора):\n")
+            for origin, item in sorted(by_origin.items()):
+                out(
+                    f"  {origin}: 1 вопрос из {item['answerable_n']} = "
+                    f"±{item['one_question']:.4f} к hit@*\n"
+                )
+                for branch in BRANCHES:
+                    verdict = item["verdicts"].get(branch)
+                    if verdict:
+                        out(f"    {branch}: {verdict}\n")
+        else:
+            out(
+                f"\nшум: 1 вопрос из {noise['answerable_n']} = ±{noise['one_question']:.3f} к hit@*.\n"
+            )
+            for branch in BRANCHES:
+                verdict = noise["verdicts"].get(branch)
+                if verdict:
+                    out(f"  {branch}: {verdict}\n")
     out(
         f"\nпо разделу (общее подмножество, {len(delta['section_comparable_ids'])} вопросов):\n"
     )
@@ -1553,11 +1669,44 @@ def print_sweep(reports: Sequence[dict[str, Any]]) -> None:
             f"{stats['hit_at']['5']:>7.2f}{stats['hit_at']['10']:>7.2f}"
             f"{stats['mrr']:>7.3f}{stats['found']:>9}  {moved}\n"
         )
-    out(
-        f"\nшум: 1 вопрос = ±{quantum:.3f} к hit@*; дельта, не превышающая этого, — в\n"
-        "пределах шума одного вопроса и выводом не является. Смотреть на «сменили ранг»:\n"
-        "0 сменивших = выдача идентична, различие аггрегатов было бы артефактом.\n"
-    )
+    origins = sorted(reference["branches"]["hybrid"].get("file_by_origin", {}))
+    if len(origins) > 1:
+        out("\nпо origin (ветка hybrid, попадание по файлу):\n")
+        for origin in origins:
+            n_origin = (
+                reference["golden"].get("by_origin", {}).get(origin, {}).get("answerable", 0)
+            )
+            out(f"  {origin} (n={n_origin}):\n")
+            for report in reports:
+                stats = report["branches"]["hybrid"]["file_by_origin"].get(origin)
+                if stats is None:
+                    continue
+                out(
+                    f"    {report['variant']['name']:<{name_width}}"
+                    f"{stats['hit_at']['1']:>7.2f}{stats['hit_at']['3']:>7.2f}"
+                    f"{stats['hit_at']['5']:>7.2f}{stats['hit_at']['10']:>7.2f}"
+                    f"{stats['mrr']:>7.3f}{stats['found']:>9}\n"
+                )
+    origin_ns = {
+        origin: stats.get("answerable", 0)
+        for origin, stats in reference["golden"].get("by_origin", {}).items()
+    }
+    if len(origin_ns) > 1:
+        quanta = "; ".join(
+            f"{origin}: 1 вопрос = ±{(1.0 / n if n else 0.0):.4f}"
+            for origin, n in sorted(origin_ns.items())
+        )
+        out(
+            f"\nшум СЧИТАЕТСЯ НА n СВОЕГО ORIGIN ({quanta}); дельта, не превышающая\n"
+            "кванта своего набора, — в пределах шума одного вопроса и выводом не является.\n"
+            "Смотреть на «сменили ранг»: 0 сменивших = выдача идентична.\n"
+        )
+    else:
+        out(
+            f"\nшум: 1 вопрос = ±{quantum:.3f} к hit@*; дельта, не превышающая этого, — в\n"
+            "пределах шума одного вопроса и выводом не является. Смотреть на «сменили ранг»:\n"
+            "0 сменивших = выдача идентична, различие аггрегатов было бы артефактом.\n"
+        )
     for report in reports:
         out(f"  {report['variant']['name']:<{name_width}} {report['variant']['transfer']}\n")
     total = sum(r["timing"]["total_s"] for r in reports)
@@ -1605,6 +1754,7 @@ def rank_changes(report: dict[str, Any], baseline: dict[str, Any]) -> dict[str, 
         changes: list[dict[str, Any]] = []
         improved = 0
         regressed = 0
+        by_origin: dict[str, dict[str, int]] = {}
         for record in report.get("per_query", []):
             old = base_by_id.get(record["id"])
             if old is None:
@@ -1614,16 +1764,24 @@ def rank_changes(report: dict[str, Any], baseline: dict[str, Any]) -> dict[str, 
             if now == was:
                 continue
             better = was is None or (now is not None and now < was)
+            origin = str(record.get("origin") or DEFAULT_ORIGIN)
+            bucket = by_origin.setdefault(
+                origin, {"n_changed": 0, "improved": 0, "regressed": 0}
+            )
+            bucket["n_changed"] += 1
             if better:
                 improved += 1
+                bucket["improved"] += 1
             else:
                 regressed += 1
-            changes.append({"id": record["id"], "was": was, "now": now})
+                bucket["regressed"] += 1
+            changes.append({"id": record["id"], "origin": origin, "was": was, "now": now})
         out[branch] = {
             "n_changed": len(changes),
             "improved": improved,
             "regressed": regressed,
             "changes": changes,
+            "by_origin": by_origin,
         }
     return out
 
@@ -1688,9 +1846,18 @@ def compute_delta(report: dict[str, Any], baseline: dict[str, Any]) -> dict[str,
             if old_stats is None:
                 continue
             by_category[category] = _delta_stats(stats, old_stats)
+        # Разрез дельты по origin: только общие с базовым отчётом группы (старый отчёт
+        # без file_by_origin даёт пустой словарь, а не падение).
+        by_origin = {}
+        for origin, stats in new_branch.get("file_by_origin", {}).items():
+            old_stats = old_branch.get("file_by_origin", {}).get(origin)
+            if old_stats is None:
+                continue
+            by_origin[origin] = _delta_stats(stats, old_stats)
         branches[branch] = {
             "file": _delta_stats(new_branch["file"], old_branch["file"]),
             "file_by_category": by_category,
+            "file_by_origin": by_origin,
             "section": _delta_stats(new_section[branch], old_section[branch]),
             "section_now": new_section[branch],
             "section_baseline": old_section[branch],
@@ -1699,18 +1866,53 @@ def compute_delta(report: dict[str, Any], baseline: dict[str, Any]) -> dict[str,
     changes = rank_changes(report, baseline)
     n_answerable = int(report["golden"]["answerable"] or 0)
     quantum = round(1.0 / n_answerable, 4) if n_answerable else 0.0
+
+    # Шум считается ПО ORIGIN, не по общему n: один вопрос заказчика (n=28) двигает
+    # его hit@* на ±0.036, а сгенерированный набор в разы плотнее — усреднённый на
+    # общем n «квант шума» занизил бы шум приёмочного числа.
+    def _verdict(bucket: dict[str, int] | None) -> str:
+        n_changed = bucket["n_changed"] if bucket else 0
+        if n_changed == 0:
+            return "выдача не изменилась — любая дельта аггрегатов была бы артефактом"
+        if n_changed == 1:
+            return "сменил ранг 1 вопрос — дельта в пределах шума одного вопроса"
+        assert bucket is not None
+        return (
+            f"сменили ранг {n_changed} вопросов "
+            f"(лучше {bucket['improved']}, хуже {bucket['regressed']}) — "
+            "смотреть на баланс, а не только на аггрегат"
+        )
+
+    origin_ns = {
+        origin: int(stats.get("answerable", 0))
+        for origin, stats in report["golden"].get("by_origin", {}).items()
+    }
+    if not origin_ns:
+        origin_ns = {DEFAULT_ORIGIN: n_answerable}
+    noise_by_origin: dict[str, Any] = {}
+    for origin, n_origin in sorted(origin_ns.items()):
+        origin_quantum = round(1.0 / n_origin, 4) if n_origin else 0.0
+        noise_by_origin[origin] = {
+            "answerable_n": n_origin,
+            "one_question": origin_quantum,
+            "verdicts": {
+                branch: _verdict(changes[branch]["by_origin"].get(origin))
+                for branch in BRANCHES
+            },
+        }
+
+    single_origin = len(origin_ns) == 1
     verdicts: dict[str, str] = {}
     for branch in BRANCHES:
-        n_changed = changes[branch]["n_changed"]
-        if n_changed == 0:
-            verdicts[branch] = "выдача не изменилась — любая дельта аггрегатов была бы артефактом"
-        elif n_changed == 1:
-            verdicts[branch] = "сменил ранг 1 вопрос — дельта в пределах шума одного вопроса"
+        if single_origin:
+            only = next(iter(noise_by_origin.values()))
+            verdicts[branch] = only["verdicts"][branch]
         else:
-            verdicts[branch] = (
-                f"сменили ранг {n_changed} вопросов "
-                f"(лучше {changes[branch]['improved']}, хуже {changes[branch]['regressed']}) — "
-                "смотреть на баланс, а не только на аггрегат"
+            verdicts[branch] = "; ".join(
+                f"{origin} (n={noise_by_origin[origin]['answerable_n']}, "
+                f"±{noise_by_origin[origin]['one_question']:.4f}): "
+                + noise_by_origin[origin]["verdicts"][branch]
+                for origin in sorted(noise_by_origin)
             )
 
     return {
@@ -1724,9 +1926,11 @@ def compute_delta(report: dict[str, Any], baseline: dict[str, Any]) -> dict[str,
             "answerable_n": n_answerable,
             "one_question": quantum,
             "explanation": (
-                f"на {n_answerable} отвечаемых вопросах один сменивший ранг двигает hit@* "
-                f"на {quantum}; дельта, не превышающая этого, — шум одного вопроса"
+                "шум считается на n СВОЕГО origin: приёмочный набор заказчика и "
+                "сгенерированный имеют разные n, и один сменивший ранг вопрос двигает "
+                "hit@* каждого набора на 1/его-n, а не на 1/общего-n"
             ),
+            "by_origin": noise_by_origin,
             "verdicts": verdicts,
         },
         "note": "; ".join(notes),
@@ -1875,9 +2079,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--golden",
+        action="append",
         type=Path,
-        default=REPO_ROOT / "tools" / "eval" / "golden.jsonl",
-        help="золотой набор (по умолчанию tools/eval/golden.jsonl)",
+        default=None,
+        metavar="FILE.jsonl",
+        help=(
+            "золотой набор; повторяемый — несколько файлов грузятся одним набором "
+            "(id не должны пересекаться). По умолчанию tools/eval/golden.jsonl. "
+            "Строки без поля origin считаются customer"
+        ),
     )
     parser.add_argument(
         "--out",
@@ -1982,14 +2192,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     chunks = load_chunks(args.chunks)
-    queries = to_queries(load_golden(str(args.golden)))
+    golden_paths = list(args.golden or [REPO_ROOT / "tools" / "eval" / "golden.jsonl"])
+    queries = to_queries(load_golden_files(golden_paths))
 
     embedder = DenseEmbedder(args.model, args.cache, args.device)
     sparse_memo = SparseMemo()
 
     reports: list[dict[str, Any]] = []
     for variant in variants:
-        reports.append(run_variant(variant, chunks, queries, embedder, sparse_memo, args))
+        report = run_variant(variant, chunks, queries, embedder, sparse_memo, args)
+        report["golden"]["sources"] = [str(path) for path in golden_paths]
+        reports.append(report)
 
     if not sweep:
         report = reports[0]
