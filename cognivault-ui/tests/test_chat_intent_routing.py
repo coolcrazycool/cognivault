@@ -135,18 +135,25 @@ def _post(client, messages, **extra):
 # --------------------------------------------------------------------------- #
 
 
+SMALLTALK_HISTORY = [
+    {"role": "user", "content": "как настроить ЕФС?"},
+    {"role": "assistant", "content": "вот так"},
+    {"role": "user", "content": "спасибо!"},
+]
+
+
 @pytest.mark.parametrize("intent", ["smalltalk", "clarify"])
 def test_smalltalk_generates_without_sources(tmp_path, monkeypatch, intent):
-    """Нет сообщений и нет notice → обычная генерация, кадра `sources` нет."""
+    """Нет `user_message` и нет notice → генерация по истории, кадра `sources` нет."""
     paths = _paths(tmp_path)
-    ctx = _ctx(intent=intent, standalone_question=None)
+    ctx = _ctx(
+        system_message={"role": "system", "content": rag.NO_RAG_SYSTEM_PROMPT},
+        intent=intent,
+        standalone_question=None,
+    )
     calls = _install(monkeypatch, paths, ctx, answer="и тебе привет")
 
-    messages = [
-        {"role": "user", "content": "как настроить ЕФС?"},
-        {"role": "assistant", "content": "вот так"},
-        {"role": "user", "content": "спасибо!"},
-    ]
+    messages = list(SMALLTALK_HISTORY)
     with TestClient(create_app()) as client:
         resp = _post(client, messages)
 
@@ -158,14 +165,56 @@ def test_smalltalk_generates_without_sources(tmp_path, monkeypatch, intent):
 
     stream = [c for c in calls if c["kind"] == "stream"]
     assert stream, "stream_chat не был вызван"
-    # История уходит как есть: ни системных правил, ни блока «Источники».
-    assert stream[0]["messages"] == messages
+    # Правила «без источников» впереди, история целиком за ними: последний
+    # вопрос заменять нечем, поэтому он остаётся на месте.
+    sent = stream[0]["messages"]
+    assert sent[0] == {"role": "system", "content": rag.NO_RAG_SYSTEM_PROMPT}
+    assert sent[1:] == messages
+    # Блока «Источники» в отправленном нет вообще.
+    assert not any("Источники:" in m["content"] for m in sent)
 
     rec = rag_log.read_records(paths)[0]
     assert rec["intent"] == intent
     assert rec["rag_used"] is False
     assert rec["sources"] == []
     assert rec["notice"] is None
+
+
+def test_smalltalk_without_system_message_falls_back_to_bare_history(
+    tmp_path, monkeypatch
+):
+    """Старый `RagContext` (оба поля `None`) — поведение прежнее, ничего не ломается."""
+    paths = _paths(tmp_path)
+    calls = _install(monkeypatch, paths, _ctx(intent="smalltalk"), answer="привет")
+
+    with TestClient(create_app()) as client:
+        _post(client, list(SMALLTALK_HISTORY))
+
+    stream = [c for c in calls if c["kind"] == "stream"]
+    assert stream[0]["messages"] == SMALLTALK_HISTORY
+
+
+def test_kb_question_keeps_message_order(tmp_path, monkeypatch):
+    """`user_message` есть → system + история БЕЗ последнего вопроса + источники."""
+    paths = _paths(tmp_path)
+    calls = _install(monkeypatch, paths, _kb_ctx(), answer="ответ")
+
+    with TestClient(create_app()) as client:
+        _post(
+            client,
+            [
+                {"role": "user", "content": "расскажи про ЕФС"},
+                {"role": "assistant", "content": "ЕФС — это…"},
+                {"role": "user", "content": "а как её настроить?"},
+            ],
+        )
+
+    sent = [c for c in calls if c["kind"] == "stream"][0]["messages"]
+    assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"]
+    assert sent[0]["content"] == "правила"
+    # Последний вопрос заменён user-сообщением с источниками, а не продублирован.
+    assert sent[-1]["content"].startswith("Источники:")
+    assert all(m["content"] != "а как её настроить?" for m in sent)
 
 
 def test_smalltalk_log_keeps_raw_question(tmp_path, monkeypatch):
@@ -307,6 +356,111 @@ def test_kb_question_logs_pipeline_telemetry(tmp_path, monkeypatch):
     assert [g["score"] for g in rec["grades"]] == [5, 2]
     assert rec["rag_used"] is True
     assert rec["sources"][0]["path"] == "notes/a.md"
+
+
+# --------------------------------------------------------------------------- #
+# Связывание грейдов с кандидатами и восстановление чанка источника
+# --------------------------------------------------------------------------- #
+
+
+def test_grade_ids_resolve_to_candidates(tmp_path, monkeypatch):
+    """`grades[].id` перестаёт быть числом в никуда: тот же `id` есть у кандидата."""
+    paths = _paths(tmp_path)
+    _install(monkeypatch, paths, _kb_ctx(), answer="ответ [Источник 1]")
+
+    with TestClient(create_app()) as client:
+        _post(client, [{"role": "user", "content": "как настроить ЕФС?"}])
+
+    rec = rag_log.read_records(paths)[0]
+    by_id = {c["id"]: c for c in rec["candidates"]}
+    assert sorted(by_id) == [1, 2]
+    for grade in rec["grades"]:
+        candidate = by_id[grade["id"]]
+        assert (candidate["path"], candidate["chunk_index"]) == (
+            grade["path"],
+            grade["chunk_index"],
+        )
+
+
+def test_candidates_get_ids_without_grader(tmp_path, monkeypatch):
+    """Грейдер выключен (`grades is None`) — нумерация кандидатов всё равно есть."""
+    paths = _paths(tmp_path)
+    ctx = _ctx(
+        system_message={"role": "system", "content": "правила"},
+        user_message={"role": "user", "content": "Источники:\n\nВопрос: q"},
+        sources=[{"n": 1, "path": "notes/a.md", "depth": "chunk", "score": 0.9}],
+        context_chars=0,
+        intent="kb_question",
+        candidates=[
+            {"path": "notes/a.md", "chunk_index": 4, "score": 0.9, "rank": 1},
+            {"path": "notes/a.md", "chunk_index": 9, "score": 0.5, "rank": 2},
+        ],
+        grades=None,
+    )
+    _install(monkeypatch, paths, ctx)
+
+    with TestClient(create_app()) as client:
+        _post(client, [{"role": "user", "content": "вопрос"}])
+
+    rec = rag_log.read_records(paths)[0]
+    assert [c["id"] for c in rec["candidates"]] == [1, 2]
+    assert rec["grades"] is None
+    # Скор блока совпадает с одним кандидатом — чанк восстановлен точно.
+    assert rec["sources"][0]["chunk_index"] == 4
+    assert rec["sources"][0]["chunk_indexes"] == [4]
+
+
+def test_whole_file_source_covers_every_retrieved_chunk(tmp_path, monkeypatch):
+    """`depth="file"` — в контексте весь документ, значит попали все его чанки."""
+    paths = _paths(tmp_path)
+    ctx = _ctx(
+        system_message={"role": "system", "content": "правила"},
+        user_message={"role": "user", "content": "Источники:\n\nВопрос: q"},
+        sources=[{"n": 1, "path": "notes/a.md", "depth": "file", "score": 0.9}],
+        context_chars=0,
+        intent="kb_question",
+        candidates=[
+            {"path": "notes/a.md", "chunk_index": 0, "score": 0.9, "rank": 1},
+            {"path": "notes/a.md", "chunk_index": 7, "score": 0.4, "rank": 2},
+            {"path": "notes/b.md", "chunk_index": 1, "score": 0.3, "rank": 3},
+        ],
+    )
+    _install(monkeypatch, paths, ctx)
+
+    with TestClient(create_app()) as client:
+        _post(client, [{"role": "user", "content": "вопрос"}])
+
+    source = rag_log.read_records(paths)[0]["sources"][0]
+    assert source["chunk_indexes"] == [0, 7]
+    assert source["chunk_index"] == 0
+
+
+def test_log_carries_no_secrets_from_context(tmp_path, monkeypatch):
+    """Полный текст контекста в логе — но учётные данные в него не просачиваются."""
+    paths = _paths(tmp_path)
+    block = "### Источник 1: Док — notes/a.md\nтекст фрагмента\n"
+    ctx = _ctx(
+        system_message={"role": "system", "content": "правила"},
+        user_message={
+            "role": "user",
+            "content": f"Источники:\n\n{block}\n\nнапоминание\n\nВопрос: q",
+        },
+        sources=[{"n": 1, "path": "notes/a.md", "depth": "chunk", "score": 0.9}],
+        context_chars=len(block),
+        intent="kb_question",
+    )
+    _install(monkeypatch, paths, ctx)
+
+    with TestClient(create_app()) as client:
+        _post(client, [{"role": "user", "content": "вопрос"}])
+
+    rec = rag_log.read_records(paths)[0]
+    assert rec["context_text"] == block
+    assert "token" not in rec["settings"]["gigachat"]
+    assert "key_passphrase" not in rec["settings"]["gigachat"]
+    raw = rag_log.log_path(paths).read_text(encoding="utf-8")
+    for leaked in ("Authorization", "Bearer", "passphrase", "cert_path"):
+        assert leaked not in raw
 
 
 def test_notice_branch_still_wins_over_sources(tmp_path, monkeypatch):

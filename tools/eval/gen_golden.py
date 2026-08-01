@@ -8,7 +8,11 @@ Pipeline:
    a dependency-free splitter, see :func:`split_fragments`;
 3. ask GigaChat for **one factual + one practical** question per fragment, with
    ``ground_truth`` grounded strictly in that fragment, answer strictly as JSON;
-4. write ``golden.jsonl`` — one Q/A pair per line with ``accepted: null``,
+4. on a share of the fragments (``--unanswerable-share``, default 12%) also ask
+   for an **unanswerable** question — plausible for this documentation but not
+   answered by the corpus. Those rows carry ``expected_refusal: true`` and
+   measure the refusal branch, which nothing measured before;
+5. write ``golden.jsonl`` — one Q/A pair per line with ``accepted: null``,
    the field a human flips to ``true``/``false`` during manual validation.
 
 Target volume is 50–100 pairs, i.e. ~25–50 fragments (``--limit``).
@@ -19,6 +23,11 @@ Example::
     python3 tools/eval/gen_golden.py --out tools/eval/golden.jsonl --limit 40
 
 Progress goes to stderr, data to the output file.
+
+**Ручная валидация обязательна для ``expected_refusal``-строк.** Модель
+придумывает их вслепую, зная лишь один фрагмент; вопрос может случайно
+оказаться отвеченным в другом документе корпуса. Проверьте поиском и снимите
+``accepted`` там, где ответ в базе всё-таки есть.
 """
 
 from __future__ import annotations
@@ -43,7 +52,14 @@ from gigachat_client import (
 )
 
 DEFAULT_EXTENSIONS = (".md", ".markdown", ".txt")
-PROMPT_VERSION = "v1"
+#: v2: вопросы формулируются как пользовательские, без переписывания терминов
+#: фрагмента (лексическая утечка), плюс ветка `unanswerable`.
+PROMPT_VERSION = "v2"
+
+#: Доля фрагментов, к которым дополнительно генерируется вопрос без ответа
+#: в корпусе. 10–15% хватает, чтобы ветка отказа перестала быть неизмеренной,
+#: и мало, чтобы не размыть основные метрики.
+DEFAULT_UNANSWERABLE_SHARE = 0.12
 
 GEN_SYSTEM = (
     "Ты — методист, который составляет проверочные вопросы по внутренней "
@@ -67,10 +83,19 @@ GEN_PROMPT = """Ниже — фрагмент внутренней докуме�
 2. practical — практический вопрос («как сделать», «что нужно, чтобы…»,
    «в каком порядке»), ответ на который тоже следует из фрагмента.
 
-Требования:
-- Вопрос должен быть самодостаточным: без слов «в этом фрагменте», «выше»,
-  «в данном тексте». Упоминай конкретные названия, чтобы вопрос был понятен
-  без фрагмента.
+Как должен звучать вопрос:
+- Так, как его задал бы живой сотрудник, который ЕЩЁ НЕ ЧИТАЛ этот текст и
+  формулирует своими словами. Он не знает, какими словами написан документ.
+- Не переписывай формулировки фрагмента. Где можно — используй естественный
+  синоним или описание вместо термина из текста («как ограничить размер
+  ответа» вместо «что делает параметр max_tokens»).
+- Дословно оставляй только то, без чего вопрос теряет смысл: названия систем и
+  сервисов, имена файлов, коды ошибок, идентификаторы. Их пересказывать нельзя.
+- Без отсылок к тексту: никаких «в этом фрагменте», «выше», «в данном разделе».
+  Вопрос должен быть понятен сам по себе.
+- Не подсказывай ответ внутри вопроса и не перечисляй в нём варианты.
+
+Остальные требования:
 - ground_truth — краткий (1–3 предложения) ответ СТРОГО по содержимому
   фрагмента. Не добавляй ничего от себя.
 - Если фрагмент не позволяет составить осмысленный вопрос одного из типов —
@@ -79,6 +104,37 @@ GEN_PROMPT = """Ниже — фрагмент внутренней докуме�
 Ответ строго в JSON:
 {{"factual": {{"question": "...", "ground_truth": "..."}},
   "practical": {{"question": "...", "ground_truth": "..."}}}}"""
+
+UNANSWERABLE_PROMPT = """Ниже — фрагмент внутренней документации.
+
+Документ: {title}
+Раздел: {section_path}
+
+Фрагмент:
+\"\"\"
+{fragment}
+\"\"\"
+
+Придумай ОДИН вопрос на русском языке, который сотрудник мог бы задать этой
+базе знаний, но ответа на который в документации НЕТ.
+
+Требования:
+- Вопрос должен звучать правдоподобно и по теме: та же система, тот же процесс,
+  та же предметная область, что и во фрагменте.
+- Он должен спрашивать о том, чего в документации нет: точные сроки, цены,
+  фамилии ответственных, внутренние решения, статистика, планы, детали
+  соседних систем.
+- Ответ НЕ должен выводиться из фрагмента ни прямо, ни косвенно.
+- Не пиши «в документации не сказано» внутри самого вопроса — вопрос обычный.
+
+Ответ строго в JSON:
+{{"unanswerable": {{"question": "...", "why": "почему ответа нет в документации"}}}}"""
+
+#: ``ground_truth`` для строк без ответа в корпусе: правильное поведение —
+#: отказ, а не выдуманный факт. Формулировка совпадает с `rag.SYSTEM_PROMPT`.
+REFUSAL_GROUND_TRUTH = (
+    "В доступных мне документах ответа на этот вопрос не нашлось."
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -353,10 +409,45 @@ def build_prompt(fragment: Fragment) -> str:
     )
 
 
+def build_unanswerable_prompt(fragment: Fragment) -> str:
+    """Render :data:`UNANSWERABLE_PROMPT` for one fragment."""
+    return UNANSWERABLE_PROMPT.format(
+        title=fragment.title,
+        section_path=fragment.section_path or "(без раздела)",
+        fragment=fragment.text,
+    )
+
+
+def _row(
+    fragment: Fragment,
+    *,
+    suffix: str,
+    question: str,
+    ground_truth: str,
+    kind: str,
+    expected_refusal: bool,
+) -> dict[str, Any]:
+    return {
+        "id": f"{fragment.fragment_id()}-{suffix}",
+        "question": question,
+        "ground_truth": ground_truth,
+        "kind": kind,
+        # Для строк-отказов источника нет по определению: `run.py` пропускает
+        # им `retrieval_hit` и меряет вместо него сам факт отказа.
+        "source_path": None if expected_refusal else fragment.path,
+        "section_path": None if expected_refusal else fragment.section_path,
+        # Чанк бэкенда генератору неизвестен (он режет корпус своим сплиттером).
+        # Ключ есть всегда: проставленный вручную, он поднимает `retrieval_hit`
+        # с уровня раздела до уровня чанка.
+        "source_chunk_index": None,
+        "expected_refusal": expected_refusal,
+        "accepted": None,
+    }
+
+
 def pairs_from_verdict(fragment: Fragment, raw: dict[str, Any]) -> list[dict[str, Any]]:
     """Convert one judge verdict into golden.jsonl rows (skipping nulls)."""
     rows: list[dict[str, Any]] = []
-    base_id = fragment.fragment_id()
     for kind in ("factual", "practical"):
         item = raw.get(kind)
         if not isinstance(item, dict):
@@ -366,17 +457,53 @@ def pairs_from_verdict(fragment: Fragment, raw: dict[str, Any]) -> list[dict[str
         if not question or not truth:
             continue
         rows.append(
-            {
-                "id": f"{base_id}-{kind[0]}",
-                "question": question,
-                "ground_truth": truth,
-                "kind": kind,
-                "source_path": fragment.path,
-                "section_path": fragment.section_path,
-                "accepted": None,
-            }
+            _row(
+                fragment,
+                suffix=kind[0],
+                question=question,
+                ground_truth=truth,
+                kind=kind,
+                expected_refusal=False,
+            )
         )
     return rows
+
+
+def unanswerable_from_verdict(
+    fragment: Fragment, raw: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Convert an ``unanswerable`` verdict into a refusal-branch golden row."""
+    item = raw.get("unanswerable")
+    if not isinstance(item, dict):
+        return []
+    question = str(item.get("question", "") or "").strip()
+    if not question:
+        return []
+    return [
+        _row(
+            fragment,
+            suffix="u",
+            question=question,
+            ground_truth=REFUSAL_GROUND_TRUTH,
+            kind="unanswerable",
+            expected_refusal=True,
+        )
+    ]
+
+
+def pick_unanswerable(
+    fragments: Sequence[Fragment], share: float, seed: int
+) -> set[int]:
+    """Индексы фрагментов, для которых спрашиваем вопрос БЕЗ ответа в корпусе.
+
+    Детерминированно по ``seed``: пересборка golden-set с теми же параметрами
+    даёт тот же состав, иначе прогоны несравнимы.
+    """
+    if share <= 0 or not fragments:
+        return set()
+    count = max(1, round(len(fragments) * min(share, 1.0)))
+    rng = random.Random(seed ^ 0x5EED)
+    return set(rng.sample(range(len(fragments)), min(count, len(fragments))))
 
 
 async def generate(
@@ -384,22 +511,37 @@ async def generate(
     fragments: Sequence[Fragment],
     *,
     concurrency: int = 2,
+    unanswerable_share: float = DEFAULT_UNANSWERABLE_SHARE,
+    seed: int = 42,
 ) -> list[dict[str, Any]]:
     """Ask the model for Q/A pairs for every fragment (bounded concurrency)."""
     semaphore = asyncio.Semaphore(max(1, concurrency))
     results: list[list[dict[str, Any]]] = [[] for _ in fragments]
+    unanswerable = pick_unanswerable(fragments, unanswerable_share, seed)
     done = 0
 
     async def worker(index: int, fragment: Fragment) -> None:
         nonlocal done
         async with semaphore:
+            rows: list[dict[str, Any]] = []
             try:
                 raw = await judge.complete_json(
                     build_prompt(fragment), system=GEN_SYSTEM, temperature=0.3
                 )
-                results[index] = pairs_from_verdict(fragment, raw)
+                rows.extend(pairs_from_verdict(fragment, raw))
             except (GigaChatEvalError, httpx.HTTPError) as exc:
                 _log(f"  ! фрагмент {index + 1}: {exc}")
+            if index in unanswerable:
+                try:
+                    raw = await judge.complete_json(
+                        build_unanswerable_prompt(fragment),
+                        system=GEN_SYSTEM,
+                        temperature=0.5,
+                    )
+                    rows.extend(unanswerable_from_verdict(fragment, raw))
+                except (GigaChatEvalError, httpx.HTTPError) as exc:
+                    _log(f"  ! фрагмент {index + 1} (без ответа): {exc}")
+            results[index] = rows
             done += 1
             _log(
                 f"  [{done}/{len(fragments)}] {fragment.path} "
@@ -553,6 +695,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="расширения файлов через запятую",
     )
     parser.add_argument(
+        "--unanswerable-share",
+        type=float,
+        default=DEFAULT_UNANSWERABLE_SHARE,
+        help=(
+            "доля фрагментов, к которым генерируется вопрос БЕЗ ответа в корпусе "
+            f"(ветка отказа; default {DEFAULT_UNANSWERABLE_SHARE}, 0 — выключить)"
+        ),
+    )
+    parser.add_argument(
         "--config", default=None, help="путь к config.json UI (для base_url/токена)"
     )
     return parser
@@ -606,11 +757,23 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         return 2
 
     async with judge:
-        rows = await generate(judge, chosen, concurrency=args.concurrency)
+        rows = await generate(
+            judge,
+            chosen,
+            concurrency=args.concurrency,
+            unanswerable_share=args.unanswerable_share,
+            seed=args.seed,
+        )
 
     write_jsonl(rows, args.out)
-    _log(f"записано пар: {len(rows)} → {args.out}")
+    refusals = sum(1 for row in rows if row.get("expected_refusal"))
+    _log(f"записано пар: {len(rows)} → {args.out} (из них без ответа: {refusals})")
     _log("следующий шаг: вручную проставить accepted (true/false) в golden.jsonl")
+    if refusals:
+        _log(
+            "ОСОБО проверьте строки expected_refusal: ответ мог найтись в другом "
+            "документе корпуса — тогда accepted: false"
+        )
     return 0
 
 

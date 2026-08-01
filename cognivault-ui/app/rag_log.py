@@ -22,6 +22,14 @@ Deliberate choices:
 * **No secrets.** Records carry no user id (the file already lives in the
   caller's own directory) and :func:`append` scrubs any key that looks like a
   credential before writing.
+* **The rendered context and the answer are written in full** (capped by
+  :data:`MAX_TEXT_CHARS`, which sits above both the RAG char budget and the
+  model's own output cap, so in practice nothing is lost). Without them the
+  eval harness has to *guess* what the model saw by re-slicing documents from
+  metadata, and that guess is biased in both directions — see
+  ``tools/eval/README.md``. The price is record size: a full turn is ~30 KB, so
+  the 5 MiB rotation holds roughly 150–300 turns, which comfortably covers a
+  golden-set run. Collect the file right after a run.
 
 Deployment note: in the production manifest ``/data`` is an ``emptyDir``, so
 this log (and the votes in it) does not survive a pod restart. That is fine for
@@ -30,11 +38,16 @@ eval runs — collect the file before recycling the pod.
 
 from __future__ import annotations
 
+import functools
+import hashlib
 import json
 import os
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .config import AppPaths
 
@@ -43,6 +56,12 @@ LOG_NAME = "rag_log.jsonl"
 # Rotate at 5 MiB, keep the current file plus a single ``.1`` backup.
 MAX_BYTES = 5 * 1024 * 1024
 BACKUP_SUFFIX = ".1"
+
+#: Hard cap for the two free-text fields (``answer_text``, ``context_text``).
+#: The RAG context budget is 24 000 chars and ``max_tokens`` is 4096 (≈12 000
+#: chars of Russian), so this never truncates a real turn — it only bounds a
+#: pathological one. Truncation is always flagged (``*_truncated_in_log``).
+MAX_TEXT_CHARS = 32_000
 
 # Keys whose values are (or may embed) credentials. Never written, at any depth.
 _SECRET_KEYS = frozenset(
@@ -113,6 +132,154 @@ def append(paths: AppPaths, record: dict[str, Any]) -> bool:
         return True
     except Exception:  # noqa: BLE001 — telemetry is strictly best-effort
         return False
+
+
+def truncate(text: str, limit: int | None = None) -> tuple[str, bool]:
+    """``(text capped at limit, was_truncated)`` — for the free-text fields.
+
+    ``limit`` defaults to :data:`MAX_TEXT_CHARS` at call time (not at
+    definition time) so the constant stays overridable.
+    """
+    cap = MAX_TEXT_CHARS if limit is None else limit
+    value = text or ""
+    if len(value) <= cap:
+        return value, False
+    return value[:cap], True
+
+
+# --------------------------------------------------------------------------- #
+# Stage timings
+# --------------------------------------------------------------------------- #
+#
+# The chat route wants per-stage latency (condense / search / grader / stream),
+# but three of those stages happen deep inside ``rag.build_rag_context``. Rather
+# than thread a timer argument through every layer, the collector lives in a
+# ``ContextVar``: the route opens one for the duration of a request and any code
+# running in that context can contribute. Asyncio tasks inherit a copy of the
+# context, so parallel requests never share a collector.
+#
+# Two ways to contribute: wrap a block in :func:`stage`, or wrap a whole
+# coroutine function once with :func:`instrument` (used for the call seams the
+# route does not own). Durations of the same stage accumulate — with the grader
+# fanning out into parallel batches the sum is the honest "time spent grading",
+# while the wall clock is covered by the enclosing ``rag`` stage.
+
+_STAGES: ContextVar[dict[str, float] | None] = ContextVar("rag_log_stages", default=None)
+
+_INSTRUMENTED = "__rag_log_stage__"
+
+
+@contextmanager
+def collect_stages() -> Iterator[dict[str, float]]:
+    """Open a stage collector for this context; yields the accumulator dict."""
+    acc: dict[str, float] = {}
+    token = _STAGES.set(acc)
+    try:
+        yield acc
+    finally:
+        _STAGES.reset(token)
+
+
+def record_stage(name: str, ms: float) -> None:
+    """Add ``ms`` to ``name`` in the active collector (no-op without one)."""
+    acc = _STAGES.get()
+    if acc is None:
+        return
+    acc[name] = round(acc.get(name, 0.0) + ms, 1)
+
+
+@contextmanager
+def stage(name: str) -> Iterator[None]:
+    """Time a block and accumulate it under ``name``."""
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        record_stage(name, (time.perf_counter() - started) * 1000.0)
+
+
+def instrument(module: Any, attr: str, name: str) -> bool:
+    """Wrap the coroutine ``module.attr`` so its calls land under stage ``name``.
+
+    Idempotent and defensive: a missing attribute or an already-wrapped one is
+    a no-op returning ``False``. Monkeypatching the attribute later (as tests
+    do) simply removes the wrapper — timings disappear, nothing breaks.
+    """
+    original = getattr(module, attr, None)
+    if original is None or getattr(original, _INSTRUMENTED, None) == name:
+        return False
+
+    @functools.wraps(original)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        with stage(name):
+            return await original(*args, **kwargs)
+
+    setattr(wrapper, _INSTRUMENTED, name)
+    setattr(module, attr, wrapper)
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# Settings snapshot
+# --------------------------------------------------------------------------- #
+
+#: RAG knobs worth pinning to a run: retrieval width, grader bar, feature flags,
+#: budgets. Anything not listed here is deliberately left out of the record.
+_RAG_SNAPSHOT_KEYS = (
+    "mode",
+    "source",
+    "limit",
+    "min_score",
+    "rerank_candidates",
+    "condense_enabled",
+    "grader_enabled",
+    "grader_threshold",
+    "grader_keep_top",
+    "max_context_chars",
+    "file_full_chars",
+    "section_max_chars",
+    "max_expanded_files",
+    "token_budget",
+)
+
+#: GigaChat knobs. Whitelisted rather than filtered: the section also holds
+#: ``cert_path``/``key_path``/``key_passphrase``, which must never be logged.
+_GIGA_SNAPSHOT_KEYS = ("model", "temperature", "max_tokens", "model_context_tokens")
+
+
+def _prompt_fingerprint(value: Any) -> str | None:
+    """Short stable digest of a prompt override (``None`` = built-in default).
+
+    The text itself is not logged — it can be long and it is the *identity* that
+    matters for reproducibility ("was this run made with the same prompts?").
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return hashlib.sha1(value.strip().encode("utf-8")).hexdigest()[:8]
+
+
+def settings_snapshot(
+    rcfg: dict[str, Any] | None,
+    gcfg: dict[str, Any] | None,
+    prompts: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The effective knobs of this turn — what a later run has to match.
+
+    Retrieval width, grader threshold, feature flags, generation parameters and
+    a fingerprint of each answer prompt. Credentials are excluded by
+    construction (whitelist), not by filtering.
+    """
+    rag_cfg = rcfg if isinstance(rcfg, dict) else {}
+    giga_cfg = gcfg if isinstance(gcfg, dict) else {}
+    prompt_cfg = prompts if isinstance(prompts, dict) else {}
+    return {
+        "rag": {k: rag_cfg.get(k) for k in _RAG_SNAPSHOT_KEYS if k in rag_cfg},
+        "gigachat": {k: giga_cfg.get(k) for k in _GIGA_SNAPSHOT_KEYS if k in giga_cfg},
+        "prompts": {
+            key: _prompt_fingerprint(prompt_cfg.get(key))
+            for key in ("system", "context_reminder")
+        },
+    }
 
 
 def read_records(paths: AppPaths) -> list[dict[str, Any]]:

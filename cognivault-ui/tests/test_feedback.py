@@ -173,22 +173,75 @@ def test_feedback_reports_write_failure(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def _install_chat(monkeypatch, paths, *, sources, answer):
+#: Every key a ``"request"`` record must carry. Kept as a literal set so that
+#: dropping a field (the harness reads all of them) fails loudly here.
+REQUEST_KEYS = {
+    "type",
+    "ts",
+    "chat_id",
+    "message_index",
+    "intent",
+    "question_raw",
+    "question_standalone",
+    "candidates",
+    "grades",
+    "sources",
+    "context_text",
+    "context_chars",
+    "context_truncated_in_log",
+    "answer_text",
+    "answer_chars",
+    "answer_truncated_in_log",
+    "finish_reason",
+    "invalid_citations",
+    "rag_used",
+    "notice",
+    "truncated",
+    "errored",
+    "settings",
+    "timings_ms",
+}
+
+CONTEXT_BLOCK = "### Источник 1: Док — notes/a.md > Раздел\nтело раздела\n"
+
+
+def _install_chat(monkeypatch, paths, *, sources, answer, finish_reason="stop"):
     async def fake_build_rag_context(query, *args, **kwargs):
         return rag.RagContext(
             system_message={"role": "system", "content": "правила"},
-            user_message={"role": "user", "content": f"Источники:\n\nВопрос: {query}"},
+            user_message={
+                "role": "user",
+                "content": (
+                    f"Источники:\n\n{CONTEXT_BLOCK}\n\nнапоминание\n\nВопрос: {query}"
+                ),
+            },
             sources=sources,
-            context_chars=42,
+            context_chars=len(CONTEXT_BLOCK),
         )
 
     async def fake_stream_chat(messages, gcfg):
+        gcfg.last_finish_reason = finish_reason
         yield answer
 
     monkeypatch.setattr(chat_routes, "resolve_paths", lambda request: paths)
     monkeypatch.setattr(chat_routes.rag, "build_rag_context", fake_build_rag_context)
     monkeypatch.setattr(chat_routes.gigachat, "stream_chat", fake_stream_chat)
     monkeypatch.setattr(chat_routes.gigachat, "_files_present", lambda gcfg: None)
+
+
+def _ask(client, **extra):
+    return client.post(
+        "/api/chat",
+        json={
+            "messages": [
+                {"role": "user", "content": "первый вопрос"},
+                {"role": "assistant", "content": "первый ответ"},
+                {"role": "user", "content": "как настроить ЕФС?"},
+            ],
+            "rag": True,
+            **extra,
+        },
+    )
 
 
 def test_chat_writes_request_record(tmp_path, monkeypatch):
@@ -201,6 +254,7 @@ def test_chat_writes_request_record(tmp_path, monkeypatch):
             "section_path": "Раздел > Подраздел",
             "score": 0.91,
             "depth": "section",
+            "grade": 5,
         }
     ]
     _install_chat(
@@ -211,17 +265,7 @@ def test_chat_writes_request_record(tmp_path, monkeypatch):
     )
 
     with TestClient(create_app()) as client:
-        resp = client.post(
-            "/api/chat",
-            json={
-                "messages": [
-                    {"role": "user", "content": "первый вопрос"},
-                    {"role": "assistant", "content": "первый ответ"},
-                    {"role": "user", "content": "как настроить ЕФС?"},
-                ],
-                "rag": True,
-            },
-        )
+        resp = _ask(client)
 
     assert resp.status_code == 200
     chat_id = dict(_parse_sse(resp.text))["meta"]["chat_id"]
@@ -229,23 +273,7 @@ def test_chat_writes_request_record(tmp_path, monkeypatch):
     records = _records(paths)
     assert len(records) == 1
     rec = records[0]
-    assert set(rec) == {
-        "type",
-        "ts",
-        "chat_id",
-        "message_index",
-        "intent",
-        "question_raw",
-        "question_standalone",
-        "candidates",
-        "grades",
-        "sources",
-        "answer_chars",
-        "invalid_citations",
-        "rag_used",
-        "notice",
-        "truncated",
-    }
+    assert set(rec) == REQUEST_KEYS
     assert rec["type"] == "request"
     assert rec["chat_id"] == chat_id
     # 3 incoming messages → the answer is index 3 in the persisted chat.
@@ -262,6 +290,10 @@ def test_chat_writes_request_record(tmp_path, monkeypatch):
             "section_path": "Раздел > Подраздел",
             "depth": "section",
             "score": 0.91,
+            "grade": 5,
+            # Кандидатов нет (RagContext замокан) — чанк восстановить не из чего.
+            "chunk_index": None,
+            "chunk_indexes": [],
         }
     ]
     assert rec["answer_chars"] == len("ответ [Источник 1] и [Источник 7]")
@@ -269,6 +301,86 @@ def test_chat_writes_request_record(tmp_path, monkeypatch):
     assert rec["rag_used"] is True
     assert rec["notice"] is None
     assert rec["truncated"] is False
+    assert rec["errored"] is False
+
+
+def test_request_record_carries_answer_and_rendered_context(tmp_path, monkeypatch):
+    """Ответ и ТОТ САМЫЙ блок «Источники» — вход правила диагностики."""
+    paths = _paths(tmp_path)
+    _install_chat(monkeypatch, paths, sources=[{"n": 1, "path": "notes/a.md"}], answer="ответ")
+
+    with TestClient(create_app()) as client:
+        _ask(client)
+
+    rec = _records(paths)[0]
+    assert rec["answer_text"] == "ответ"
+    assert rec["answer_truncated_in_log"] is False
+    # Ровно блок источников: без «Источники:», напоминания и вопроса.
+    assert rec["context_text"] == CONTEXT_BLOCK
+    assert rec["context_chars"] == len(CONTEXT_BLOCK)
+    assert rec["context_truncated_in_log"] is False
+
+
+def test_request_record_flags_truncation_of_long_text(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    monkeypatch.setattr(chat_routes.rag_log, "MAX_TEXT_CHARS", 10)
+    _install_chat(monkeypatch, paths, sources=[], answer="я" * 50)
+
+    with TestClient(create_app()) as client:
+        _ask(client)
+
+    rec = _records(paths)[0]
+    assert rec["answer_text"] == "я" * 10
+    assert rec["answer_chars"] == 50
+    assert rec["answer_truncated_in_log"] is True
+
+
+@pytest.mark.parametrize("reason", ["stop", "length"])
+def test_request_record_keeps_finish_reason(tmp_path, monkeypatch, reason):
+    """Обрыв по `length` виден в логе — раньше значение выбрасывалось."""
+    paths = _paths(tmp_path)
+    _install_chat(monkeypatch, paths, sources=[], answer="ответ", finish_reason=reason)
+
+    with TestClient(create_app()) as client:
+        _ask(client)
+
+    assert _records(paths)[0]["finish_reason"] == reason
+
+
+def test_request_record_snapshots_settings_without_secrets(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    _install_chat(monkeypatch, paths, sources=[], answer="ответ")
+
+    with TestClient(create_app()) as client:
+        _ask(client, rag_limit=7, temperature=0.9, max_tokens=1234)
+
+    snapshot = _records(paths)[0]["settings"]
+    assert snapshot["rag"]["limit"] == 7
+    assert snapshot["rag"]["grader_threshold"] == 4
+    assert snapshot["rag"]["rerank_candidates"] == 40
+    assert snapshot["gigachat"]["max_tokens"] == 1234
+    assert snapshot["gigachat"]["model"]
+    # Дефолтные (некастомизированные) промпты — отпечатка нет.
+    assert snapshot["prompts"] == {"system": None, "context_reminder": None}
+    # Ни путей к сертификатам, ни паролей, ни токенов.
+    raw = rag_log.log_path(paths).read_text(encoding="utf-8")
+    for leaked in ("cert_path", "key_path", "passphrase", "client_crt", "client_key"):
+        assert leaked not in raw
+
+
+def test_request_record_reports_stage_timings(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    _install_chat(monkeypatch, paths, sources=[], answer="ответ")
+
+    with TestClient(create_app()) as client:
+        _ask(client)
+
+    timings = _records(paths)[0]["timings_ms"]
+    # Стадии, которыми владеет сам роут (RAG-слой и GigaChat здесь замоканы,
+    # поэтому condense/search/grade в этот прогон не попадают).
+    assert {"rag", "stream", "first_token", "total"} <= set(timings)
+    assert all(isinstance(v, (int, float)) and v >= 0 for v in timings.values())
+    assert timings["total"] >= timings["stream"]
 
 
 def test_chat_record_and_feedback_share_the_file(tmp_path, monkeypatch):

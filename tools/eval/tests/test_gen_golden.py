@@ -11,12 +11,18 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gen_golden import (  # noqa: E402
+    GEN_PROMPT,
+    REFUSAL_GROUND_TRUTH,
+    UNANSWERABLE_PROMPT,
     BackendClient,
     Fragment,
+    build_unanswerable_prompt,
     extract_paths,
     pairs_from_verdict,
+    pick_unanswerable,
     select_fragments,
     split_fragments,
+    unanswerable_from_verdict,
     write_jsonl,
 )
 
@@ -127,6 +133,8 @@ def test_pairs_from_verdict_row_shape():
     assert all(r["accepted"] is None for r in rows)
     assert rows[0]["source_path"] == "docs/a.md"
     assert rows[0]["section_path"] == "Индексация > Чанкер"
+    assert rows[0]["expected_refusal"] is False
+    assert rows[0]["source_chunk_index"] is None
     assert set(rows[0]) == {
         "id",
         "question",
@@ -134,6 +142,8 @@ def test_pairs_from_verdict_row_shape():
         "kind",
         "source_path",
         "section_path",
+        "source_chunk_index",
+        "expected_refusal",
         "accepted",
     }
 
@@ -148,6 +158,74 @@ def test_pairs_from_verdict_skips_nulls_and_blanks():
         },
     )
     assert rows == []
+
+
+# --------------------------------------------------------------------------- #
+# Формулировка вопроса: без лексической утечки
+# --------------------------------------------------------------------------- #
+
+
+def test_prompt_asks_for_a_natural_question_not_fragment_wording():
+    """Промпт больше не требует называть термины фрагмента.
+
+    Старая формулировка («Упоминай конкретные названия…») заставляла модель
+    переписывать в вопрос слова документа — лексическая ветка поиска находила
+    его по точному совпадению, и метрики завышались.
+    """
+    assert "Упоминай конкретные названия" not in GEN_PROMPT
+    assert "Не переписывай формулировки фрагмента" in GEN_PROMPT
+    assert "ЕЩЁ НЕ ЧИТАЛ этот текст" in GEN_PROMPT
+    # Идентификаторы всё же нельзя пересказывать — иначе вопрос теряет смысл.
+    assert "коды ошибок" in GEN_PROMPT
+    # Самодостаточность требования никуда не делась.
+    assert "в этом фрагменте" in GEN_PROMPT
+
+
+# --------------------------------------------------------------------------- #
+# Ветка отказа: вопросы, ответа на которые в корпусе нет
+# --------------------------------------------------------------------------- #
+
+
+def test_unanswerable_prompt_asks_for_plausible_but_uncovered_question():
+    prompt = build_unanswerable_prompt(Fragment("a.md", "Раздел", "текст"))
+    assert "ответа на который в документации НЕТ" in prompt
+    assert "правдоподобно и по теме" in prompt
+    assert '"unanswerable"' in UNANSWERABLE_PROMPT
+
+
+def test_unanswerable_row_expects_a_refusal():
+    fragment = Fragment("docs/a.md", "Раздел", "текст")
+    rows = unanswerable_from_verdict(
+        fragment, {"unanswerable": {"question": "Сколько это стоит?", "why": "нет цен"}}
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["kind"] == "unanswerable"
+    assert row["expected_refusal"] is True
+    assert row["ground_truth"] == REFUSAL_GROUND_TRUTH
+    # Источника нет по определению — retrieval_hit для такой строки не считается.
+    assert row["source_path"] is None and row["section_path"] is None
+    assert row["id"].endswith("-u")
+    assert row["accepted"] is None
+
+
+def test_unanswerable_row_skips_empty_and_malformed():
+    fragment = Fragment("a.md", "S", "текст")
+    assert unanswerable_from_verdict(fragment, {}) == []
+    assert unanswerable_from_verdict(fragment, {"unanswerable": None}) == []
+    assert unanswerable_from_verdict(fragment, {"unanswerable": {"question": " "}}) == []
+
+
+def test_pick_unanswerable_is_deterministic_and_sized_by_share():
+    fragments = [Fragment(f"d{i}.md", "S", "t") for i in range(50)]
+    first = pick_unanswerable(fragments, 0.12, seed=42)
+    second = pick_unanswerable(fragments, 0.12, seed=42)
+    assert first == second
+    assert len(first) == 6  # 12% от 50
+    assert pick_unanswerable(fragments, 0.0, seed=42) == set()
+    # Маленький корпус всё равно получает хотя бы один вопрос-отказ.
+    assert len(pick_unanswerable(fragments[:3], 0.12, seed=42)) == 1
+    assert pick_unanswerable([], 0.12, seed=42) == set()
 
 
 def test_write_jsonl_keeps_cyrillic_raw(tmp_path):

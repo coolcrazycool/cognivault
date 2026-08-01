@@ -6,11 +6,13 @@
    ``accepted: false`` — то есть непровалидированные ``null`` тоже идут в дело);
 2. каждый вопрос уходит в UI-API ``POST /api/chat`` с ``rag: true``; SSE-поток
    разбирается в ответ + список ``sources``;
-3. текст источников подтягивается из бэкенда (``GET /api/vault/content``) —
-   событие ``sources`` отдаёт только метаданные, самих чанков в нём нет,
-   поэтому контекст для метрик восстанавливается по ``path``/``section_path``
-   (это приближение, см. README);
-4. считаются четыре судейские метрики (``metrics.py``), агрегируются средние;
+3. контекст для метрик берётся из ``rag_log.jsonl`` UI — там лежит **ровно тот**
+   блок «Источники», который видела модель (``context_text``), плюс
+   ``chunk_index`` каждого источника и снимок настроек прогона. Если лог
+   недоступен, включается фолбэк: текст восстанавливается из метаданных через
+   ``GET /api/vault/content``, и весь прогон помечается ПРИБЛИЖЁННЫМ;
+4. считаются четыре судейские метрики (``metrics.py``); упавшие сэмплы
+   в средние НЕ попадают и выносятся в отчёт отдельной строкой;
 5. пишутся ``report-<label>.json`` и ``report-<label>.md``.
 
 Сравнение прогонов::
@@ -20,7 +22,9 @@
     python3 tools/eval/run.py --compare reports/report-baseline.json \\
                                         reports/report-wave-3.json
 
-Абсолютные значения судьи не показательны — смысл только в дельте A/B.
+Абсолютные значения судьи не показательны — смысл только в дельте A/B, и
+``--compare`` считает её **парно** (по одним и тем же вопросам) с разбросом и
+числом пар, чтобы отличать сигнал от шума судьи.
 """
 
 from __future__ import annotations
@@ -28,7 +32,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
+import re
+import statistics
 import sys
 import time
 from dataclasses import dataclass, field
@@ -37,6 +44,7 @@ from typing import Any, Iterable, Sequence
 
 import httpx
 
+import gen_golden as gen_golden_mod
 import metrics as metrics_mod
 from gen_golden import BackendClient, BackendError, resolve_backend
 from gigachat_client import GigaChatEvalError, GigaChatJudge, JudgeConfig
@@ -57,11 +65,48 @@ DIAGNOSTIC_RULE = (
     "**Правило диагностики (план, критерий Волны 5):** если нужный чанк был "
     "в контексте, а ответ неверен — чинить генерацию (промпт, порядок блоков, "
     "модель); если нужного чанка в контексте не было — чинить ретрив "
-    "(поиск, гибрид, реранкер). За это отвечает метрика `retrieval_hit`: попал "
-    "ли `source_path` из golden-пары в выданные источники."
+    "(поиск, гибрид, реранкер). За это отвечает метрика `retrieval_hit`: попала "
+    "ли пара `(path, chunk_index)` из golden-пары в выданные источники "
+    "(гранулярность падает до раздела/файла, если в golden-паре чанк не указан "
+    "— см. `retrieval_granularity`)."
+)
+
+APPROXIMATE_WARNING = (
+    "**ПРИБЛИЖЁННЫЙ ПРОГОН.** Текст контекста для части пар восстановлен из "
+    "метаданных (`path`/`section_path`), а не взят из `rag_log.jsonl`. "
+    "Восстановление смещает метрики В ОБЕ СТОРОНЫ: для `depth=\"chunk\"` в "
+    "судью уходит целая секция (метрики завышаются), для `depth=\"file\"` — "
+    "первые N символов файла (занижаются). Сдвиг зависит от состава `depth`, "
+    "поэтому A/B-дельта между прогоном по логу и прогоном по метаданным "
+    "недостоверна. Дайте харнессу `--rag-log <путь к rag_log.jsonl>`."
 )
 
 RETRIEVAL_KEY = "retrieval_hit"
+REFUSAL_KEY = "refusal_ok"
+
+#: Формулировки отказа («в источниках ответа нет») — ветка, которую меряют
+#: golden-пары с ``expected_refusal``. Держать в согласии с `rag.SYSTEM_PROMPT`.
+_REFUSAL_PATTERNS = (
+    r"ответа\s+на\s+этот\s+вопрос\s+не\s+нашлось",
+    r"в\s+доступных\s+мне\s+документах",
+    r"в\s+базе\s+знаний\s+нет\s+данных",
+    r"в\s+источниках\s+(?:нет|отсутству)",
+    r"не\s+нашлось\s+ответа",
+    r"информаци\w+\s+(?:нет|не\s+найдено)",
+)
+_REFUSAL_RE = re.compile("|".join(_REFUSAL_PATTERNS), re.IGNORECASE)
+
+
+def is_refusal(answer: str, *, finish_reason: str | None = None) -> bool:
+    """Ответил ли ассистент отказом «в источниках этого нет».
+
+    Две улики: служебный ``finish_reason == "no_context"`` (грейдер не оставил
+    ни одного фрагмента — генерации не было вовсе) и формулировка отказа из
+    системного промпта.
+    """
+    if finish_reason == "no_context":
+        return True
+    return bool(_REFUSAL_RE.search(answer or ""))
 
 
 # --------------------------------------------------------------------------- #
@@ -294,26 +339,190 @@ def slice_section(content: str, section_path: str, cap: int = 4000) -> str | Non
     return text[:cap] if text else None
 
 
-async def fetch_contexts(
+# --------------------------------------------------------------------------- #
+# Context: the real thing from rag_log.jsonl, or an approximate rebuild
+# --------------------------------------------------------------------------- #
+
+#: Заголовок блока контекста (`rag._header`): `### Источник N: title — path…`.
+_BLOCK_RE = re.compile(r"^###\s+Источник\s+\d+\s*:", re.MULTILINE)
+
+
+def split_context_blocks(context_text: str) -> list[str]:
+    """Разрезать отрендеренный блок «Источники» на отдельные фрагменты.
+
+    Судейские метрики оценивают фрагменты по отдельности (`context_precision`
+    считает долю релевантных), поэтому монолитный блок нужно вернуть в список.
+    Разрез идёт по заголовкам `### Источник N:`; если их нет (пустой контекст
+    или чужой рендер), возвращается один элемент.
+    """
+    text = (context_text or "").strip()
+    if not text:
+        return []
+    bounds = [m.start() for m in _BLOCK_RE.finditer(text)]
+    if not bounds:
+        return [text]
+    bounds.append(len(text))
+    out: list[str] = []
+    if bounds[0] > 0:  # преамбула до первого заголовка — не теряем
+        head = text[: bounds[0]].strip()
+        if head:
+            out.append(head)
+    for start, end in zip(bounds, bounds[1:]):
+        block = text[start:end].strip()
+        if block:
+            out.append(block)
+    return out
+
+
+class RagLogIndex:
+    """Записи ``rag_log.jsonl`` типа ``request``, разложенные по ``chat_id``.
+
+    Лог — единственное место, где сохранён **фактический** контекст хода. Он
+    же несёт ``chunk_index`` источников и снимок настроек, поэтому отчёт умеет
+    зафиксировать параметры прогона.
+    """
+
+    def __init__(
+        self, records: Iterable[dict[str, Any]] = (), path: str | None = None
+    ) -> None:
+        self._by_chat: dict[str, dict[str, Any]] = {}
+        self._path = path
+        self._mtime: float | None = None
+        self.absorb(records)
+
+    def absorb(self, records: Iterable[dict[str, Any]]) -> None:
+        for record in records:
+            if not isinstance(record, dict) or record.get("type") != "request":
+                continue
+            chat_id = str(record.get("chat_id", "") or "")
+            if chat_id:
+                self._by_chat[chat_id] = record
+
+    def __len__(self) -> int:
+        return len(self._by_chat)
+
+    def get(self, chat_id: str) -> dict[str, Any] | None:
+        """Запись хода; при промахе перечитывает файл (лог растёт по ходу прогона).
+
+        Запись появляется в логе только когда ход ДОСЕЛЕ закончился, а харнесс
+        спрашивает её сразу после стрима — поэтому снимок, снятый при старте,
+        всегда пуст. Перечитываем при промахе, но только если файл изменился.
+        """
+        if not chat_id:
+            return None
+        record = self._by_chat.get(chat_id)
+        if record is None and self.refresh():
+            record = self._by_chat.get(chat_id)
+        return record
+
+    def refresh(self) -> bool:
+        """Перечитать файл, если он изменился. ``True`` — что-то перечитали."""
+        if not self._path:
+            return False
+        try:
+            mtime = os.path.getmtime(self._path)
+        except OSError:
+            return False
+        if self._mtime is not None and mtime <= self._mtime:
+            return False
+        self._mtime = mtime
+        try:
+            with open(self._path, "r", encoding="utf-8") as fh:
+                self.absorb(parse_jsonl(fh.read()))
+        except OSError:
+            return False
+        return True
+
+    @classmethod
+    def from_text(cls, text: str) -> "RagLogIndex":
+        return cls(parse_jsonl(text))
+
+    @classmethod
+    def load(cls, path: str) -> "RagLogIndex | None":
+        """Открыть лог; ``None`` — файла нет (значит, будет фолбэк)."""
+        if not os.path.exists(path):
+            return None
+        index = cls(path=path)
+        index.refresh()
+        return index
+
+
+def parse_jsonl(text: str) -> list[dict[str, Any]]:
+    """Разобрать JSONL, молча пропуская битые строки (последняя может рваться)."""
+    out: list[dict[str, Any]] = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            out.append(parsed)
+    return out
+
+
+@dataclass
+class ResolvedContext:
+    """Контекст одного сэмпла + откуда он взялся."""
+
+    contexts: list[str] = field(default_factory=list)
+    origin: str = "none"  # rag_log | metadata | none
+    sources: list[dict[str, Any]] = field(default_factory=list)
+    error: str = ""
+
+    @property
+    def approximate(self) -> bool:
+        """``True`` — контекст восстановлен, а не взят из лога."""
+        return self.origin != "rag_log"
+
+
+def context_from_log(record: dict[str, Any]) -> ResolvedContext | None:
+    """Достать фактический контекст хода из записи лога.
+
+    ``None`` — в записи нет ``context_text`` (старый UI): пусть решает фолбэк.
+    Пустой контекст при ``rag_used`` — это НЕ ошибка: значит, ретрив честно
+    ничего не дал, и метрики должны это увидеть.
+    """
+    if "context_text" not in record:
+        return None
+    sources = [s for s in (record.get("sources") or []) if isinstance(s, dict)]
+    if record.get("context_truncated_in_log"):
+        _log(f"  ! контекст хода {record.get('chat_id')} обрезан в логе")
+    return ResolvedContext(
+        contexts=split_context_blocks(str(record.get("context_text", "") or "")),
+        origin="rag_log",
+        sources=sources,
+    )
+
+
+async def rebuild_contexts(
     backend: BackendClient | None,
     sources: Sequence[dict[str, Any]],
     *,
     cache: dict[str, str],
     cap: int = 4000,
-) -> list[str]:
-    """Rebuild the text of each source (chunk text is not exposed over SSE).
+) -> ResolvedContext:
+    """ФОЛБЭК: восстановить текст источников из метаданных.
 
-    Section-level sources are sliced out of the document; file-level ones are
-    capped. On any backend failure the source degrades to its header line so the
-    judge at least sees which document was cited.
+    Работает только когда ``rag_log.jsonl`` недоступен. Section-level источники
+    вырезаются из документа, file-level режутся по ``cap`` — и то и другое
+    ЗАМЕТНО расходится с тем, что видела модель (см. :data:`APPROXIMATE_WARNING`),
+    поэтому такой прогон помечается приближённым.
+
+    Ошибка бэкенда больше не «деградирует до заголовка»: раньше это давало
+    судье пустой контекст, нули уезжали в среднее и читались как регрессия.
+    Теперь сэмпл получает ``error`` и выбывает из агрегатов.
     """
-    contexts: list[str] = []
+    resolved = ResolvedContext(origin="metadata", sources=list(sources))
+    failures: list[str] = []
     for source in sources:
         path = str(source.get("path", "") or "")
         section_path = str(source.get("section_path", "") or "")
         header = " > ".join(x for x in (path, section_path) if x)
         if not path or backend is None:
-            contexts.append(header)
+            failures.append(f"{path or '(без пути)'}: текст недоступен")
             continue
         if path not in cache:
             try:
@@ -323,12 +532,14 @@ async def fetch_contexts(
                 _log(f"  ! контекст {path}: {exc}")
         content = cache.get(path, "")
         if not content:
-            contexts.append(header)
+            failures.append(f"{path}: пустой ответ бэкенда")
             continue
         sliced = slice_section(content, section_path, cap) if section_path else None
         text = sliced or content[:cap]
-        contexts.append(f"{header}\n{text}".strip())
-    return contexts
+        resolved.contexts.append(f"{header}\n{text}".strip())
+    if failures:
+        resolved.error = "context: " + "; ".join(failures[:5])
+    return resolved
 
 
 # --------------------------------------------------------------------------- #
@@ -340,12 +551,65 @@ def _log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-def _retrieval_hit(row: dict[str, Any], sources: Sequence[dict[str, Any]]) -> bool | None:
-    """Did the golden pair's own source document make it into the context?"""
-    expected = str(row.get("source_path", "") or "")
-    if not expected:
-        return None
-    return any(str(s.get("path", "") or "") == expected for s in sources)
+def retrieval_hit(
+    row: dict[str, Any], sources: Sequence[dict[str, Any]]
+) -> tuple[bool | None, str]:
+    """Попал ли нужный ФРАГМЕНТ в контекст, и с какой точностью это проверено.
+
+    Возвращает ``(hit, granularity)``, где granularity — ``chunk`` / ``section``
+    / ``file`` / ``none``.
+
+    Правило по убыванию точности:
+
+    1. ``chunk`` — golden-пара знает свой ``source_chunk_index``: сверяем пару
+       ``(path, chunk_index)`` по ``chunk_indexes`` источника (лог их пишет).
+       Блок с ``depth == "file"`` несёт весь документ, поэтому считается
+       покрывающим любой чанк своего файла;
+    2. ``section`` — чанк неизвестен, но известен ``section_path``: сверяем
+       ``(path, section_path)``;
+    3. ``file`` — совсем без чанка и раздела: старое пофайловое сравнение,
+       помеченное как таковое (оно завышает hit — файл мог попасть другим
+       фрагментом).
+
+    ``None`` — у golden-пары нет ``source_path`` (например, вопрос-отказ),
+    проверять нечего.
+    """
+    expected_path = str(row.get("source_path", "") or "")
+    if not expected_path:
+        return None, "none"
+
+    own = [s for s in sources if str(s.get("path", "") or "") == expected_path]
+    if not own:
+        granularity = (
+            "chunk"
+            if row.get("source_chunk_index") is not None
+            else ("section" if row.get("section_path") else "file")
+        )
+        return False, granularity
+
+    expected_chunk = row.get("source_chunk_index")
+    if isinstance(expected_chunk, int):
+        for source in own:
+            if source.get("depth") == "file":
+                return True, "chunk"
+            indexes = source.get("chunk_indexes")
+            if not isinstance(indexes, list):
+                single = source.get("chunk_index")
+                indexes = [single] if isinstance(single, int) else []
+            if expected_chunk in indexes:
+                return True, "chunk"
+        return False, "chunk"
+
+    expected_section = str(row.get("section_path", "") or "").strip()
+    if expected_section:
+        for source in own:
+            if source.get("depth") == "file":
+                return True, "section"
+            if str(source.get("section_path", "") or "").strip() == expected_section:
+                return True, "section"
+        return False, "section"
+
+    return True, "file"
 
 
 async def run_sample(
@@ -356,10 +620,18 @@ async def run_sample(
     backend: BackendClient | None,
     cache: dict[str, str],
     context_cap: int,
+    rag_log: RagLogIndex | None = None,
 ) -> dict[str, Any]:
-    """Ask one golden question, judge the answer, return a report row."""
+    """Ask one golden question, judge the answer, return a report row.
+
+    A sample that could not be produced end-to-end (chat error, unusable
+    context) carries ``failed: True`` and empty ``metrics`` — :func:`build_report`
+    keeps such rows out of every average instead of letting their zeros read as
+    a regression.
+    """
     question = str(row.get("question", "") or "")
     ground_truth = str(row.get("ground_truth", "") or "")
+    expects_refusal = bool(row.get("expected_refusal"))
     started = time.perf_counter()
     sample: dict[str, Any] = {
         "id": row.get("id"),
@@ -367,44 +639,73 @@ async def run_sample(
         "question": question,
         "ground_truth": ground_truth,
         "source_path": row.get("source_path"),
+        "source_chunk_index": row.get("source_chunk_index"),
         "section_path": row.get("section_path"),
+        "expected_refusal": expects_refusal,
         "accepted": row.get("accepted"),
         "answer": "",
         "sources": [],
         "context_count": 0,
+        "context_origin": "none",
         RETRIEVAL_KEY: None,
+        "retrieval_granularity": "none",
+        REFUSAL_KEY: None,
         "metrics": {},
         "error": "",
+        "failed": False,
         "latency_ms": 0,
     }
+
+    def fail(message: str) -> dict[str, Any]:
+        sample["error"] = message
+        sample["failed"] = True
+        return sample
 
     try:
         outcome = await chat.ask(question)
     except httpx.HTTPError as exc:
-        sample["error"] = f"chat transport: {exc}"
         sample["latency_ms"] = int((time.perf_counter() - started) * 1000)
-        return sample
+        return fail(f"chat transport: {exc}")
 
     sample["latency_ms"] = int((time.perf_counter() - started) * 1000)
     sample["answer"] = outcome.answer
-    sample["sources"] = outcome.sources
+    sample["chat_id"] = outcome.chat_id
     sample["notice"] = outcome.notice
+    sample["finish_reason"] = outcome.finish_reason
     sample["event_order"] = outcome.order
-    sample[RETRIEVAL_KEY] = _retrieval_hit(row, outcome.sources)
 
     if outcome.error:
-        sample["error"] = outcome.error
-        return sample
+        return fail(outcome.error)
 
-    contexts = await fetch_contexts(backend, outcome.sources, cache=cache, cap=context_cap)
-    sample["context_count"] = len(contexts)
+    # Контекст: сперва фактический из лога, иначе — приближённое восстановление.
+    record = rag_log.get(outcome.chat_id) if rag_log is not None else None
+    resolved = context_from_log(record) if record else None
+    if resolved is None:
+        resolved = await rebuild_contexts(
+            backend, outcome.sources, cache=cache, cap=context_cap
+        )
+    if record is not None:
+        sample["run_settings"] = record.get("settings")
+        sample["timings_ms"] = record.get("timings_ms")
+
+    # Метаданные источников: из лога они богаче (`chunk_index`), из SSE — беднее.
+    sample["sources"] = resolved.sources or outcome.sources
+    sample["context_count"] = len(resolved.contexts)
+    sample["context_origin"] = resolved.origin
+    sample[REFUSAL_KEY] = is_refusal(outcome.answer, finish_reason=outcome.finish_reason)
+    hit, granularity = retrieval_hit(row, sample["sources"])
+    sample[RETRIEVAL_KEY] = hit
+    sample["retrieval_granularity"] = granularity
+
+    if resolved.error:
+        return fail(resolved.error)
 
     results = await evaluate_sample(
         judge,
         question=question,
         ground_truth=ground_truth,
         answer=outcome.answer,
-        contexts=contexts,
+        contexts=resolved.contexts,
     )
     sample["metrics"] = {name: result.to_dict() for name, result in results.items()}
     return sample
@@ -418,6 +719,7 @@ async def run_all(
     backend: BackendClient | None,
     concurrency: int,
     context_cap: int,
+    rag_log: RagLogIndex | None = None,
 ) -> list[dict[str, Any]]:
     """Run every golden pair with bounded concurrency (GigaChat is fragile)."""
     semaphore = asyncio.Semaphore(max(1, concurrency))
@@ -435,10 +737,11 @@ async def run_all(
                 backend=backend,
                 cache=cache,
                 context_cap=context_cap,
+                rag_log=rag_log,
             )
             out[index] = sample
             done += 1
-            mark = "!" if sample.get("error") else "·"
+            mark = "!" if sample.get("failed") else "·"
             _log(f"  [{done}/{len(rows)}] {mark} {sample.get('id')}")
 
     await asyncio.gather(*(worker(i, row) for i, row in enumerate(rows)))
@@ -450,13 +753,113 @@ async def run_all(
 # --------------------------------------------------------------------------- #
 
 
+def is_failed(sample: dict[str, Any]) -> bool:
+    """Сэмпл, который не удалось довести до конца — не данные, а сбой прогона.
+
+    Такие строки не участвуют ни в одном среднем: их нули — это «бэкенд лёг»,
+    а не «качество упало». Число упавших идёт в отчёт отдельной строкой.
+    """
+    return bool(sample.get("failed") or sample.get("error"))
+
+
+def successful(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [s for s in samples if not is_failed(s)]
+
+
 def retrieval_hit_rate(samples: Sequence[dict[str, Any]]) -> float | None:
-    """Fraction of samples whose golden document appeared in the sources."""
-    values = [s.get(RETRIEVAL_KEY) for s in samples]
-    hits = [v for v in values if isinstance(v, bool)]
+    """Доля успешных пар, где нужный фрагмент попал в контекст."""
+    hits = [
+        s.get(RETRIEVAL_KEY)
+        for s in successful(samples)
+        if isinstance(s.get(RETRIEVAL_KEY), bool)
+    ]
     if not hits:
         return None
     return round(sum(1 for v in hits if v) / len(hits), 4)
+
+
+def refusal_rate(samples: Sequence[dict[str, Any]]) -> float | None:
+    """Доля пар «ответа в корпусе нет», где ассистент честно отказался."""
+    values = [
+        s.get(REFUSAL_KEY)
+        for s in successful(samples)
+        if s.get("expected_refusal") and isinstance(s.get(REFUSAL_KEY), bool)
+    ]
+    if not values:
+        return None
+    return round(sum(1 for v in values if v) / len(values), 4)
+
+
+def metric_values(samples: Sequence[dict[str, Any]], name: str) -> list[float]:
+    """Оценки метрики по успешным сэмплам (для среднего и разброса)."""
+    out: list[float] = []
+    for sample in successful(samples):
+        entry = (sample.get("metrics") or {}).get(name) or {}
+        score = entry.get("score") if isinstance(entry, dict) else None
+        if isinstance(score, (int, float)) and not isinstance(score, bool):
+            out.append(float(score))
+    return out
+
+
+def dispersion(samples: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Разброс каждой метрики по сэмплам: ``{mean, sd, n, stderr}``.
+
+    Без него из отчёта нельзя понять, сколько «весит» дельта: среднее 0.72 по
+    12 парам с sd 0.35 и по 80 парам с sd 0.05 — разные утверждения.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for name in METRIC_NAMES:
+        values = metric_values(samples, name)
+        n = len(values)
+        mean = round(sum(values) / n, 4) if n else None
+        sd = round(statistics.stdev(values), 4) if n > 1 else (0.0 if n == 1 else None)
+        stderr = round(sd / math.sqrt(n), 4) if sd is not None and n > 1 else None
+        out[name] = {"mean": mean, "sd": sd, "n": n, "stderr": stderr}
+    return out
+
+
+def granularity_counts(samples: Sequence[dict[str, Any]]) -> dict[str, int]:
+    """Чем именно мерился ``retrieval_hit`` — чанком, разделом или файлом."""
+    out: dict[str, int] = {}
+    for sample in successful(samples):
+        key = str(sample.get("retrieval_granularity", "none") or "none")
+        out[key] = out.get(key, 0) + 1
+    return out
+
+
+def run_parameters(
+    samples: Sequence[dict[str, Any]],
+    *,
+    judge_model: str,
+    judge_temperature: float | None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Всё, без чего прогон не воспроизвести.
+
+    Настройки отвечающей системы (модель, температура, ширина ретрива, порог
+    грейдера, отпечатки промптов) берутся из снимка в ``rag_log.jsonl``. Если
+    в одном прогоне они разные — это само по себе дефект прогона, поэтому в
+    отчёт уезжает ``"(смешанные)"``, а не первое попавшееся значение.
+    """
+    seen: list[str] = []
+    settings: Any = None
+    for sample in samples:
+        snapshot = sample.get("run_settings")
+        if not isinstance(snapshot, dict):
+            continue
+        key = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+        if key not in seen:
+            seen.append(key)
+            settings = snapshot
+    params: dict[str, Any] = {
+        "judge_model": judge_model,
+        "judge_temperature": judge_temperature,
+        "judge_prompt_version": metrics_mod.PROMPT_VERSION,
+        "golden_prompt_version": getattr(gen_golden_mod, "PROMPT_VERSION", None),
+        "ui_settings": "(смешанные)" if len(seen) > 1 else settings,
+    }
+    params.update(extra or {})
+    return params
 
 
 def build_report(
@@ -466,12 +869,26 @@ def build_report(
     golden_path: str,
     ui_url: str,
     judge_model: str,
+    judge_temperature: float | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the JSON report (the same dict is rendered to markdown)."""
-    failed = [s for s in samples if s.get("error")]
-    aggregates = aggregate(samples)
+    failed = [s for s in samples if is_failed(s)]
+    ok = successful(samples)
+    # Средние — ТОЛЬКО по успешным: у упавшего сэмпла нули означают «прогон
+    # сломался», и в среднем они читались бы как регрессия качества.
+    aggregates = aggregate(ok)
     aggregates[RETRIEVAL_KEY] = retrieval_hit_rate(samples)
+    aggregates[REFUSAL_KEY] = refusal_rate(samples)
+    origins: dict[str, int] = {}
+    for sample in samples:
+        key = str(sample.get("context_origin", "none") or "none")
+        origins[key] = origins.get(key, 0) + 1
+    approximate = any(
+        sample.get("context_origin") not in (None, "rag_log")
+        for sample in ok
+        if sample.get("context_count")
+    )
     return {
         "label": label,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -479,13 +896,23 @@ def build_report(
         "ui_url": ui_url,
         "judge_model": judge_model,
         "prompt_version": metrics_mod.PROMPT_VERSION,
+        "approximate": approximate,
+        "context_origin": origins,
         "counts": {
             "total": len(samples),
             "failed": len(failed),
-            "evaluated": len(samples) - len(failed),
+            "evaluated": len(ok),
         },
         "aggregate": aggregates,
-        "coverage": coverage(samples),
+        "dispersion": dispersion(samples),
+        "coverage": coverage(ok),
+        "retrieval_granularity": granularity_counts(samples),
+        "run_params": run_parameters(
+            samples,
+            judge_model=judge_model,
+            judge_temperature=judge_temperature,
+            extra=extra,
+        ),
         "samples": list(samples),
         "extra": extra or {},
     }
@@ -499,16 +926,80 @@ def _fmt(value: Any) -> str:
     return "—" if value is None else str(value)
 
 
+def _fmt_spread(entry: Any) -> str:
+    """``mean ±sd (n)`` — одно значение без разброса ничего не говорит."""
+    if not isinstance(entry, dict):
+        return "—"
+    mean, sd, n = entry.get("mean"), entry.get("sd"), entry.get("n", 0)
+    if mean is None:
+        return "—"
+    tail = f" ±{sd:.3f}" if isinstance(sd, (int, float)) else ""
+    return f"{mean:.3f}{tail} (n={n})"
+
+
+def _render_run_params(report: dict[str, Any]) -> list[str]:
+    """Секция «Параметры прогона» — всё, без чего результат не повторить."""
+    params = report.get("run_params") or {}
+    lines = ["## Параметры прогона", ""]
+    lines.append(
+        "Дельта между прогонами имеет смысл, только если всё ниже совпадает "
+        "(кроме того, что вы намеренно меняете)."
+    )
+    lines.append("")
+    lines.append("| Параметр | Значение |")
+    lines.append("|---|---|")
+    ui = params.get("ui_settings")
+    rows: list[tuple[str, Any]] = [
+        ("судья: модель", params.get("judge_model")),
+        ("судья: температура", params.get("judge_temperature")),
+        ("судья: версия промптов", params.get("judge_prompt_version")),
+        ("генератор golden: версия промптов", params.get("golden_prompt_version")),
+    ]
+    if isinstance(ui, dict):
+        giga = ui.get("gigachat") or {}
+        rag_cfg = ui.get("rag") or {}
+        prompts = ui.get("prompts") or {}
+        rows.extend(
+            [
+                ("ответ: модель", giga.get("model")),
+                ("ответ: температура", giga.get("temperature")),
+                ("ответ: max_tokens", giga.get("max_tokens")),
+                ("ретрив: ширина (rerank_candidates)", rag_cfg.get("rerank_candidates")),
+                ("ретрив: режим", rag_cfg.get("mode")),
+                ("грейдер: включён", rag_cfg.get("grader_enabled")),
+                ("грейдер: порог", rag_cfg.get("grader_threshold")),
+                ("грейдер: keep_top", rag_cfg.get("grader_keep_top")),
+                ("condense включён", rag_cfg.get("condense_enabled")),
+                ("бюджет контекста, симв.", rag_cfg.get("max_context_chars")),
+                ("промпт system (отпечаток)", prompts.get("system") or "встроенный"),
+                (
+                    "промпт reminder (отпечаток)",
+                    prompts.get("context_reminder") or "встроенный",
+                ),
+            ]
+        )
+    else:
+        rows.append(("настройки UI", ui if ui else "не найдены (нет rag_log)"))
+    for name, value in rows:
+        lines.append(f"| {name} | `{_fmt(value)}` |")
+    lines.append("")
+    return lines
+
+
 def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
     """Render the markdown report: disclaimer → aggregates → per-sample table."""
     counts = report.get("counts", {})
     aggregates = report.get("aggregate", {})
     cover = report.get("coverage", {})
+    spread = report.get("dispersion", {}) or {}
     lines: list[str] = []
     lines.append(f"# RAG eval — прогон `{report.get('label')}`")
     lines.append("")
     lines.append(f"> {REPORT_DISCLAIMER}")
     lines.append("")
+    if report.get("approximate"):
+        lines.append(f"> {APPROXIMATE_WARNING}")
+        lines.append("")
     lines.append(f"- дата: `{report.get('generated_at')}`")
     lines.append(f"- golden-set: `{report.get('golden')}`")
     lines.append(f"- UI: `{report.get('ui_url')}`")
@@ -520,18 +1011,33 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
         f"- пар: {counts.get('total', 0)} "
         f"(оценено {counts.get('evaluated', 0)}, ошибок {counts.get('failed', 0)})"
     )
+    lines.append(
+        f"- **упало и исключено из средних: {counts.get('failed', 0)}** "
+        "(сбой чата или недоступный текст контекста — не качество)"
+    )
+    lines.append(f"- источник контекста: `{report.get('context_origin', {})}`")
+    lines.append(
+        f"- гранулярность `retrieval_hit`: `{report.get('retrieval_granularity', {})}`"
+    )
     lines.append("")
+    lines.extend(_render_run_params(report))
     lines.append("## Средние значения")
     lines.append("")
-    lines.append("| Метрика | Значение | Оценено пар |")
-    lines.append("|---|---:|---:|")
+    lines.append("| Метрика | Значение | Разброс по сэмплам | Оценено пар |")
+    lines.append("|---|---:|---|---:|")
     for name in METRIC_NAMES:
         lines.append(
-            f"| {name} | {_fmt(aggregates.get(name))} | {cover.get(name, 0)} |"
+            f"| {name} | {_fmt(aggregates.get(name))} "
+            f"| {_fmt_spread(spread.get(name))} | {cover.get(name, 0)} |"
         )
     lines.append(
-        f"| {RETRIEVAL_KEY} (доля пар, где нужный документ попал в источники) "
-        f"| {_fmt(aggregates.get(RETRIEVAL_KEY))} | {counts.get('total', 0)} |"
+        f"| {RETRIEVAL_KEY} (доля успешных пар, где нужный фрагмент попал в контекст) "
+        f"| {_fmt(aggregates.get(RETRIEVAL_KEY))} | — | {counts.get('evaluated', 0)} |"
+    )
+    lines.append(
+        f"| {REFUSAL_KEY} (доля пар «ответа нет в корпусе», где был отказ) "
+        f"| {_fmt(aggregates.get(REFUSAL_KEY))} | — | "
+        f"{sum(1 for s in report.get('samples', []) if s.get('expected_refusal'))} |"
     )
     lines.append("")
     lines.append(DIAGNOSTIC_RULE)
@@ -564,10 +1070,10 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
         lines.append("")
         lines.append(f"_…ещё {len(samples) - max_rows} пар — см. JSON-отчёт._")
 
-    failed = [s for s in samples if s.get("error")]
+    failed = [s for s in samples if is_failed(s)]
     if failed:
         lines.append("")
-        lines.append("## Ошибки прогона")
+        lines.append(f"## Упавшие пары ({len(failed)}) — исключены из средних")
         lines.append("")
         for sample in failed[:50]:
             lines.append(f"- `{sample.get('id')}`: {sample.get('error')}")
@@ -575,25 +1081,96 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------- #
+# Paired comparison
+# --------------------------------------------------------------------------- #
+
+
+def sample_scores(report: dict[str, Any], name: str) -> dict[str, float]:
+    """``{sample_id: score}`` по успешным сэмплам — основа парного сравнения."""
+    out: dict[str, float] = {}
+    for sample in report.get("samples", []) or []:
+        if not isinstance(sample, dict) or is_failed(sample):
+            continue
+        ident = sample.get("id")
+        entry = (sample.get("metrics") or {}).get(name) or {}
+        score = entry.get("score") if isinstance(entry, dict) else None
+        if ident is not None and isinstance(score, (int, float)) and not isinstance(
+            score, bool
+        ):
+            out[str(ident)] = float(score)
+    return out
+
+
+def paired_delta(
+    report_a: dict[str, Any], report_b: dict[str, Any], name: str
+) -> dict[str, Any]:
+    """Парная дельта метрики: те же вопросы в обоих прогонах.
+
+    Разность средних смешивает изменение качества с изменением СОСТАВА
+    оценённых пар (в одном прогоне судья не ответил на три вопроса, в другом —
+    на другие три). Парная дельта считается по пересечению id, поэтому состав
+    из уравнения уходит, а остаток — собственно эффект.
+
+    ``{delta, sd, n, stderr, значимость}``; ``n`` — число ПАР, а не сэмплов.
+    """
+    a = sample_scores(report_a, name)
+    b = sample_scores(report_b, name)
+    common = sorted(set(a) & set(b))
+    deltas = [b[i] - a[i] for i in common]
+    n = len(deltas)
+    if not n:
+        return {"delta": None, "sd": None, "n": 0, "stderr": None}
+    mean = sum(deltas) / n
+    sd = statistics.stdev(deltas) if n > 1 else 0.0
+    stderr = sd / math.sqrt(n) if n > 1 else None
+    return {
+        "delta": round(mean, 4),
+        "sd": round(sd, 4),
+        "n": n,
+        "stderr": round(stderr, 4) if stderr is not None else None,
+    }
+
+
+def delta_sign(delta: float | None, stderr: float | None, noise: float) -> str:
+    """▲/▼ только когда сдвиг больше и шума судьи, и двух стандартных ошибок.
+
+    Раньше знак ставился по одной константе 0.02 — при разбросе 0.3 по 12 парам
+    это регулярно объявляло сигналом обычную дрожь судьи.
+    """
+    if delta is None:
+        return "—"
+    band = noise if stderr is None else max(noise, 2.0 * stderr)
+    if abs(delta) < band:
+        return "≈"
+    return "▲" if delta > 0 else "▼"
+
+
 def render_compare_md(
     report_a: dict[str, Any], report_b: dict[str, Any], *, noise: float = 0.02
 ) -> str:
-    """Markdown diff table between two reports: метрика, A, B, дельта, знак.
+    """Markdown diff table between two reports.
 
-    ``noise`` is the band inside which a delta is reported as "≈" — judge
-    scores wobble between runs and a 0.01 move is not a signal.
+    Каждая метрика показывается со своим разбросом в обоих прогонах, парной
+    дельтой по общим вопросам, числом пар и знаком, который учитывает
+    стандартную ошибку, а не только фиксированный порог ``noise`` (он остаётся
+    нижней границей: судья дрожит и на больших выборках).
     """
     label_a = str(report_a.get("label", "A"))
     label_b = str(report_b.get("label", "B"))
     agg_a = report_a.get("aggregate", {}) or {}
     agg_b = report_b.get("aggregate", {}) or {}
-    names = list(METRIC_NAMES) + [RETRIEVAL_KEY]
+    spread_a = report_a.get("dispersion", {}) or {}
+    spread_b = report_b.get("dispersion", {}) or {}
 
     lines: list[str] = []
     lines.append(f"# Сравнение прогонов: `{label_a}` → `{label_b}`")
     lines.append("")
     lines.append(f"> {REPORT_DISCLAIMER}")
     lines.append("")
+    if report_a.get("approximate") or report_b.get("approximate"):
+        lines.append(f"> {APPROXIMATE_WARNING}")
+        lines.append("")
     if report_a.get("prompt_version") != report_b.get("prompt_version"):
         lines.append(
             "> **ВНИМАНИЕ:** прогоны сделаны разными версиями судейских промптов "
@@ -608,36 +1185,76 @@ def render_compare_md(
             "дельта недостоверна."
         )
         lines.append("")
-    lines.append(f"| Метрика | {label_a} | {label_b} | Δ | Знак |")
-    lines.append("|---|---:|---:|---:|:--:|")
-    for name in names:
-        value_a = agg_a.get(name)
-        value_b = agg_b.get(name)
+    if _params_differ(report_a, report_b):
+        lines.append(
+            "> **ВНИМАНИЕ:** различаются параметры прогонов (модель/температура/"
+            "ширина ретрива/порог грейдера/промпты) — см. «Параметры прогонов» "
+            "ниже; дельта отражает их сумму, а не одно изменение."
+        )
+        lines.append("")
+
+    lines.append(
+        f"| Метрика | {label_a} | {label_b} | Δ (парная) | ±sd | пар | Знак |"
+    )
+    lines.append("|---|---|---|---:|---:|---:|:--:|")
+    for name in METRIC_NAMES:
+        pair = paired_delta(report_a, report_b, name)
+        delta = pair["delta"]
+        delta_text = f"{delta:+.3f}" if delta is not None else "—"
+        sd_text = f"{pair['sd']:.3f}" if pair["sd"] is not None else "—"
+        lines.append(
+            f"| {name} | {_fmt_spread(spread_a.get(name))} "
+            f"| {_fmt_spread(spread_b.get(name))} | {delta_text} | {sd_text} "
+            f"| {pair['n']} | {delta_sign(delta, pair['stderr'], noise)} |"
+        )
+    # Доли (hit/refusal) парного разложения не имеют — только среднее по прогону.
+    for name in (RETRIEVAL_KEY, REFUSAL_KEY):
+        value_a, value_b = agg_a.get(name), agg_b.get(name)
         if isinstance(value_a, (int, float)) and isinstance(value_b, (int, float)):
             delta = round(float(value_b) - float(value_a), 4)
-            if abs(delta) < noise:
-                sign = "≈"
-            elif delta > 0:
-                sign = "▲"
-            else:
-                sign = "▼"
-            delta_text = f"{delta:+.3f}"
+            delta_text, sign = f"{delta:+.3f}", delta_sign(delta, None, noise)
         else:
-            delta, sign, delta_text = None, "—", "—"
+            delta_text, sign = "—", "—"
         lines.append(
-            f"| {name} | {_fmt(value_a)} | {_fmt(value_b)} | {delta_text} | {sign} |"
+            f"| {name} | {_fmt(value_a)} | {_fmt(value_b)} | {delta_text} | — | — "
+            f"| {sign} |"
         )
+    lines.append("")
+    lines.append(
+        "«пар» — число вопросов, оценённых В ОБОИХ прогонах; дельта считается "
+        "только по ним, поэтому смена состава оценённых пар её не искажает. "
+        "Знак ▲/▼ ставится, когда |Δ| больше и порога шума "
+        f"({noise:.2f}), и двух стандартных ошибок парной дельты."
+    )
     lines.append("")
     counts_a = report_a.get("counts", {}) or {}
     counts_b = report_b.get("counts", {}) or {}
     lines.append(
         f"Пар: {counts_a.get('total', 0)} → {counts_b.get('total', 0)}; "
-        f"ошибок: {counts_a.get('failed', 0)} → {counts_b.get('failed', 0)}."
+        f"упало (исключено из средних): {counts_a.get('failed', 0)} → "
+        f"{counts_b.get('failed', 0)}."
     )
     lines.append("")
+    lines.append("## Параметры прогонов")
+    lines.append("")
+    lines.append(f"### `{label_a}`")
+    lines.append("")
+    lines.extend(_render_run_params(report_a)[2:])
+    lines.append(f"### `{label_b}`")
+    lines.append("")
+    lines.extend(_render_run_params(report_b)[2:])
     lines.append(DIAGNOSTIC_RULE)
     lines.append("")
     return "\n".join(lines)
+
+
+def _params_differ(report_a: dict[str, Any], report_b: dict[str, Any]) -> bool:
+    """Отличаются ли параметры, влияющие на воспроизводимость."""
+    def key(report: dict[str, Any]) -> str:
+        params = dict(report.get("run_params") or {})
+        return json.dumps(params, ensure_ascii=False, sort_keys=True, default=str)
+
+    return bool(report_a.get("run_params")) and key(report_a) != key(report_b)
 
 
 # --------------------------------------------------------------------------- #
@@ -653,6 +1270,16 @@ def _default_out_dir() -> str:
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
 
 
+#: UI слушает 8787 (см. `bootstrap.print_instructions`, `run.sh`, Dockerfile).
+DEFAULT_UI_URL = "http://localhost:8787"
+
+
+def _default_rag_log() -> str:
+    """``rag_log.jsonl`` того же пользователя, чей `config.json` читает харнесс."""
+    root = os.environ.get("COGNIVAULT_UI_ROOT") or "~/.cognivault-ui"
+    return os.path.join(os.path.expanduser(root), "rag_log.jsonl")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Прогнать golden-set через живой стек и посчитать метрики."
@@ -662,7 +1289,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ui-url",
         default=None,
-        help="базовый URL UI (default: $COGNIVAULT_UI_URL или http://localhost:8080)",
+        help=f"базовый URL UI (default: $COGNIVAULT_UI_URL или {DEFAULT_UI_URL})",
     )
     parser.add_argument(
         "--token",
@@ -692,7 +1319,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="не тянуть текст источников (метрики по контексту станут бессмысленны)",
     )
     parser.add_argument(
-        "--context-chars", type=int, default=4000, help="кап текста одного источника"
+        "--context-chars",
+        type=int,
+        default=4000,
+        help="кап текста одного источника В ФОЛБЭКЕ (при прогоне по логу не нужен)",
+    )
+    parser.add_argument(
+        "--rag-log",
+        default=None,
+        help=(
+            "путь к rag_log.jsonl UI — оттуда берётся ФАКТИЧЕСКИЙ контекст хода "
+            f"(default: $COGNIVAULT_UI_RAG_LOG или {_default_rag_log()})"
+        ),
+    )
+    parser.add_argument(
+        "--no-rag-log",
+        action="store_true",
+        help=(
+            "не читать rag_log.jsonl — контекст восстанавливать из метаданных. "
+            "Прогон будет помечен ПРИБЛИЖЁННЫМ и не сравним с прогоном по логу."
+        ),
     )
     parser.add_argument("--config", default=None, help="путь к config.json UI")
     parser.add_argument(
@@ -706,12 +1352,31 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _resolve_ui(args: argparse.Namespace) -> tuple[str, str]:
     url = (
-        args.ui_url
-        or os.environ.get("COGNIVAULT_UI_URL")
-        or "http://localhost:8080"
+        args.ui_url or os.environ.get("COGNIVAULT_UI_URL") or DEFAULT_UI_URL
     ).rstrip("/")
     token = args.token or os.environ.get("COGNIVAULT_UI_TOKEN") or ""
     return url, token
+
+
+def _resolve_rag_log(args: argparse.Namespace) -> RagLogIndex | None:
+    """Открыть лог запросов UI; ``None`` — прогон пойдёт по фолбэку."""
+    if args.no_rag_log:
+        _log("rag-log отключён (--no-rag-log): прогон будет ПРИБЛИЖЁННЫМ")
+        return None
+    path = (
+        args.rag_log
+        or os.environ.get("COGNIVAULT_UI_RAG_LOG")
+        or _default_rag_log()
+    )
+    index = RagLogIndex.load(path)
+    if index is None:
+        _log(
+            f"ВНИМАНИЕ: {path} не найден — контекст будет восстанавливаться из "
+            "метаданных, прогон помечен ПРИБЛИЖЁННЫМ (--rag-log укажет путь)"
+        )
+    else:
+        _log(f"rag-log: {path} (записей на старте: {len(index)})")
+    return index
 
 
 def do_compare(args: argparse.Namespace) -> int:
@@ -766,6 +1431,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         _log(f"ОШИБКА GigaChat: {exc}")
         return 2
 
+    rag_log_index = _resolve_rag_log(args)
     backend = None if args.no_context_fetch else BackendClient(backend_url, backend_token)
     chat = ChatClient(ui_url, ui_token)
     try:
@@ -776,6 +1442,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
             backend=backend,
             concurrency=args.concurrency,
             context_cap=args.context_chars,
+            rag_log=rag_log_index,
         )
     finally:
         await chat.aclose()
@@ -789,10 +1456,12 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         golden_path=args.golden,
         ui_url=ui_url,
         judge_model=cfg.model,
+        judge_temperature=cfg.temperature,
         extra={
             "concurrency": args.concurrency,
             "context_chars": args.context_chars,
             "context_fetch": not args.no_context_fetch,
+            "rag_log": not args.no_rag_log and rag_log_index is not None,
             "judge_calls": judge.calls,
         },
     )
@@ -808,6 +1477,11 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
     _log(f"отчёты: {json_path}, {md_path}")
     for name, value in report["aggregate"].items():
         _log(f"  {name}: {_fmt(value)}")
+    failed = report["counts"]["failed"]
+    if failed:
+        _log(f"  упало и исключено из средних: {failed}")
+    if report.get("approximate"):
+        _log("ВНИМАНИЕ: прогон ПРИБЛИЖЁННЫЙ — контекст восстановлен из метаданных")
     _log("напоминание: абсолютные числа судьи не показательны — сравнивайте прогоны")
     return 0
 

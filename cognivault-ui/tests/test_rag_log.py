@@ -1,15 +1,17 @@
 """Unit tests for the per-user JSONL RAG log (wave 5.1).
 
 Covers: one valid JSON object per line, Cyrillic written as-is, size-based
-rotation with at most two files, best-effort failure handling, and the secret
-scrubber.
+rotation with at most two files, best-effort failure handling, the secret
+scrubber, the free-text cap, the settings snapshot and the stage timer.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
+import types
 
 import pytest
 
@@ -132,3 +134,122 @@ def test_now_iso_is_utc():
 @pytest.mark.parametrize("value", [{}, {"type": "feedback", "vote": "up"}])
 def test_append_returns_true_for_plain_records(tmp_path, value):
     assert rag_log.append(_paths(tmp_path), value) is True
+
+
+# --------------------------------------------------------------------------- #
+# Free-text cap
+# --------------------------------------------------------------------------- #
+
+
+def test_truncate_flags_only_when_it_cuts():
+    assert rag_log.truncate("короткий") == ("короткий", False)
+    assert rag_log.truncate("абвгд", limit=3) == ("абв", True)
+    assert rag_log.truncate("", limit=3) == ("", False)
+
+
+def test_truncate_default_follows_the_constant(monkeypatch):
+    monkeypatch.setattr(rag_log, "MAX_TEXT_CHARS", 4)
+    assert rag_log.truncate("абвгде") == ("абвг", True)
+
+
+# --------------------------------------------------------------------------- #
+# Settings snapshot
+# --------------------------------------------------------------------------- #
+
+
+def test_settings_snapshot_keeps_knobs_and_drops_credentials():
+    snapshot = rag_log.settings_snapshot(
+        {
+            "mode": "auto",
+            "rerank_candidates": 40,
+            "grader_threshold": 4,
+            "grader_enabled": True,
+            "min_score": None,
+            "default_on": True,  # не в белом списке
+        },
+        {
+            "model": "GigaChat-3-Ultra-preview",
+            "temperature": 0.2,
+            "max_tokens": 4096,
+            "model_context_tokens": 32768,
+            "cert_path": "/certs/client_crt.crt",
+            "key_path": "/certs/client_key.key",
+            "key_passphrase": "hunter2",
+        },
+        None,
+    )
+
+    assert snapshot["rag"]["rerank_candidates"] == 40
+    assert snapshot["rag"]["grader_threshold"] == 4
+    assert "default_on" not in snapshot["rag"]
+    assert snapshot["gigachat"] == {
+        "model": "GigaChat-3-Ultra-preview",
+        "temperature": 0.2,
+        "max_tokens": 4096,
+        "model_context_tokens": 32768,
+    }
+    assert json.dumps(snapshot, ensure_ascii=False).find("hunter2") == -1
+
+
+def test_settings_snapshot_fingerprints_prompt_overrides():
+    default = rag_log.settings_snapshot({}, {}, {"system": None, "context_reminder": " "})
+    custom = rag_log.settings_snapshot({}, {}, {"system": "мои правила"})
+    same = rag_log.settings_snapshot({}, {}, {"system": "  мои правила  "})
+
+    assert default["prompts"] == {"system": None, "context_reminder": None}
+    assert custom["prompts"]["system"] == same["prompts"]["system"]
+    assert custom["prompts"]["system"] != "мои правила"  # отпечаток, не текст
+    assert custom["prompts"]["context_reminder"] is None
+
+
+def test_settings_snapshot_tolerates_missing_sections():
+    assert rag_log.settings_snapshot(None, None, None) == {
+        "rag": {},
+        "gigachat": {},
+        "prompts": {"system": None, "context_reminder": None},
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Stage timings
+# --------------------------------------------------------------------------- #
+
+
+def test_stages_accumulate_within_a_collector():
+    with rag_log.collect_stages() as stages:
+        with rag_log.stage("search"):
+            pass
+        with rag_log.stage("search"):
+            pass
+        with rag_log.stage("grade"):
+            pass
+
+    assert sorted(stages) == ["grade", "search"]
+    assert all(value >= 0 for value in stages.values())
+
+
+def test_stage_outside_a_collector_is_a_noop():
+    with rag_log.stage("search"):
+        pass  # ничего не падает и никуда не пишется
+    assert rag_log.record_stage("search", 5.0) is None
+
+
+def test_instrument_wraps_a_coroutine_once():
+    async def search(query):
+        return f"результат {query}"
+
+    module = types.SimpleNamespace(search=search)
+
+    assert rag_log.instrument(module, "search", "search") is True
+    assert rag_log.instrument(module, "search", "search") is False  # идемпотентно
+    assert rag_log.instrument(module, "missing", "search") is False
+
+    async def go():
+        with rag_log.collect_stages() as stages:
+            value = await module.search("q")
+        return value, stages
+
+    value, stages = asyncio.run(go())
+    assert value == "результат q"  # поведение не изменилось
+    assert "search" in stages
+    assert module.search.__name__ == "search"

@@ -39,8 +39,10 @@ PIP_INDEX_URL = "https://sberosc.sigma.sbrf.ru/repo/pypi/simple"
 # (bootstrap runs from PROJECT_DIR, which puts ``app`` on sys.path). If that ever
 # fails, fall back to an inline copy so bootstrap stays self-sufficient.
 try:
+    from app.config import DEFAULT_CONFIG as APP_DEFAULT_CONFIG
     from app.config import build_pip_conf, migrate_pip_index_url
 except Exception:  # noqa: BLE001 — keep bootstrap dependency-free
+    APP_DEFAULT_CONFIG = None
 
     def migrate_pip_index_url(url: str) -> str:
         try:
@@ -76,9 +78,17 @@ except Exception:  # noqa: BLE001 — keep bootstrap dependency-free
         )
         return text, redacted, trusted_host
 
-# Kept in sync with app/config.py:DEFAULT_CONFIG (this file must stay stdlib-only,
-# so the value is duplicated rather than imported).
-DEFAULT_CONFIG = {
+# ДУБЛЬ ``app/config.py:DEFAULT_CONFIG`` — ЕГО НАДО ДЕРЖАТЬ В СИНХРОНЕ.
+#
+# Импорт выше (``APP_DEFAULT_CONFIG``) — основной путь: если ``app`` доступен,
+# берутся ЕГО дефолты, и копия ниже вообще не участвует. Копия остаётся только
+# на случай, когда bootstrap запускают из каталога, где ``app`` не импортируется
+# (первый прогон на чистой машине), потому что файл обязан оставаться
+# stdlib-only. Меняете ``app/config.py`` — поправьте и здесь: локальная
+# установка иначе получит конфиг мимо текущей архитектуры (ровно это и
+# случилось: копия застряла на ``source: "semantic"``, ``limit: 5`` и без
+# секций ``prompts``/волны 2).
+_FALLBACK_CONFIG = {
     "version": 1,
     "cognivault": {"base_url": "http://localhost:3000", "token": ""},
     "gigachat": {
@@ -90,21 +100,55 @@ DEFAULT_CONFIG = {
         "verify_ssl": False,
         "temperature": 0.2,
         "max_tokens": 4096,
+        "model_context_tokens": 32768,
     },
     "rag": {
         "default_on": False,
-        "source": "semantic",
-        "limit": 5,
+        "mode": "auto",
+        "source": "hybrid",
+        "limit": 10,
         "min_score": None,
         "token_budget": 3000,
-        "max_context_chars": 12000,
+        "max_context_chars": 24000,
+        "file_full_chars": 6000,
+        "section_max_chars": 4000,
+        "max_expanded_files": 2,
+        "condense_enabled": True,
+        "grader_enabled": True,
+        "grader_threshold": 4,
+        "grader_keep_top": 2,
+        "rerank_candidates": 40,
     },
+    # ``None`` (а не текст) — значит «взять встроенный промпт из кода»; см.
+    # комментарий в app/config.py.
+    "prompts": {"system": None, "context_reminder": None},
     "env": {
         "pip_index_url": PIP_INDEX_URL,
         "pip_token": "",
     },
     "ui": {"theme": "auto"},
 }
+
+
+def _default_config() -> dict:
+    """Дефолты приложения, если ``app.config`` импортировался; иначе копия.
+
+    Возвращается всегда свежая глубокая копия — вызывающий код (``persist_env``)
+    её мутирует.
+    """
+    source = APP_DEFAULT_CONFIG if isinstance(APP_DEFAULT_CONFIG, dict) else None
+    if source is not None:
+        # ``env.pip_index_url`` bootstrap ведёт сам (CLI/ENV/конфиг), поэтому
+        # значение из app-дефолтов перекрывается локальной константой.
+        merged = json.loads(json.dumps(source))
+        merged.setdefault("env", {})["pip_index_url"] = PIP_INDEX_URL
+        merged["env"].setdefault("pip_token", "")
+        return merged
+    return json.loads(json.dumps(_FALLBACK_CONFIG))
+
+
+#: Совместимость: модуль исторически экспортировал ``DEFAULT_CONFIG``.
+DEFAULT_CONFIG = _default_config()
 
 
 def log(msg: str) -> None:
@@ -123,7 +167,7 @@ def write_default_config() -> None:
         log("config.json уже существует — не трогаю")
         return
     config_file.write_text(
-        json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(_default_config(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     log(f"записан {config_file}")
@@ -208,7 +252,7 @@ def persist_env(index_url: str, token: str) -> None:
         parsed = json.loads(config_file.read_text(encoding="utf-8"))
         data = parsed if isinstance(parsed, dict) else {}
     except Exception:  # noqa: BLE001 — missing/invalid → start from defaults
-        data = json.loads(json.dumps(DEFAULT_CONFIG))
+        data = _default_config()
 
     env = data.get("env")
     if not isinstance(env, dict):
