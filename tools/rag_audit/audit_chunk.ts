@@ -42,6 +42,7 @@
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import matter from 'gray-matter';
+import { chunkBody } from '../../src/features/search/service.js';
 import { BM25_AVG_LEN, buildSparseVector, tokenize } from '../../src/lib/bm25.js';
 import type { ContentKind, MarkdownChunk } from '../../src/lib/chunker.js';
 import {
@@ -135,23 +136,13 @@ export function jaccard(a: ReadonlySet<number>, b: ReadonlySet<number>): number 
  *
  * Меряется именно тело: крошка повторяется в каждом чанке, и если считать её
  * содержимым, то чанк-огрызок из одного заголовка выглядит осмысленным.
+ *
+ * Функция ПРОДОВАЯ, не копия: ровно её `sectionWindow` зовёт, чтобы найти чанк в его
+ * разделе. Копия здесь уже была, и она разошлась с продовой — табличный префикс
+ * `${sectionPath} > Таблица: …` аудит снимал, а прод нет, и окно молча падало в префикс
+ * раздела на каждом табличном чанке. Один экспорт — нечему расходиться.
  */
-export function chunkBody(text: string, sectionPath: string): string {
-  let body = text;
-  if (body.startsWith(DOC_SUMMARY_PREFIX)) {
-    const gap = body.indexOf('\n\n');
-    if (gap !== -1) body = body.slice(gap + 2);
-  }
-  if (body.startsWith(`${sectionPath}\n\n`)) {
-    return body.slice(sectionPath.length + 2);
-  }
-  // Табличный чанк несёт префикс `${sectionPath} > Таблица: …` — он тоже крошка.
-  if (body.startsWith(`${sectionPath} > `)) {
-    const gap = body.indexOf('\n\n');
-    if (gap !== -1) return body.slice(gap + 2);
-  }
-  return body;
-}
+export { chunkBody };
 
 // ===========================================================================
 // Разметка внутри чанка (замер по границам)

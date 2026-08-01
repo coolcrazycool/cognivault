@@ -27,6 +27,9 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
             request.getUserQdrant(),
             fastify.getUserEmbedder(userId),
             request.getUserDb(),
+            // Carries the traceId child bound above; the service logs only when the section
+            // window fails to anchor, which is a quality regression an operator must see.
+            request.log,
           );
           const endTimer = fastify.metrics.searchDuration.startTimer({
             type: 'semantic',
@@ -79,6 +82,9 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
             request.getUserQdrant(),
             fastify.getUserEmbedder(userId),
             request.getUserDb(),
+            // Carries the traceId child bound above; the service logs only when the section
+            // window fails to anchor, which is a quality regression an operator must see.
+            request.log,
           );
           const endTimer = fastify.metrics.searchDuration.startTimer({
             type: 'hybrid',
@@ -128,6 +134,9 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
             request.getUserQdrant(),
             fastify.getUserEmbedder(userId),
             request.getUserDb(),
+            // Carries the traceId child bound above; the service logs only when the section
+            // window fails to anchor, which is a quality regression an operator must see.
+            request.log,
           );
           const endTimer = fastify.metrics.searchDuration.startTimer({
             type: 'lexical',

@@ -128,6 +128,149 @@ const ANCHOR_PROBE_CHARS = 120;
  */
 const ANCHOR_MIN_PROBE_CHARS = 24;
 
+/**
+ * How far into the body a match may start, and how many such starts are tried.
+ *
+ * A chunk body can OPEN with text the section never had, because the CHUNKER put it there:
+ * a table chunk repeats the header row and the delimiter above its slice of the rows, a
+ * split code block gets a `Код sql, часть 2 из 5:` label and a reopened fence, and a torn
+ * linearized row gets its identifying field (`Название модели: ACQUIRER. `) repeated on
+ * every fragment. All three are short, all three sit at the very front, and everything after
+ * them is the section verbatim — so the match is retried from a few positions further in.
+ *
+ * The bounds exist to keep a genuine miss cheap: when the chunk really is gone (index drift)
+ * every one of these scans the whole section for nothing. Line starts are what the two
+ * multi-line cases need; word starts inside the first line are what the linearized row needs,
+ * which has no line break at all. They are counted separately so a long first line cannot
+ * spend the whole budget before the second line is ever tried.
+ */
+const ANCHOR_SCAN_CHARS = 256;
+const ANCHOR_MAX_LINE_STARTS = 8;
+const ANCHOR_MAX_WORD_STARTS = 16;
+
+/** Minimal pino-shaped logger; `FastifyBaseLogger` satisfies it. */
+export interface SearchServiceLogger {
+  warn(obj: object, msg: string): void;
+}
+
+/**
+ * The retrieved chunk stripped of the prefixes the indexer adds to the payload text but not
+ * to the section row: the optional document annotation (`INDEX_DOC_SUMMARY`) and the
+ * breadcrumb every chunk carries as its first line. What is left is the chunk body as it
+ * appears inside the section.
+ *
+ * Exported because the chunk audit (`tools/rag_audit/audit_chunk.ts`) needs the same notion
+ * of "body" — it once carried its own copy, the two drifted, and the copy was the one that
+ * handled table chunks correctly.
+ */
+export function chunkBody(chunkText: string, sectionPath: string): string {
+  let body = chunkText;
+  if (body.startsWith(DOC_SUMMARY_PREFIX)) {
+    const gap = body.indexOf('\n\n');
+    if (gap !== -1) body = body.slice(gap + 2);
+  }
+  // An empty section path means "strip the annotation and nothing else" (see
+  // `collapseCrossFileDuplicates`), not "strip a breadcrumb that happens to be empty".
+  if (sectionPath.length === 0) return body;
+
+  const crumb = `${sectionPath}\n\n`;
+  if (body.startsWith(crumb)) return body.slice(crumb.length);
+
+  // A table chunk carries an EXTENDED breadcrumb -- `${sectionPath} > Таблица: {caption}`
+  // (`tableContextPrefix` in the chunker) -- so the section path alone never matches it. The
+  // residual line exists nowhere in the section, which cost every table chunk both its exact
+  // match and its probe: 9 of the 14 anchors the audit measured as lost were this one line.
+  if (body.startsWith(`${sectionPath} > `)) {
+    const gap = body.indexOf('\n\n');
+    if (gap !== -1) return body.slice(gap + 2);
+  }
+  return body;
+}
+
+/**
+ * Offset of `body` inside `sectionText`, or `-1`.
+ *
+ * Two passes over the same handful of candidate starts (see {@link ANCHOR_SCAN_CHARS}), and
+ * the order between them is the whole design:
+ *
+ * 1. WHOLE TAIL, nearest start first. `body.slice(start)` matching means the chunk really is
+ *    there from that offset on, so the position is exact and the only thing lost is the
+ *    synthetic opening. Ascending order returns the longest tail that matches.
+ * 2. PROBE, only once no tail matched. The body may also have drifted further down — the
+ *    indexer appends a table summary to a run's head chunk, or the note was edited — and then
+ *    only its head is still section text. A probe is approximate: it can land on a repeat of
+ *    the same line (a table header the chunker copies onto every group of rows), so it must
+ *    never outrank an exact tail.
+ *
+ * The probe stops at the first line break, since whatever diverged usually did so further
+ * down; a break too close to fall back on leaves the fixed-width head, which spans lines.
+ */
+export function locateChunk(sectionText: string, body: string): number {
+  if (body.length === 0) return -1;
+  const exact = sectionText.indexOf(body);
+  if (exact !== -1) return exact;
+
+  const starts = anchorStarts(body);
+  for (const start of starts) {
+    const at = sectionText.indexOf(body.slice(start));
+    if (at !== -1) return at;
+  }
+  // The body's own head leads the probe pass: it is the part of the chunk that has drifted
+  // least, and a chunk with no synthetic opening at all is placed on the first try.
+  for (const start of [0, ...starts]) {
+    const at = sectionText.indexOf(probeAt(body, start));
+    if (at !== -1) return at;
+  }
+  return -1;
+}
+
+/** The probe that identifies `body` from `start` onwards. */
+function probeAt(body: string, start: number): string {
+  const head = body.slice(start, start + ANCHOR_PROBE_CHARS);
+  const lineEnd = head.indexOf('\n');
+  return lineEnd >= ANCHOR_MIN_PROBE_CHARS ? head.slice(0, lineEnd) : head;
+}
+
+/**
+ * Offsets a match may start at, ascending: line starts, plus word starts inside the first
+ * line. Offset 0 itself is not among them — `locateChunk` has already tried it.
+ *
+ * A line start is taken as it stands, indentation included: the indented lines of a code
+ * fragment are indented in the section too, and skipping to the first non-space would be a
+ * start the section does not have. Inside the first line only whole words are tried, because
+ * a start mid-word can only match by accident, and one accidental match anchors the window in
+ * the wrong place — worse than the honest fallback.
+ */
+function anchorStarts(body: string): number[] {
+  // A tail shorter than the minimum probe identifies nothing, so starts that leave less than
+  // that behind are not worth trying.
+  const last = Math.min(body.length - ANCHOR_MIN_PROBE_CHARS, ANCHOR_SCAN_CHARS);
+  const firstLineEnd = body.indexOf('\n');
+  const starts: number[] = [];
+  let lineStarts = 0;
+  let wordStarts = 0;
+
+  for (let i = 1; i <= last; i += 1) {
+    if (body[i - 1] === '\n') {
+      if (lineStarts >= ANCHOR_MAX_LINE_STARTS) continue;
+      lineStarts += 1;
+      starts.push(i);
+      continue;
+    }
+    const insideFirstLine = firstLineEnd === -1 || i < firstLineEnd;
+    if (!insideFirstLine || wordStarts >= ANCHOR_MAX_WORD_STARTS) continue;
+    if (isSpace(body[i - 1]) && !isSpace(body[i])) {
+      wordStarts += 1;
+      starts.push(i);
+    }
+  }
+  return starts;
+}
+
+function isSpace(char: string | undefined): boolean {
+  return char === undefined || char === ' ' || char === '\n' || char === '\t' || char === '\r';
+}
+
 /** Options for the hybrid endpoint's small-to-big (parent document) expansion. */
 export interface HybridOptions {
   /** Collapse chunks of the same section into their best-ranked chunk. */
@@ -145,11 +288,22 @@ export class SearchService {
    * it; grouping without a db then simply returns empty `section_text`.
    */
   private readonly db: DbInstance | undefined;
+  /**
+   * Only used to report a window that could not be anchored. Optional so the service stays
+   * constructible from a test or a tool; a missing logger costs the signal, nothing else.
+   */
+  private readonly logger: SearchServiceLogger | undefined;
 
-  constructor(qdrant: TenantQdrantClient, embedder: EmbeddingProvider, db?: DbInstance) {
+  constructor(
+    qdrant: TenantQdrantClient,
+    embedder: EmbeddingProvider,
+    db?: DbInstance,
+    logger?: SearchServiceLogger,
+  ) {
     this.qdrant = qdrant;
     this.embedder = embedder;
     this.db = db;
+    this.logger = logger;
   }
 
   async semantic(query: string, limit: number, filters: SearchFilters): Promise<SearchResult[]> {
@@ -428,7 +582,10 @@ export class SearchService {
       const chunkText = typeof point.payload?.text === 'string' ? point.payload.text : '';
       const sectionPath =
         typeof point.payload?.section_path === 'string' ? point.payload.section_path : '';
-      windows.set(key, this.sectionWindow(full, chunkText, sectionPath, limit));
+      windows.set(
+        key,
+        this.sectionWindow(full, chunkText, sectionPath, limit, point.payload ?? {}),
+      );
     }
     return windows;
   }
@@ -444,13 +601,18 @@ export class SearchService {
    *
    * Falls back to the prefix when the chunk cannot be located in the section (index drift —
    * the note was rewritten after the point was indexed): an arbitrary window would be no
-   * better than the prefix, and the prefix at least starts where the section does.
+   * better than the prefix, and the prefix at least starts where the section does. That
+   * fallback is REPORTED, not silent — see the `warn` below.
+   *
+   * `point` is only ever used to name the offending note in that warning; a caller that has
+   * no point (the window audit calls this method directly) omits it and loses nothing else.
    */
   private sectionWindow(
     sectionText: string,
     chunkText: string,
     sectionPath: string,
     limit: number,
+    point?: QdrantPayload,
   ): string {
     if (sectionText.length <= limit) return sectionText;
 
@@ -461,7 +623,24 @@ export class SearchService {
     // window back to `slice(0, limit)`. Anchor on the body instead.
     const body = this.chunkBody(chunkText, sectionPath);
     const anchor = this.locateChunk(sectionText, body);
-    if (anchor === -1) return sectionText.slice(0, limit);
+    if (anchor === -1) {
+      // NOT silent. The fallback hands the caller a passage that demonstrably does not
+      // contain what matched, and the result carries a `section_text` either way, so nothing
+      // downstream can tell the two apart. Logged with the identity of the point rather than
+      // any of its text: the fix is a re-index of that note, and the note is what names it.
+      this.logger?.warn(
+        {
+          path: point?.path ?? '',
+          parent_id: point?.parent_id ?? '',
+          chunk_index: point?.chunk_index ?? 0,
+          section_path: sectionPath,
+          section_chars: sectionText.length,
+          section_max_chars: limit,
+        },
+        'section window: chunk not found in its section, falling back to the section prefix — re-index this note',
+      );
+      return sectionText.slice(0, limit);
+    }
 
     // A probe match (see `locateChunk`) can point at a body that runs past the section end;
     // clamping keeps `anchorEnd` a real offset so the snaps below stay inside the string.
@@ -489,42 +668,16 @@ export class SearchService {
   }
 
   /**
-   * The retrieved chunk stripped of the two prefixes the indexer adds to the payload text
-   * but not to the section row: the optional document annotation (`INDEX_DOC_SUMMARY`) and
-   * the breadcrumb every chunk carries as its first line. What is left is the chunk body as
-   * it appears inside the section.
+   * {@link chunkBody} as a method. Kept because the window audit reaches for it by name
+   * (`tools/rag_audit/section_windows.ts`) — a rename there fails loudly, which is the point.
    */
   private chunkBody(chunkText: string, sectionPath: string): string {
-    let body = chunkText;
-    if (body.startsWith(DOC_SUMMARY_PREFIX)) {
-      const gap = body.indexOf('\n\n');
-      if (gap !== -1) body = body.slice(gap + 2);
-    }
-    const crumb = `${sectionPath}\n\n`;
-    if (sectionPath.length > 0 && body.startsWith(crumb)) {
-      body = body.slice(crumb.length);
-    }
-    return body;
+    return chunkBody(chunkText, sectionPath);
   }
 
-  /**
-   * Offset of `body` inside `sectionText`, or `-1`.
-   *
-   * The exact match is tried first. It can still fail on a chunk the indexer post-processed
-   * further (a table summary is appended to the run's head chunk) or after a small edit to
-   * the note, so the head of the body is used as a probe: locating the chunk approximately
-   * is worth far more than falling back to the section prefix. The probe stops at the first
-   * line break, since whatever diverged usually did so further down.
-   */
+  /** {@link locateChunk} as a method — see {@link chunkBody} for why it exists. */
   private locateChunk(sectionText: string, body: string): number {
-    if (body.length === 0) return -1;
-    const exact = sectionText.indexOf(body);
-    if (exact !== -1) return exact;
-
-    const head = body.slice(0, ANCHOR_PROBE_CHARS);
-    const lineEnd = head.indexOf('\n');
-    const probe = lineEnd >= ANCHOR_MIN_PROBE_CHARS ? head.slice(0, lineEnd) : head;
-    return sectionText.indexOf(probe);
+    return locateChunk(sectionText, body);
   }
 
   /** Moves `start` forward onto the nearest boundary that still sits at or before `anchor`. */
