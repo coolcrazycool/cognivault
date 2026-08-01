@@ -60,6 +60,14 @@ come from the same `tokenize`, so the two sides agree term for term. Both facts 
 by `BM25_SCHEME_VERSION`; bumping it means old vectors are no longer comparable to new
 ones and the collection has to be rebuilt.
 
+That version is **enforced, not documented**. The service stamps it onto every collection
+it creates (payload `bm25_scheme_version` on a vector-less, tenant-less marker point) and
+compares it on every start. A collection built at an older version keeps serving — dense
+retrieval is untouched — but startup logs an error naming both versions and the metric
+`cognivault_bm25_scheme_mismatch` goes to `1`, so shipping a bump without the re-index is
+no longer silent. Startup is deliberately *not* failed: the re-index runs through this
+same service, so a process that refused to start would lock the operator out of the fix.
+
 ## Quick Start
 
 ### With Docker (recommended)

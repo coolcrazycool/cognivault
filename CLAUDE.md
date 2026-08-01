@@ -64,9 +64,18 @@ tools/eval/           # RAG eval harness (golden set, gigaragas-style metrics, r
   set — refusal is the grader's job, not a score cutoff.** Measured: top-hit score
   distributions for answerable and unanswerable questions overlap, AUC 0.63–0.68.
 - Index-time and query-time sparse vectors MUST come from the same `bm25.ts` functions,
-  or terms stop lining up and the lexical branch silently returns nothing.
+  or terms stop lining up and the lexical branch silently returns nothing. Documents go
+  through `buildDocumentSparseVector` (breadcrumb boosted), queries through
+  `buildSparseVector` — same terms, different weights. `tools/rag_audit` must mirror that
+  split or its sparse numbers describe a system that does not exist.
 - Never dedupe results by `path`: multiple chunks of one file are intended (the UI uses
   the hit count to decide whether to expand the whole file).
+- **Across files it is the opposite**: `collapseCrossFileDuplicates` keeps only the best-ranked
+  copy of a body that repeats on several pages (word Jaccard ≥ 0.8, only between different
+  `path`s, only for bodies of ≥ 20 distinct words). Sibling registry pages are near-identical
+  *because* they differ in one entity, so a copy carrying a word of the QUERY that the survivor
+  lacks is never collapsed — without that guard the ДБО page loses to the ЮЛ page and the answer
+  is about the wrong channel (measured, `tools/rag_audit`).
 
 ## Coding Conventions
 
@@ -176,6 +185,20 @@ how it got there.
   chunk identity (a rename is then a cheap `UPDATE sections SET path`). Consequence: it is
   unique only *within* a file — always select and group by the pair `(path, parent_id)`.
   `sections` uses that composite primary key for the same reason.
+- **`BM25_SCHEME_VERSION` is enforced against the collection, not just declared.**
+  `src/plugins/qdrant.ts` stamps it into the payload of a marker point (the nil UUID,
+  `SCHEME_POINT_ID`) when it creates a collection, and compares it on every start, beside
+  the dense-dimension check. The marker holds NO vectors and NO `user_id`: every request
+  goes through `TenantQdrantClient`, which demands `user_id == <tenant>` on the outer
+  filter and on every prefetch branch, and a `match` never matches a missing key — so it
+  cannot surface in any of the three search endpoints. It is excluded by id from the
+  startup purge of user-less points, which would otherwise delete it every boot.
+  Behaviour: fresh collection → stamped; version matches → silent; version differs →
+  `log.error` + gauge `cognivault_bm25_scheme_mismatch = 1`, and the service KEEPS
+  SERVING (unlike a dimension mismatch, which is fatal) because the only cure is a
+  re-index, and the re-index runs through this service; no version recorded → stamped if
+  the collection is empty, otherwise warned about on every start and never stamped —
+  an honest "unknown" beats a confident lie.
 - **The doc annotation must not reach the sparse vector** — it is prepended to the chunk text
   used for the dense vector and the payload, while `Chunk.lexicalText` keeps the bare text
   for `buildSparseVector`. Repeating one annotation across every chunk of a file would flood

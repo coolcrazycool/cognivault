@@ -11,21 +11,39 @@
  * возвращает пустоту. Вторая реализация на Python разошлась бы с продом незаметно —
  * и аудит мерил бы собственную копию, а не то, что крутится в проде.
  *
- * Формат: на вход JSON `{"texts": ["…", …]}`, на выход JSON
+ * ДВЕ СТОРОНЫ, ДВА ПОСТРОИТЕЛЯ
+ * ----------------------------
+ * Прод считает документ и запрос РАЗНЫМИ функциями: индексная сторона
+ * (`src/plugins/pipeline.ts`) зовёт `buildDocumentSparseVector`, который считает крошку
+ * чанка `BM25_BREADCRUMB_BOOST` раз, запросная (`src/features/search/service.ts`) —
+ * `buildSparseVector`. Термы у них одни и те же, различаются веса. Мост обязан
+ * повторять это различие: гонять документы через запросный построитель значит мерить
+ * систему, которой нет, — и молча, потому что вектор всё равно получается «правильной
+ * формы». Поэтому `kind` обязателен: пропуск — громкая ошибка, а не тихий дефолт.
+ *
+ * Формат: на вход JSON `{"kind": "document" | "query", "texts": ["…", …]}`, на выход JSON
  * `{"vectors": [{"indices": [...], "values": [...]}, …]}` в том же порядке.
  * Один вызов на весь набор — запуск `npx tsx` стоит секунды, и делать его на каждый
  * текст было бы дороже самого счёта.
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { buildSparseVector } from '../../src/lib/bm25.js';
+import { buildDocumentSparseVector, buildSparseVector } from '../../src/lib/bm25.js';
+
+/** Какую сторону индекса считаем — от этого зависит построитель. */
+export type SparseKind = 'document' | 'query';
 
 interface Input {
+  kind?: string;
   texts: string[];
 }
 
-export function buildAll(texts: string[]): { indices: number[]; values: number[] }[] {
-  return texts.map((text) => buildSparseVector(text));
+export function buildAll(
+  texts: string[],
+  kind: SparseKind,
+): { indices: number[]; values: number[] }[] {
+  const build = kind === 'document' ? buildDocumentSparseVector : buildSparseVector;
+  return texts.map((text) => build(text));
 }
 
 function main(argv: string[]): number {
@@ -39,7 +57,13 @@ function main(argv: string[]): number {
     process.stderr.write('во входном JSON нет массива texts\n');
     return 2;
   }
-  writeFileSync(outPath, JSON.stringify({ vectors: buildAll(input.texts) }), 'utf8');
+  if (input.kind !== 'document' && input.kind !== 'query') {
+    process.stderr.write(
+      `во входном JSON нужен kind: "document" | "query" (получено ${JSON.stringify(input.kind)})\n`,
+    );
+    return 2;
+  }
+  writeFileSync(outPath, JSON.stringify({ vectors: buildAll(input.texts, input.kind) }), 'utf8');
   return 0;
 }
 

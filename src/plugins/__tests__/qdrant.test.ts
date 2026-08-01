@@ -18,6 +18,8 @@ const mockUpdateCollectionAliases = vi.fn();
 const mockDelete = vi.fn();
 const mockQuery = vi.fn();
 const mockVersionInfo = vi.fn();
+const mockRetrieve = vi.fn();
+const mockUpsert = vi.fn();
 /** Records the options object the plugin passes to `new QdrantClient(...)`. */
 const mockClientConstructor = vi.fn();
 
@@ -33,6 +35,8 @@ vi.mock('@qdrant/js-client-rest', () => {
     delete = mockDelete;
     query = mockQuery;
     versionInfo = mockVersionInfo;
+    retrieve = mockRetrieve;
+    upsert = mockUpsert;
 
     constructor(params?: unknown) {
       mockClientConstructor(params);
@@ -122,6 +126,9 @@ describe('qdrantPlugin', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockDelete.mockResolvedValue({});
+    // No BM25 scheme marker unless a test provisions one.
+    mockRetrieve.mockResolvedValue([]);
+    mockUpsert.mockResolvedValue({});
     mockCreateCollection.mockResolvedValue({});
     mockUpdateCollectionAliases.mockResolvedValue(true);
     mockVersionInfo.mockResolvedValue({
@@ -231,11 +238,13 @@ describe('qdrantPlugin', () => {
     await app.register(qdrantPlugin);
     await app.ready();
 
-    // Maintenance work targets the physical collection, not the alias.
+    // Maintenance work targets the physical collection, not the alias. The scheme marker
+    // is user-less by design, so it has to survive this purge.
     expect(mockDelete).toHaveBeenCalledWith(PHYSICAL, {
       wait: true,
       filter: {
         must: [{ is_empty: { key: 'user_id' } }],
+        must_not: [{ has_id: ['00000000-0000-0000-0000-000000000000'] }],
       },
     });
 
@@ -539,6 +548,188 @@ describe('qdrantPlugin', () => {
       expect(createdSchema()).toMatchObject({
         quantization_config: { scalar: { type: 'int8', quantile: 0.99, always_ram: true } },
       });
+
+      await app.close();
+    });
+  });
+
+  describe('BM25 scheme version', () => {
+    /** The nil UUID the plugin stamps the marker onto. */
+    const MARKER = '00000000-0000-0000-0000-000000000000';
+
+    /** Boot with spies on the three log levels the check uses. */
+    async function boot(): Promise<{
+      app: FastifyInstance;
+      error: ReturnType<typeof vi.spyOn>;
+      warn: ReturnType<typeof vi.spyOn>;
+      info: ReturnType<typeof vi.spyOn>;
+    }> {
+      mockCreatePayloadIndex.mockResolvedValue({});
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+      const app = Fastify({ logger: false });
+      const error = vi.spyOn(app.log, 'error');
+      const warn = vi.spyOn(app.log, 'warn');
+      const info = vi.spyOn(app.log, 'info');
+      await app.register(qdrantPlugin);
+      await app.ready();
+      return { app, error, warn, info };
+    }
+
+    /** The marker point the plugin upserted, if any. */
+    function markerPoint(): Record<string, unknown> | undefined {
+      const call = mockUpsert.mock.calls.find((c) => c[0] === PHYSICAL);
+      return (call?.[1] as { points?: Record<string, unknown>[] } | undefined)?.points?.[0];
+    }
+
+    /** An existing collection whose marker records `version`, with `pointsCount` points. */
+    function withMarker(version: number | undefined, pointsCount: number): void {
+      provisioned();
+      mockGetCollection.mockResolvedValue({
+        points_count: pointsCount,
+        config: {
+          params: {
+            vectors: { dense: { size: 1536, distance: 'Cosine', on_disk: true } },
+            sparse_vectors: { bm25: { modifier: 'idf' } },
+          },
+        },
+      });
+      mockRetrieve.mockResolvedValue(
+        version === undefined ? [] : [{ id: MARKER, payload: { bm25_scheme_version: version } }],
+      );
+    }
+
+    it('stamps the running version onto a collection it creates', async () => {
+      emptyCluster();
+      const { BM25_SCHEME_VERSION } = await import('../../lib/bm25.js');
+
+      const { app, error, warn } = await boot();
+
+      expect(markerPoint()).toEqual({
+        id: MARKER,
+        // No vectors at all: the marker is not a candidate in any branch even before
+        // filtering, and cannot be returned by dense or sparse search.
+        vector: {},
+        payload: { bm25_scheme_version: BM25_SCHEME_VERSION },
+      });
+      // A fresh collection is by definition consistent — nothing to complain about.
+      expect(error).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('is silent and writes nothing when the recorded version matches', async () => {
+      const { BM25_SCHEME_VERSION } = await import('../../lib/bm25.js');
+      withMarker(BM25_SCHEME_VERSION, 920);
+
+      const { app, error, warn } = await boot();
+
+      expect(mockRetrieve).toHaveBeenCalledWith(PHYSICAL, {
+        ids: [MARKER],
+        with_payload: true,
+        with_vector: false,
+      });
+      expect(mockUpsert).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('logs an error naming both versions on a mismatch — and keeps serving', async () => {
+      const { BM25_SCHEME_VERSION } = await import('../../lib/bm25.js');
+      const stale = BM25_SCHEME_VERSION - 1;
+      withMarker(stale, 920);
+
+      const { app, error } = await boot();
+
+      const mismatch = error.mock.calls.find((call: unknown[]) =>
+        String(call[1]).includes('was indexed with BM25 scheme'),
+      );
+      expect(mismatch).toBeDefined();
+      expect(mismatch?.[0]).toMatchObject({
+        collection: PHYSICAL,
+        recorded: stale,
+        expected: BM25_SCHEME_VERSION,
+      });
+      // The message has to be actionable on its own: what broke, and what to do.
+      expect(String(mismatch?.[1])).toMatch(/re-indexed/);
+      expect(String(mismatch?.[1])).toMatch(/repoint the "cognivault" alias/);
+
+      // Recoverable-only-by-reindex, and the reindex runs through this very service:
+      // refusing to start would lock the operator out of the fix.
+      expect(app.createTenantQdrant).toBeDefined();
+      // The recorded version is the truth about the vectors on disk — never overwritten.
+      expect(mockUpsert).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('warns without stamping a populated collection that records no version', async () => {
+      withMarker(undefined, 920);
+
+      const { app, warn, error } = await boot();
+
+      const unknown = warn.mock.calls.find((call: unknown[]) =>
+        String(call[1]).includes('records no BM25 scheme version'),
+      );
+      expect(unknown).toBeDefined();
+      expect(unknown?.[0]).toMatchObject({ collection: PHYSICAL, pointsCount: 920 });
+      // Stamping here would replace an honest "unknown" with a confident lie.
+      expect(mockUpsert).not.toHaveBeenCalled();
+      // Unknown is not proven-broken: a warning, not an error, and the service serves.
+      expect(error).not.toHaveBeenCalled();
+      expect(app.createTenantQdrant).toBeDefined();
+
+      await app.close();
+    });
+
+    it('adopts an EMPTY collection that records no version', async () => {
+      const { BM25_SCHEME_VERSION } = await import('../../lib/bm25.js');
+      withMarker(undefined, 0);
+
+      const { app, warn, error } = await boot();
+
+      // Nothing indexed yet, so nothing can be stale — record and move on.
+      expect(markerPoint()).toMatchObject({
+        payload: { bm25_scheme_version: BM25_SCHEME_VERSION },
+      });
+      expect(warn).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('starts anyway when the marker cannot be written', async () => {
+      emptyCluster();
+      mockUpsert.mockRejectedValue(new Error('Connection refused'));
+
+      const { app, warn, error } = await boot();
+
+      // Best-effort like the payload indexes: a metadata write must not cost availability.
+      expect(
+        warn.mock.calls.some((call: unknown[]) => String(call[1]).includes('Could not record')),
+      ).toBe(true);
+      expect(error).not.toHaveBeenCalled();
+      expect(app.createTenantQdrant).toBeDefined();
+
+      await app.close();
+    });
+
+    it('never gives the marker a user_id — that is what hides it from every search', async () => {
+      emptyCluster();
+
+      const { app } = await boot();
+
+      const payload = markerPoint()?.payload as Record<string, unknown>;
+      // TenantQdrantClient appends `{key: 'user_id', match: {value}}` to the outer filter
+      // and to every prefetch branch of every request; a `match` on a missing payload key
+      // never matches, so a point without user_id is unreachable from all three endpoints.
+      // The counterpart assertion — that the filter really is appended everywhere — lives
+      // in src/lib/__tests__/tenant-qdrant-client.test.ts.
+      expect(payload).not.toHaveProperty('user_id');
+      expect(Object.keys(payload)).toEqual(['bm25_scheme_version']);
 
       await app.close();
     });

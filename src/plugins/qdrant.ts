@@ -3,7 +3,7 @@ import { QdrantClient } from '@qdrant/js-client-rest';
 import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import { config } from '../config.js';
-import { BM25_VECTOR_NAME, DENSE_VECTOR_NAME } from '../lib/bm25.js';
+import { BM25_SCHEME_VERSION, BM25_VECTOR_NAME, DENSE_VECTOR_NAME } from '../lib/bm25.js';
 import { resolveDimensions } from '../lib/embedding.js';
 import { QdrantTokenProvider, resolveQdrantAuthUrl } from '../lib/qdrant-auth.js';
 import { buildQdrantTlsMaterial, describeQdrantTls, installQdrantTls } from '../lib/qdrant-tls.js';
@@ -33,6 +33,19 @@ export const PHYSICAL_COLLECTION = 'cognivault_v2';
 // Vector names come from the module that also builds the sparse vectors — the schema
 // declared here and the vectors written at index time must never drift apart.
 export { BM25_VECTOR_NAME, DENSE_VECTOR_NAME };
+
+/**
+ * Id of the point that records which BM25 scheme the collection's sparse vectors were
+ * built with. See {@link enforceSchemeVersion} for why the record lives in a point.
+ *
+ * The nil UUID, chosen because it cannot collide with a chunk: chunk ids are
+ * `uuidv5(...)` (`src/plugins/pipeline.ts`), and a v5 UUID always carries the version
+ * nibble `5` and the RFC 4122 variant bits, neither of which the nil UUID has.
+ */
+export const SCHEME_POINT_ID = '00000000-0000-0000-0000-000000000000';
+
+/** Payload key on {@link SCHEME_POINT_ID} carrying the recorded scheme version. */
+export const SCHEME_VERSION_FIELD = 'bm25_scheme_version';
 
 /**
  * Version of the `@qdrant/js-client-rest` dependency. Hardcoded on purpose:
@@ -248,6 +261,174 @@ function assertUsableCollection(
         'retrieval is unavailable until the collection is re-created and re-indexed',
     );
   }
+}
+
+/**
+ * Read the BM25 scheme version recorded on {@link SCHEME_POINT_ID}, or `undefined` when
+ * the collection carries no marker (or the read failed — treated the same, because an
+ * unreadable marker is exactly as unknown as an absent one).
+ */
+async function readSchemeVersion(
+  client: QdrantClient,
+  collection: string,
+  log: FastifyBaseLogger,
+): Promise<number | undefined> {
+  try {
+    const points = await client.retrieve(collection, {
+      ids: [SCHEME_POINT_ID],
+      with_payload: true,
+      with_vector: false,
+    });
+    const recorded = points[0]?.payload?.[SCHEME_VERSION_FIELD];
+    return typeof recorded === 'number' ? recorded : undefined;
+  } catch (err: unknown) {
+    log.warn({ err, collection }, 'Could not read the BM25 scheme marker');
+    return undefined;
+  }
+}
+
+/**
+ * Stamp the running {@link BM25_SCHEME_VERSION} onto the collection.
+ *
+ * `vector: {}` — the marker carries NO vectors at all (Qdrant allows a point to hold a
+ * subset of the collection's named vectors), so it is not a candidate in any dense or
+ * sparse branch even before filtering. It also carries no `user_id`, which is what
+ * actually keeps it out of results: every request goes through `TenantQdrantClient`,
+ * which appends `{ key: 'user_id', match: { value } }` to the outer filter and to every
+ * prefetch branch, and a `match` on a missing payload key never matches.
+ *
+ * Best-effort on purpose, like {@link ensurePayloadIndex}: a failed stamp costs the next
+ * start a "version unknown" warning, and that is a far better outcome than refusing to
+ * serve because a metadata write did not land.
+ */
+async function recordSchemeVersion(
+  client: QdrantClient,
+  collection: string,
+  log: FastifyBaseLogger,
+): Promise<void> {
+  try {
+    await client.upsert(collection, {
+      wait: true,
+      points: [
+        {
+          id: SCHEME_POINT_ID,
+          vector: {},
+          payload: { [SCHEME_VERSION_FIELD]: BM25_SCHEME_VERSION },
+        },
+      ],
+    });
+    log.info(
+      { collection, bm25SchemeVersion: BM25_SCHEME_VERSION },
+      'Recorded the BM25 scheme version on the collection',
+    );
+  } catch (err: unknown) {
+    log.warn(
+      { err, collection },
+      'Could not record the BM25 scheme version — the next start will report it as unknown',
+    );
+  }
+}
+
+/**
+ * Make {@link BM25_SCHEME_VERSION} mean something.
+ *
+ * The sparse vectors are only comparable to a query vector built by the SAME tokenizer
+ * and the same weights. Nothing in Qdrant notices when they are not: index-time and
+ * query-time terms simply stop lining up and the lexical branch quietly ranks worse.
+ * So the version the corpus was built with is recorded next to the corpus and compared
+ * on every start.
+ *
+ * WHERE the record lives. The vectors belong to the collection, which is shared by all
+ * tenants (`user_id` payload, `is_tenant: true`), so a per-user row in SQLite would be
+ * the wrong scope — n copies of one fact, and a fresh user would "agree" with any
+ * collection. Qdrant has no collection-level metadata, which leaves:
+ *  - a marker POINT (chosen) — travels with the collection through snapshots and
+ *    copies, readable with one `retrieve`, and provably invisible (see
+ *    {@link recordSchemeVersion});
+ *  - a marker ALIAS, e.g. `cognivault_bm25_v3` — cheap and unable to pollute anything,
+ *    but it is not part of the collection: a snapshot restore or a collection copy
+ *    silently arrives without it, and it squats a name in the shared alias/collection
+ *    namespace;
+ *  - a side collection — an extra object to create, migrate and keep pointing at the
+ *    right physical collection, for one integer;
+ *  - the version stamped into EVERY point's payload — the most precise option (it can
+ *    count exactly how many points are stale and it heals itself as points are
+ *    re-indexed), but it changes the point schema, needs its own payload index to be
+ *    countable, and answers a question nobody asks: a partially re-indexed corpus is
+ *    not a supported state, whereas "this collection was built at vN" is the fact the
+ *    deploy procedure actually turns on.
+ *
+ * WHEN it is written: only when this build creates the collection, and when it adopts
+ * an EMPTY unversioned one. Never on a non-empty collection whose version is unknown —
+ * stamping that would replace an honest "unknown" with a confident lie, which is the
+ * failure this whole check exists to remove.
+ *
+ * WHY it does not fail startup, unlike the dimension check above:
+ *  - a dimension mismatch makes every upsert and every dense query fail at the Qdrant
+ *    level, so refusing to start loses nothing. A scheme mismatch is a partial,
+ *    one-sided degradation: dense retrieval is untouched, hybrid still fuses two
+ *    branches, only lexical ranking suffers. Serving degraded beats serving nothing.
+ *  - the only cure is a re-index, and re-indexing runs THROUGH this service
+ *    (`POST /api/admin/reindex`, plus the in-process vault poller). A process that
+ *    refuses to start cannot be told to repair itself — the operator would be locked
+ *    out of the fix by the check meant to prompt it.
+ *  - the intended deploy order is: ship the new build, index into a fresh collection,
+ *    then repoint the alias. There is a legitimate window in which the alias still
+ *    points at the old collection; failing startup would turn that window into a
+ *    CrashLoopBackOff and, on OpenShift, a rollback before anyone could act.
+ *
+ * Returns true when the collection's lexical vectors are NOT known to match this build.
+ */
+async function enforceSchemeVersion(
+  client: QdrantClient,
+  collection: string,
+  created: boolean,
+  pointsCount: number | null | undefined,
+  log: FastifyBaseLogger,
+): Promise<boolean> {
+  if (created) {
+    await recordSchemeVersion(client, collection, log);
+    return false;
+  }
+
+  const recorded = await readSchemeVersion(client, collection, log);
+
+  if (recorded === BM25_SCHEME_VERSION) {
+    log.info({ collection, bm25SchemeVersion: recorded }, 'BM25 scheme version matches');
+    return false;
+  }
+
+  if (recorded !== undefined) {
+    log.error(
+      { collection, recorded, expected: BM25_SCHEME_VERSION },
+      `Qdrant collection "${collection}" was indexed with BM25 scheme v${recorded}, but this ` +
+        `build produces v${BM25_SCHEME_VERSION}. Index-time and query-time terms no longer ` +
+        'line up, so /search/lexical and the lexical branch of /search/hybrid return ' +
+        'degraded results until the corpus is re-indexed (dense search is unaffected). ' +
+        `Fix: index into a fresh collection with this build and repoint the ` +
+        `"${COLLECTION_NAME}" alias at it.`,
+    );
+    return true;
+  }
+
+  // No marker. An EMPTY collection has nothing that could be stale, so adopting it is
+  // safe and silent-ish; a populated one predates this check and its provenance is
+  // genuinely unknown, so it keeps warning until a fresh collection replaces it.
+  if (pointsCount === 0) {
+    await recordSchemeVersion(client, collection, log);
+    return false;
+  }
+
+  log.warn(
+    { collection, expected: BM25_SCHEME_VERSION, pointsCount },
+    `Qdrant collection "${collection}" records no BM25 scheme version, so it cannot be ` +
+      `proven comparable to this build's v${BM25_SCHEME_VERSION}. If it was indexed before ` +
+      'this check existed, its lexical vectors may be stale and /search/lexical and the ' +
+      'lexical branch of /search/hybrid are degraded. Index into a fresh collection with ' +
+      `this build and repoint the "${COLLECTION_NAME}" alias at it; the marker is written ` +
+      'automatically for a collection this build creates.',
+  );
+  return true;
 }
 
 /**
@@ -533,9 +714,13 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
   // alias is being repointed.
   const { collection, created } = await resolveCollection(client, dimensions, fastify.log);
 
+  let pointsCount: number | null | undefined;
   if (!created) {
     const info = await client.getCollection(collection);
     assertUsableCollection(info, collection, dimensions, fastify.log);
+    // Distinguishes "created before this check and never indexed" from "populated by an
+    // unknown build" — see enforceSchemeVersion.
+    pointsCount = info.points_count;
   }
 
   if (created) {
@@ -553,14 +738,32 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
   // Create user_id tenant index — idempotent (safe on restart)
   await ensurePayloadIndex(client, collection, 'user_id', USER_ID_INDEX_SCHEMA, fastify.log);
 
-  // Purge legacy vectors without user_id payload
+  // Purge legacy vectors without user_id payload. The scheme marker is deliberately
+  // user-less for exactly the reason this purge exists, so it has to be excluded by id —
+  // otherwise every start would wipe the record it is about to read.
   await client.delete(collection, {
     wait: true,
     filter: {
       must: [{ is_empty: { key: 'user_id' } }],
+      must_not: [{ has_id: [SCHEME_POINT_ID] }],
     },
   });
   fastify.log.info('Purged legacy vectors without user_id');
+
+  // Beside the dimension check in spirit, after the purge in order: the marker must not
+  // be written into a delete that is still in flight.
+  const schemeMismatch = await enforceSchemeVersion(
+    client,
+    collection,
+    created,
+    pointsCount,
+    fastify.log,
+  );
+  // A startup log scrolls away; the gauge is what an alert can hang off. Guarded because
+  // this plugin is registered standalone in its own tests, without the metrics plugin.
+  if (fastify.hasDecorator('metrics')) {
+    fastify.metrics.bm25SchemeMismatch.set(schemeMismatch ? 1 : 0);
+  }
 
   // Expose factory for tenant-scoped Qdrant clients — raw client stays internal.
   // Reads `holder.current` on every call, so a renewed token is picked up without

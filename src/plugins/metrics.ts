@@ -11,6 +11,7 @@ interface MetricsCollection {
   chunksProcessed: Counter<'user_id'>;
   pipelineDuration: Histogram<'user_id'>;
   contextPacks: Counter<'user_id'>;
+  bm25SchemeMismatch: Gauge<string>;
   removeUserMetrics: (userId: string) => void;
   promRegistry: Registry;
 }
@@ -94,6 +95,16 @@ async function metricsPlugin(fastify: FastifyInstance): Promise<void> {
     registers: [register],
   });
 
+  // Whether the collection's sparse vectors are known to match this build's BM25 scheme.
+  // Set once at startup by the qdrant plugin; 1 means the lexical branch is degraded and
+  // a re-index into a fresh collection is owed. Unlabelled — the collection is a
+  // process-wide property, and a label would only invite cardinality.
+  const bm25SchemeMismatch = new Gauge({
+    name: 'cognivault_bm25_scheme_mismatch',
+    help: "1 when the Qdrant collection's recorded BM25 scheme version differs from (or is unknown to) the running build — lexical retrieval is degraded until a re-index",
+    registers: [register],
+  });
+
   // Remove all metric label combinations for a specific user
   function removeUserMetrics(userId: string): void {
     const searchTypes = ['semantic', 'hybrid', 'lexical'];
@@ -119,6 +130,7 @@ async function metricsPlugin(fastify: FastifyInstance): Promise<void> {
     chunksProcessed,
     pipelineDuration,
     contextPacks,
+    bm25SchemeMismatch,
     removeUserMetrics,
     promRegistry: register,
   });

@@ -22,9 +22,14 @@ export const DENSE_VECTOR_NAME = 'dense';
  * Version of the tokenization + weighting scheme. Bump it whenever tokenize()
  * changes in a way that alters the produced indices, or whenever the weights
  * change enough that old and new points can no longer be ranked against each
- * other: the value feeds the collection fingerprint, so a bump forces a fresh
- * collection and a reindex instead of leaving query-time and index-time terms
- * silently mismatched.
+ * other.
+ *
+ * It is enforced, not decorative. `src/plugins/qdrant.ts` stamps this value onto
+ * the collection it creates (payload `bm25_scheme_version` on the marker point
+ * `SCHEME_POINT_ID`) and compares it on every start. A collection built at an
+ * older version keeps serving — dense retrieval is unaffected — but startup logs
+ * an error naming both versions and the metric `cognivault_bm25_scheme_mismatch`
+ * goes to 1, so a deploy without the required re-index is no longer silent.
  *
  * v2 — {@link BM25_AVG_LEN} corrected to the measured corpus average.
  * v3 — {@link tokenize} emits the whole compound identifier alongside its fragments,

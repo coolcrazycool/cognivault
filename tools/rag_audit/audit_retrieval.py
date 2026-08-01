@@ -22,6 +22,8 @@
 |-------------------|-----------------------------------------|------------------------|
 | чанкер            | `src/lib/chunker.ts` (через audit_chunk) | он же                  |
 | разреженный вектор| `src/lib/bm25.ts` (через sparse_vectors) | он же                  |
+|   — документ      | `buildDocumentSparseVector`             | он же (pipeline.ts)    |
+|   — запрос        | `buildSparseVector`                     | он же (service.ts)     |
 | IDF               | формула Qdrant 1.16 `fancy_idf`          | Qdrant, server-side    |
 | слияние           | RRF Qdrant 1.16, k=2, позиция с нуля     | Qdrant, server-side    |
 | глубины веток     | константы из `service.ts`                | они же                 |
@@ -269,8 +271,15 @@ def load_golden_files(paths: Sequence[Path]) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 
 
-def sparse_vectors(texts: Sequence[str]) -> list[dict[str, list[float]]]:
-    """Гоняет `sparse_vectors.ts` — то есть НАСТОЯЩИЙ `buildSparseVector`.
+def sparse_vectors(texts: Sequence[str], kind: str) -> list[dict[str, list[float]]]:
+    """Гоняет `sparse_vectors.ts` — то есть НАСТОЯЩИЕ построители из `bm25.ts`.
+
+    `kind` выбирает сторону индекса ровно так, как это делает прод: `"document"` →
+    `buildDocumentSparseVector` (крошка чанка считается `BM25_BREADCRUMB_BOOST` раз,
+    `src/plugins/pipeline.ts`), `"query"` → `buildSparseVector`
+    (`src/features/search/service.ts`). Гонять документы запросным построителем — значит
+    мерить систему, которой нет: форма вектора та же, веса другие, и расхождение не
+    проявит себя ничем, кроме неверных чисел.
 
     Один вызов на весь набор: запуск tsx стоит секунды, и делать его на каждый текст
     было бы дороже самого счёта. Реализовать токенизацию на Python нельзя — расхождение
@@ -278,11 +287,13 @@ def sparse_vectors(texts: Sequence[str]) -> list[dict[str, list[float]]]:
     Трансформы вариантов меняют ТЕКСТ до этого вызова, но не сам вызов: разреженный
     вектор всегда считает продовый модуль.
     """
+    if kind not in ("document", "query"):
+        raise SystemExit(f"sparse_vectors: kind {kind!r} не из ('document', 'query')")
     script = REPO_ROOT / "tools" / "rag_audit" / "sparse_vectors.ts"
     with tempfile.TemporaryDirectory(prefix="rag-audit-sparse-") as tmp:
         in_path = Path(tmp) / "in.json"
         out_path = Path(tmp) / "out.json"
-        in_path.write_text(json.dumps({"texts": list(texts)}), encoding="utf-8")
+        in_path.write_text(json.dumps({"kind": kind, "texts": list(texts)}), encoding="utf-8")
         result = subprocess.run(
             ["npx", "tsx", str(script), str(in_path), str(out_path)],
             cwd=REPO_ROOT,
@@ -306,19 +317,23 @@ class SparseMemo:
     В свипе несколько вариантов почти всегда делят одни и те же тексты (вариант,
     меняющий только слияние, не меняет ни документы, ни запросы) — недостающие тексты
     собираются в ОДИН вызов tsx, повторные не стоят ничего.
+
+    Ключ кэша — пара (сторона, текст), а не текст: у одной и той же строки вектор
+    документа и вектор запроса РАЗНЫЕ (крошка документа весит `BM25_BREADCRUMB_BOOST`).
+    Общий ключ подменял бы один другим в зависимости от того, кто спросил первым.
     """
 
     def __init__(self) -> None:
-        self._cache: dict[str, dict[str, list[float]]] = {}
+        self._cache: dict[tuple[str, str], dict[str, list[float]]] = {}
         self.computed = 0
 
-    def vectors(self, texts: Sequence[str]) -> list[dict[str, list[float]]]:
-        missing = [t for t in dict.fromkeys(texts) if t not in self._cache]
+    def vectors(self, texts: Sequence[str], kind: str) -> list[dict[str, list[float]]]:
+        missing = [t for t in dict.fromkeys(texts) if (kind, t) not in self._cache]
         if missing:
-            for text, vector in zip(missing, sparse_vectors(missing)):
-                self._cache[text] = vector
+            for text, vector in zip(missing, sparse_vectors(missing, kind)):
+                self._cache[(kind, text)] = vector
             self.computed += len(missing)
-        return [self._cache[t] for t in texts]
+        return [self._cache[(kind, t)] for t in texts]
 
 
 def fancy_idf(n: float, df: float) -> float:
@@ -547,7 +562,14 @@ def _dc_as_indexed(chunk: Chunk) -> str:
 
 @register_doc_composer("strip_breadcrumb")
 def _dc_strip_breadcrumb(chunk: Chunk) -> str:
-    """Референс: чанк без первой строки-крошки (если она равна `section_path`)."""
+    """Референс: чанк без первой строки-крошки (если она равна `section_path`).
+
+    Осторожно на разреженной стороне: `buildDocumentSparseVector` весит ПЕРВУЮ строку
+    того текста, который ему дали, — сняв крошку, вариант не отключает буст, а
+    переставляет его на первую строку тела. Так же поступил бы и прод, если бы
+    индексировал такой текст, поэтому композер оставлен как есть; читать его результат
+    как «замер без буста» нельзя.
+    """
     crumb = chunk.section_path + "\n"
     if chunk.section_path and chunk.text.startswith(crumb):
         return chunk.text[len(crumb) :].lstrip("\n")
@@ -1965,8 +1987,9 @@ def run_variant(
 
     t0 = time.monotonic()
     computed_before_sparse = sparse_memo.computed
-    doc_sparse = sparse_memo.vectors(doc_sparse_texts)
-    query_sparse = sparse_memo.vectors(query_sparse_texts)
+    # Стороны считаются РАЗНЫМИ построителями — ровно как в проде.
+    doc_sparse = sparse_memo.vectors(doc_sparse_texts, "document")
+    query_sparse = sparse_memo.vectors(query_sparse_texts, "query")
     sparse_s = time.monotonic() - t0
 
     t0 = time.monotonic()
