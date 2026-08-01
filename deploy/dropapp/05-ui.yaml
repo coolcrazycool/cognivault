@@ -40,7 +40,7 @@ spec:
           # Иммутабельный sha-тег: пиним именно sha, а не тег ветки, чтобы SberOSC
           # сканировал НОВЫЙ digest, а не отдавал закешированный вердикт по старому
           # образу. Источник — ghcr.io/coolcrazycool/cognivault-ui (пакет PUBLIC).
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-c53781a
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-fd27f9f
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
