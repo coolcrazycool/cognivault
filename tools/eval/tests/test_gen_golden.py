@@ -148,6 +148,29 @@ def test_pairs_from_verdict_row_shape():
     }
 
 
+def test_generator_never_invents_a_chunk_index():
+    """Индекс фрагмента ≠ `chunk_index` бэкенда, поэтому он остаётся null.
+
+    Сплиттер здесь свой (H1–H3 + кап по символам), а бэкенд нумерует чанки
+    по-своему (слияние коротких секций, бюджет в токенах, таблицы построчно,
+    table-summary в хвосте массива). Порядковый номер фрагмента, выданный за
+    `chunk_index`, дал бы `run.py` ложные промахи на точной ветке сравнения.
+    """
+    fragment = Fragment("docs/a.md", "Индексация > Чанкер", "текст")
+    rows = pairs_from_verdict(
+        fragment,
+        {
+            "factual": {"question": "Что?", "ground_truth": "То."},
+            "practical": {"question": "Как?", "ground_truth": "Так."},
+        },
+    ) + unanswerable_from_verdict(
+        fragment, {"unanswerable": {"question": "Сколько стоит?", "why": "нет цен"}}
+    )
+
+    assert len(rows) == 3
+    assert all(row["source_chunk_index"] is None for row in rows)
+
+
 def test_pairs_from_verdict_skips_nulls_and_blanks():
     fragment = Fragment("a.md", "S", "текст")
     rows = pairs_from_verdict(

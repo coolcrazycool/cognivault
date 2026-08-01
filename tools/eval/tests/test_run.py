@@ -21,6 +21,7 @@ from gen_golden import BackendError  # noqa: E402
 from run import (  # noqa: E402
     APPROXIMATE_WARNING,
     DEFAULT_UI_URL,
+    GRANULARITY_WARNING,
     REFUSAL_KEY,
     REPORT_DISCLAIMER,
     RETRIEVAL_KEY,
@@ -583,6 +584,44 @@ def test_report_marks_approximate_runs():
     )
     assert fallback["approximate"] is True
     assert "ПРИБЛИЖЁННЫЙ ПРОГОН" in render_report_md(fallback)
+
+
+def test_report_shouts_when_retrieval_hit_is_measured_below_chunk_level():
+    """Огрубление до раздела/файла обязано быть видно, а не молча завышать hit."""
+    rows = [
+        _sample("s1", 0.8, retrieval_granularity="section"),
+        _sample("s2", 0.8, retrieval_granularity="file"),
+        _sample("s3", 0.8, retrieval_granularity="chunk"),
+    ]
+    report = _report("degraded", 0.8, samples=rows)
+
+    assert report["retrieval_degradation"] == {
+        "degraded": 2,
+        "measured": 3,
+        "levels": {"section": 1, "file": 1, "chunk": 1},
+    }
+    text = render_report_md(report)
+    assert GRANULARITY_WARNING.split("**")[1].split(":")[0] in text
+    assert "2 из 3" in text
+    # …и таблица средних честно подписывает, чем мерилась доля.
+    assert "гранулярность — chunk: 1, file: 1, section: 1" in text
+
+
+def test_report_stays_quiet_when_every_pair_is_measured_by_chunk():
+    report = _report("clean", 0.8, samples=[_sample("s1", 0.8)])
+    assert report["retrieval_degradation"]["degraded"] == 0
+    assert "измерен НЕ на уровне чанка" not in render_report_md(report)
+
+
+def test_compare_warns_when_runs_used_different_granularity():
+    chunky = _report("a", 0.8, samples=[_sample("s1", 0.8)])
+    sectiony = _report(
+        "b", 0.8, samples=[_sample("s1", 0.8, retrieval_granularity="section")]
+    )
+    text = render_compare_md(chunky, sectiony)
+    assert "измерен с разной" in text
+    # Одинаковая гранулярность — предупреждения нет.
+    assert "измерен с разной" not in render_compare_md(chunky, chunky)
 
 
 def test_report_records_refusal_branch():

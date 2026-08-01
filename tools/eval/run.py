@@ -81,6 +81,30 @@ APPROXIMATE_WARNING = (
     "недостоверна. Дайте харнессу `--rag-log <путь к rag_log.jsonl>`."
 )
 
+#: Уровни `retrieval_granularity`, на которых попадание засчитывается ГРУБЕЕ,
+#: чем по паре ``(path, chunk_index)``: любой чанк того же раздела (или файла)
+#: считается попаданием.
+DEGRADED_GRANULARITIES = ("section", "file")
+
+#: Печатается, когда хотя бы одна пара мерилась не на уровне чанка. Раньше это
+#: было видно только по словарю `retrieval_granularity` в шапке — то есть
+#: молча: число `retrieval_hit` выглядело точным, будучи завышенным.
+GRANULARITY_WARNING = (
+    "**`retrieval_hit` измерен НЕ на уровне чанка: {degraded} из {measured} "
+    "пар.** У этих пар в golden-set нет `source_chunk_index`, поэтому "
+    "попаданием считался любой чанк нужного раздела (`section`) или файла "
+    "(`file`) — метрика ЗАВЫШЕНА относительно честного сравнения по паре "
+    "`(path, chunk_index)`, и её нельзя сравнивать с прогоном, где чанк "
+    "известен. Это ограничение генератора, а не сбой: `gen_golden.py` режет "
+    "корпус собственным упрощённым сплиттером (H1–H3 + кап по символам), а "
+    "бэкенд нумерует чанки по-своему (короткие секции сливаются, длинные "
+    "режутся по бюджету токенов, таблицы — построчно, table-summary "
+    "дописывается в хвост массива). Проставленный «на глаз» индекс давал бы "
+    "ЛОЖНЫЕ ПРОМАХИ, что хуже честного огрубления, поэтому генератор пишет "
+    "`null`. Поднять точность можно только вручную: проставить "
+    "`source_chunk_index` в `golden.jsonl` по выдаче `/api/search`."
+)
+
 RETRIEVAL_KEY = "retrieval_hit"
 REFUSAL_KEY = "refusal_ok"
 
@@ -827,6 +851,27 @@ def granularity_counts(samples: Sequence[dict[str, Any]]) -> dict[str, int]:
     return out
 
 
+def granularity_degradation(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Насколько огрублён ``retrieval_hit`` в этом прогоне.
+
+    ``{degraded, measured, levels}``: сколько пар из измеренных засчитывались по
+    разделу/файлу вместо чанка. Ноль ``degraded`` — прогон честно чанковый;
+    всё остальное отчёт обязан сказать вслух (см. :data:`GRANULARITY_WARNING`),
+    иначе завышенный `retrieval_hit` читается как точный.
+    """
+    levels = granularity_counts(samples)
+    measured = sum(count for key, count in levels.items() if key != "none")
+    degraded = sum(levels.get(key, 0) for key in DEGRADED_GRANULARITIES)
+    return {"degraded": degraded, "measured": measured, "levels": levels}
+
+
+def _granularity_label(report: dict[str, Any]) -> str:
+    """``chunk: 3, section: 10`` — чем мерилась каждая пара."""
+    levels = (report.get("retrieval_degradation") or {}).get("levels") or {}
+    pairs = [(key, count) for key, count in sorted(levels.items()) if key != "none"]
+    return ", ".join(f"{key}: {count}" for key, count in pairs) or "—"
+
+
 def run_parameters(
     samples: Sequence[dict[str, Any]],
     *,
@@ -907,6 +952,7 @@ def build_report(
         "dispersion": dispersion(samples),
         "coverage": coverage(ok),
         "retrieval_granularity": granularity_counts(samples),
+        "retrieval_degradation": granularity_degradation(samples),
         "run_params": run_parameters(
             samples,
             judge_model=judge_model,
@@ -1000,6 +1046,16 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
     if report.get("approximate"):
         lines.append(f"> {APPROXIMATE_WARNING}")
         lines.append("")
+    degradation = report.get("retrieval_degradation") or {}
+    if degradation.get("degraded"):
+        lines.append(
+            "> "
+            + GRANULARITY_WARNING.format(
+                degraded=degradation.get("degraded", 0),
+                measured=degradation.get("measured", 0),
+            )
+        )
+        lines.append("")
     lines.append(f"- дата: `{report.get('generated_at')}`")
     lines.append(f"- golden-set: `{report.get('golden')}`")
     lines.append(f"- UI: `{report.get('ui_url')}`")
@@ -1031,7 +1087,8 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
             f"| {_fmt_spread(spread.get(name))} | {cover.get(name, 0)} |"
         )
     lines.append(
-        f"| {RETRIEVAL_KEY} (доля успешных пар, где нужный фрагмент попал в контекст) "
+        f"| {RETRIEVAL_KEY} (доля успешных пар, где нужный фрагмент попал в контекст; "
+        f"гранулярность — {_granularity_label(report)}) "
         f"| {_fmt(aggregates.get(RETRIEVAL_KEY))} | — | {counts.get('evaluated', 0)} |"
     )
     lines.append(
@@ -1170,6 +1227,14 @@ def render_compare_md(
     lines.append("")
     if report_a.get("approximate") or report_b.get("approximate"):
         lines.append(f"> {APPROXIMATE_WARNING}")
+        lines.append("")
+    if _granularity_label(report_a) != _granularity_label(report_b):
+        lines.append(
+            "> **ВНИМАНИЕ:** `retrieval_hit` в прогонах измерен с разной "
+            f"точностью (`{_granularity_label(report_a)}` vs "
+            f"`{_granularity_label(report_b)}`) — доля попаданий сравнима "
+            "только при одинаковой гранулярности, её дельта ниже недостоверна."
+        )
         lines.append("")
     if report_a.get("prompt_version") != report_b.get("prompt_version"):
         lines.append(
@@ -1482,6 +1547,13 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         _log(f"  упало и исключено из средних: {failed}")
     if report.get("approximate"):
         _log("ВНИМАНИЕ: прогон ПРИБЛИЖЁННЫЙ — контекст восстановлен из метаданных")
+    degradation = report.get("retrieval_degradation") or {}
+    if degradation.get("degraded"):
+        _log(
+            f"ВНИМАНИЕ: retrieval_hit огрублён у {degradation['degraded']} из "
+            f"{degradation['measured']} пар (нет source_chunk_index) — "
+            f"гранулярность {_granularity_label(report)}, число ЗАВЫШЕНО"
+        )
     _log("напоминание: абсолютные числа судьи не показательны — сравнивайте прогоны")
     return 0
 

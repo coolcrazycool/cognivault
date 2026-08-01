@@ -592,6 +592,32 @@ function headingNodes(section: Section): Node[] {
   return [node];
 }
 
+/**
+ * Is this section's own heading already visible in its `sectionPath`?
+ *
+ * H2+ headings are the tail of the heading stack, so the breadcrumb at the top of every
+ * chunk carries their words. H1 headings are transparent — the section's path is the
+ * bare note title — so for them the answer is no, and the heading has to be put into the
+ * body instead or its words appear nowhere in the index.
+ */
+function headingIsInPath(section: Section): boolean {
+  return section.headingStack.length > 0;
+}
+
+/**
+ * The nodes of a section that gets a `sectionPath` of its own.
+ *
+ * Same rule as {@link headingNodes}, applied to sections that are *not* merged away: a
+ * heading missing from the path is prepended to the body. Without it a standalone H1
+ * section ("# Тарифы 2026" + 300 tokens of prose) is stored with its title nowhere in
+ * the chunk text, and a query for the title alone cannot reach it.
+ */
+function standaloneNodes(section: Section): Node[] {
+  return headingIsInPath(section)
+    ? [...section.nodes]
+    : [...headingNodes(section), ...section.nodes];
+}
+
 function sectionsToChunks(
   sections: Section[],
   title: string,
@@ -682,7 +708,7 @@ function sectionsToChunks(
         pending.push({
           depth: section.depth,
           sectionPath,
-          nodes: [...section.nodes],
+          nodes: standaloneNodes(section),
         });
       }
     } else {
@@ -697,7 +723,7 @@ function sectionsToChunks(
       pending.push({
         depth: section.depth,
         sectionPath,
-        nodes: [...section.nodes],
+        nodes: standaloneNodes(section),
       });
     }
   }

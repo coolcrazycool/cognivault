@@ -1,10 +1,27 @@
 import { describe, expect, it } from 'vitest';
+import { countTokens, MAX_CHUNK_TOKENS } from '../chunker.js';
 import { chunkCsv } from '../csv-chunker.js';
 
 // Helper: build a CSV string with N rows and given headers
 function makeCsv(headers: string[], rows: string[][]): string {
   const lines = [headers.join(','), ...rows.map((r) => r.join(','))];
   return lines.join('\n');
+}
+
+/** A table wide enough that a 30-row batch would blow past the token budget. */
+function makeWideCsv(rowCount: number, columns: number, repeats: number): string {
+  const headers = Array.from({ length: columns }, (_, i) => `Колонка${i + 1}`);
+  const rows = Array.from({ length: rowCount }, (_, r) =>
+    headers.map((_, c) => `значение ${r}-${c} `.repeat(repeats).trim()),
+  );
+  return makeCsv(headers, rows);
+}
+
+/** `"Rows 4-9"` → `[4, 9]` — the row range a chunk claims in its breadcrumb. */
+function rowRange(sectionPath: string): [number, number] {
+  const match = /Rows (\d+)-(\d+)$/.exec(sectionPath);
+  if (match === null) throw new Error(`no row range in "${sectionPath}"`);
+  return [Number(match[1]), Number(match[2])];
 }
 
 describe('chunkCsv - basic chunking', () => {
@@ -116,6 +133,87 @@ describe('chunkCsv - edge cases', () => {
     expect(lines).toHaveLength(4);
     expect(lines[2]).toContain('Alice');
     expect(lines[3]).toContain('Bob');
+  });
+});
+
+describe('chunkCsv - token budget', () => {
+  it('keeps every chunk of a wide table within MAX_CHUNK_TOKENS', () => {
+    // 30 rows of this table are ~5000 tokens: the old row-count-only batching handed
+    // the embedder a chunk it silently truncated — the tail stayed in the payload but
+    // never reached the vector.
+    const csv = makeWideCsv(60, 8, 3);
+    const chunks = chunkCsv(csv, 'wide.csv');
+
+    expect(chunks.length).toBeGreaterThan(2);
+    for (const chunk of chunks) {
+      expect(countTokens(chunk.text)).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+    }
+  });
+
+  it('counts the breadcrumb against the budget, not just the rows', () => {
+    // A long file name eats into the same budget, so the body must shrink to match.
+    const filename = `${'очень-длинное-имя-файла-'.repeat(8)}.csv`;
+    const chunks = chunkCsv(makeWideCsv(30, 6, 2), filename);
+
+    for (const chunk of chunks) {
+      expect(chunk.text.startsWith(`${chunk.sectionPath}\n\n`)).toBe(true);
+      expect(countTokens(chunk.text)).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+    }
+  });
+
+  it('never splits a row between two batches and covers every row exactly once', () => {
+    const rowCount = 40;
+    const chunks = chunkCsv(makeWideCsv(rowCount, 6, 2), 'wide.csv');
+
+    // Ranges are contiguous: 1-k, k+1-m, … up to the last row.
+    let expectedStart = 1;
+    for (const chunk of chunks) {
+      const [start, end] = rowRange(chunk.sectionPath);
+      expect(start).toBe(expectedStart);
+      expect(end).toBeGreaterThanOrEqual(start);
+      expectedStart = end + 1;
+    }
+    expect(expectedStart - 1).toBe(rowCount);
+
+    // …and each row's values live in exactly one chunk, whole.
+    for (let r = 0; r < rowCount; r++) {
+      const marker = `значение ${r}-0`;
+      const hits = chunks.filter((c) => c.text.includes(marker));
+      expect(hits).toHaveLength(1);
+    }
+  });
+
+  it('keeps batchSize as an upper bound when the budget is not the binding limit', () => {
+    const csv = makeCsv(
+      ['Col'],
+      Array.from({ length: 12 }, (_, i) => [`val${i}`]),
+    );
+    const chunks = chunkCsv(csv, 'data.csv', 5);
+    expect(chunks.map((c) => c.sectionPath)).toEqual([
+      'data.csv > Rows 1-5',
+      'data.csv > Rows 6-10',
+      'data.csv > Rows 11-12',
+    ]);
+  });
+
+  it('cuts a single row that alone exceeds the budget, keeping its row number', () => {
+    const csv = makeCsv(['Текст'], [['слово '.repeat(1200).trim()], ['короткая строка']]);
+    const chunks = chunkCsv(csv, 'huge.csv');
+
+    const first = chunks.filter((c) => c.sectionPath === 'huge.csv > Rows 1-1');
+    expect(first.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(countTokens(chunk.text)).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+    }
+    // The next row still gets its own batch, numbered from where the split row ended.
+    expect(chunks.at(-1)?.sectionPath).toBe('huge.csv > Rows 2-2');
+    expect(chunks.at(-1)?.text).toContain('короткая строка');
+  });
+
+  it('assigns a sequential chunkIndex across split rows too', () => {
+    const csv = makeCsv(['Текст'], [['слово '.repeat(1200).trim()], ['короткая строка']]);
+    const chunks = chunkCsv(csv, 'huge.csv');
+    expect(chunks.map((c) => c.chunkIndex)).toEqual(chunks.map((_, i) => i));
   });
 });
 

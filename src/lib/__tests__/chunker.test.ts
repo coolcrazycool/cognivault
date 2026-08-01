@@ -555,6 +555,62 @@ describe('chunkMarkdown - heading of a merged short section', () => {
   });
 });
 
+describe('chunkMarkdown - heading of a transparent H1 section', () => {
+  it('keeps an H1 heading in the text of a section that stands on its own', () => {
+    // H1 is transparent for sectionPath by design, so unlike an H2 the heading words
+    // are nowhere in the breadcrumb — the body is the only place they can live.
+    const body = `# Тарифы 2026\n\n${generateLongParagraph(110)}`;
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.sectionPath).toBe('Док');
+    expect(chunks[0]?.text).toContain('# Тарифы 2026');
+  });
+
+  it('keeps the H1 heading of the very first section, short and with no predecessor', () => {
+    const body = '# Тарифы 2026\n\nкоротко про тарифы.';
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.sectionPath).toBe('Док');
+    expect(chunks[0]?.text).toContain('# Тарифы 2026');
+    expect(chunks[0]?.text).toContain('коротко про тарифы.');
+  });
+
+  it('keeps each H1 heading with its own section when a note has several', () => {
+    const body = `# Альфа\n\n${generateLongParagraph(110)}\n\n# Бета\n\n${generateLongParagraph(110)}`;
+    const { chunks, sections } = chunkMarkdownWithSections(body, { title: 'Док' });
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]?.text).toContain('# Альфа');
+    expect(chunks[0]?.text).not.toContain('# Бета');
+    expect(chunks[1]?.text).toContain('# Бета');
+    // Both sections still share the bare note title as their path (H1 stays
+    // transparent) and are told apart by their ordinal, not by the heading.
+    expect(chunks.map((c) => c.sectionPath)).toEqual(['Док', 'Док']);
+    expect(chunks[0]?.parentId).not.toBe(chunks[1]?.parentId);
+    expect(sections.map((s) => s.sectionPath)).toEqual(['Док', 'Док']);
+  });
+
+  it('does not repeat an H2 heading in the body — it is already in the breadcrumb', () => {
+    const body = `## Хранилище\n\n${generateLongParagraph(110)}`;
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.sectionPath).toBe('Док > Хранилище');
+    expect(chunks[0]?.text).not.toContain('## Хранилище');
+  });
+
+  it('puts the H1 heading on the parent section too', () => {
+    const body = `# Тарифы 2026\n\n${generateLongParagraph(300)}`;
+    const { chunks, sections } = chunkMarkdownWithSections(body, { title: 'Док' });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(sections).toHaveLength(1);
+    expect(sections[0]?.text).toContain('# Тарифы 2026');
+  });
+});
+
 describe('chunkMarkdown - oversized single node', () => {
   it('cuts a paragraph larger than the budget instead of emitting it whole', () => {
     const body = `## Стена текста\n\n${generateLongParagraph(1000)}`;
