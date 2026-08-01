@@ -226,7 +226,7 @@
       </div>
       <details class="filelist" id="ro-prompts" hidden>
         <summary>Служебные промпты (только для чтения)</summary>
-        <small class="hint">Эти промпты требуют от модели строгий JSON-ответ: любая правка ломает разбор, поэтому редактировать их нельзя.</small>
+        <small class="hint">Первые два требуют от модели строгий JSON-ответ: любая правка ломает разбор. Последние два — правила ответа на вопрос о самой базе и о самом ассистенте: они удерживают ответ на реальной структуре базы, поэтому тоже неизменяемы. Показаны, чтобы было видно, чем управляется ответ.</small>
         <div class="field">
           <label for="ro-prompt-condense">Уточнение вопроса (condense)</label>
           <textarea class="textarea ro" id="ro-prompt-condense" readonly spellcheck="false"></textarea>
@@ -234,6 +234,14 @@
         <div class="field">
           <label for="ro-prompt-grader">Оценка релевантности (grader)</label>
           <textarea class="textarea ro" id="ro-prompt-grader" readonly spellcheck="false"></textarea>
+        </div>
+        <div class="field">
+          <label for="ro-prompt-meta">Вопрос о составе базы (meta)</label>
+          <textarea class="textarea ro" id="ro-prompt-meta" readonly spellcheck="false"></textarea>
+        </div>
+        <div class="field">
+          <label for="ro-prompt-meta-self">Вопрос о самом ассистенте (meta_self)</label>
+          <textarea class="textarea ro" id="ro-prompt-meta-self" readonly spellcheck="false"></textarea>
         </div>
       </details>
     </section>

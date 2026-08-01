@@ -733,3 +733,47 @@ def test_the_control_measurement_is_not_vacuous(monkeypatch):
     head = on.user_message["content"][: on.user_message["content"].index("Источники:")]
     assert "- Продукты [раздел: 13, пусто]" in head
     assert len(head) > 500
+
+
+def test_a_configmap_string_reaches_the_flag_as_a_real_boolean(monkeypatch):
+    """`RAG_CORPUS_TREE_ENABLED: "true"` из ConfigMap → `enabled()` == True.
+
+    Флаг строгий: он включается ТОЛЬКО настоящим ``True``, а env всегда приходит
+    строкой. Если бы `server_config` клал строку как есть, ключ в манифесте
+    выглядел бы правильно и не делал ничего — то есть ровно тот дефект, который
+    проходит ревью. Тест проходит весь путь: env → `server_config` →
+    `corpus_tree.enabled`.
+    """
+    monkeypatch.setenv("RAG_CORPUS_TREE_ENABLED", "true")
+    rcfg = settings.server_config()["rag"]
+
+    assert rcfg["corpus_tree_enabled"] is True
+    assert corpus_tree.enabled(rcfg) is True
+
+    monkeypatch.setenv("RAG_CORPUS_TREE_ENABLED", "false")
+    assert corpus_tree.enabled(settings.server_config()["rag"]) is False
+
+
+def test_the_deployed_manifests_turn_the_tree_on():
+    """Дерево включается в деплое, а не в коде: дефолт остаётся `False`.
+
+    Свойство вольта, а не сервиса: иерархия папок Confluence-синка И ЕСТЬ дерево
+    продуктов. Тест сторожит расхождение между манифестами и дефолтом — если
+    кто-то «починит» дефолт, здесь станет видно, что решение принято дважды.
+    """
+    import pathlib
+
+    from app.config import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["rag"]["corpus_tree_enabled"] is False
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    manifests = [root / "cognivault-ui.yaml", root / "deploy/dropapp/03-configmap-ui.yaml"]
+    for manifest in manifests:
+        if not manifest.exists():  # пакет собран без деплой-манифестов
+            pytest.skip(f"манифест недоступен: {manifest}")
+        text = manifest.read_text(encoding="utf-8")
+        assert 'RAG_CORPUS_TREE_ENABLED: "true"' in text, manifest
+        # Соседний флаг того же шага обязан быть заведён, иначе оператору нечем
+        # его включить (D6).
+        assert "RAG_CONDENSE_FIRST_TURN:" in text, manifest

@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import config, settings  # noqa: E402
+from app import config, rag, settings  # noqa: E402
 from app.deps import user_bucket  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.routes import config_routes  # noqa: E402
@@ -310,6 +310,12 @@ def test_readonly_and_default_prompts_are_exposed(tmp_path, monkeypatch):
     assert body["defaults"]["prompts"]["context_reminder"]
     assert body["readonly"]["prompts"]["condense"]
     assert body["readonly"]["prompts"]["grader"]
+    # Мета-ходом управляют два хардкодных промпта. Редактировать их нельзя —
+    # но не видеть их пользователь тоже не должен: они решают, чем отвечается
+    # вопрос про саму базу и про самого ассистента.
+    assert body["readonly"]["prompts"]["meta"] == rag.META_SYSTEM_PROMPT
+    assert body["readonly"]["prompts"]["meta_self"] == rag.META_SELF_SYSTEM_PROMPT
+    assert "meta" not in settings.editable_leaves("prompts")
     assert set(body["defaults"]["rag"]) == set(settings.editable_leaves("rag"))
 
 

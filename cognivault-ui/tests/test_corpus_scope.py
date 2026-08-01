@@ -85,6 +85,27 @@ def _local_mode(monkeypatch):
         ("Сколько всего страниц в базе и как они распределены по разделам?", "corpus"),
         # Составной метавопрос: обе части — метавопросы, корпусная сильнее.
         ("Что ты вообще знаешь? О чём эта база?", "corpus"),
+        # --- D5: проверенные промахи, каждый уходил в отказ грейдера --------- #
+        ("Что ты умеешь делать?", "assistant"),
+        ("Что вы знаете?", "assistant"),
+        ("Что вы умеете?", "assistant"),
+        ("Кто вы?", "assistant"),
+        ("Что ты знаешь вообще?", "assistant"),
+        ("Какие темы ты покрываешь?", "assistant"),
+        ("Какая информация у тебя есть?", "assistant"),
+        ("Какие документы у тебя есть?", "assistant"),
+        ("На какие вопросы ты можешь ответить?", "assistant"),
+        ("Какие есть разделы?", "corpus"),
+        ("Перечисли разделы базы", "corpus"),
+        ("Перечислите разделы базы знаний", "corpus"),
+        ("Покажи структуру базы", "corpus"),
+        ("Назови разделы базы знаний", "corpus"),
+        # --- D4: вопросы о поведении самого ассистента ---------------------- #
+        ("Всегда ли ответ в Markdown с заголовками?", "assistant"),
+        ("В каком формате ты отвечаешь?", "assistant"),
+        ("Как ты работаешь?", "assistant"),
+        ("Откуда ты берёшь ответы?", "assistant"),
+        ("Используешь ли ты markdown?", "assistant"),
     ],
 )
 def test_meta_questions_are_recognised(question, kind):
@@ -109,6 +130,18 @@ def test_meta_questions_are_recognised(question, kind):
         # Приветствие + содержательный вопрос: содержательная часть решает.
         "Привет! Какие колонки в таблице fincert_feeds?",
         "",
+        # Расширение D5 не должно проглотить предметные формулировки: глагол
+        # ушёл в наполнители, но остаток клаузы несёт предмет.
+        "Перечисли все поля витрины fincert_feeds",
+        "Перечисли этапы расчёта YAFCA",
+        "Покажи структуру витрины feeds_all_view",
+        "Опиши полный цикл расчёта финэффекта",
+        "Назови все потоки наполнения витрин",
+        "Какие есть ML-метрики и где про них почитать?",
+        "Какие разделы в базе данных ClickHouse?",
+        "В каком формате хранится дата в витрине?",
+        "Как ты работаешь с витриной fincert_feeds?",
+        "Какие вопросы задаются на code review?",
     ],
 )
 def test_non_meta_questions_fall_through(question):
@@ -149,8 +182,14 @@ def _sources(*paths: str) -> list[dict]:
     ]
 
 
+#: «Структура базы известна, страниц-разделов в ней нет» — не то же самое, что
+#: «структура неизвестна» (``None``). Разницу проверяет
+#: `test_hedge_is_silent_when_the_shape_of_the_base_is_unknown`.
+_NO_CONTAINERS: frozenset[str] = frozenset()
+
+
 def test_hedge_fires_on_corpus_question_answered_from_one_document():
-    text = corpus_scope.hedge("corpus", _sources("a.md", "a.md"), 127)
+    text = corpus_scope.hedge("corpus", _sources("раздел/a.md", "раздел/a.md"), 127, _NO_CONTAINERS)
 
     assert text is not None
     assert "Документ 1" in text and "127" in text
@@ -158,22 +197,64 @@ def test_hedge_fires_on_corpus_question_answered_from_one_document():
     assert "не нашлось" not in text
 
 
+def test_hedge_fires_when_the_evidence_is_one_section():
+    """D3: два соседних документа одного раздела — не охват, а та же концентрация.
+
+    Почти-дубликаты по соседним страницам — измеренная популяция (7,3% чанков в
+    кросс-файловых кластерах), и по путям они выглядели как ширина.
+    """
+    text = corpus_scope.hedge(
+        "corpus", _sources("Продукты/Fincert/a.md", "Продукты/Fincert/b.md"), 127, _NO_CONTAINERS
+    )
+
+    assert text is not None
+    assert "«Fincert»" in text and "2 документа" in text
+
+
+def test_hedge_names_the_section_with_the_right_russian_plural():
+    text = corpus_scope.hedge(
+        "corpus",
+        _sources(*[f"Продукты/Fincert/{i}.md" for i in range(5)]),
+        127,
+        _NO_CONTAINERS,
+    )
+    assert text is not None and "5 документов" in text
+
+
 @pytest.mark.parametrize(
-    "scope, sources, total, why",
+    "scope, sources, total, containers, why",
     [
-        ("document", _sources("a.md"), 127, "вопрос про один документ"),
-        (corpus_scope.DEFAULT_SCOPE, _sources("a.md"), 127, "поля scope не было"),
-        ("corpus", _sources("a.md", "b.md"), 127, "источники из двух документов"),
-        ("corpus", [], 127, "источников нет вовсе"),
-        ("corpus", _sources("a.md"), 1, "в базе один документ — оговариваться не о чем"),
+        ("document", _sources("a/x.md"), 127, _NO_CONTAINERS, "вопрос про один документ"),
+        (corpus_scope.DEFAULT_SCOPE, _sources("a/x.md"), 127, _NO_CONTAINERS, "поля scope не было"),
+        ("corpus", _sources("a/x.md", "b/y.md"), 127, _NO_CONTAINERS, "источники из двух разделов"),
+        ("corpus", [], 127, _NO_CONTAINERS, "источников нет вовсе"),
+        ("corpus", _sources("a/x.md"), 1, _NO_CONTAINERS, "в базе один документ"),
+        ("corpus", _sources("x.md", "y.md"), 127, _NO_CONTAINERS, "файлы в корне — не раздел"),
+        (
+            "corpus",
+            _sources("Продукты/Fincert.md"),
+            127,
+            frozenset({"Продукты/Fincert.md"}),
+            "единственный документ — сама страница-раздел, она и есть перечень",
+        ),
     ],
 )
-def test_hedge_stays_silent(scope, sources, total, why):
-    assert corpus_scope.hedge(scope, sources, total) is None, why
+def test_hedge_stays_silent(scope, sources, total, containers, why):
+    assert corpus_scope.hedge(scope, sources, total, containers) is None, why
+
+
+def test_hedge_is_silent_when_the_shape_of_the_base_is_unknown():
+    """``containers=None`` — листинг недоступен, исключение проверить нечем.
+
+    Молчание тут не осторожность вообще, а конкретный выбор: без листинга
+    страницу-раздел от обычной страницы не отличить, а единственная популяция,
+    до которой оговорка при этом доходит, — та, где она ЛОЖНА.
+    """
+    assert corpus_scope.hedge("corpus", _sources("a/x.md"), 127, None) is None
 
 
 def test_hedge_omits_the_denominator_when_the_listing_is_unavailable():
-    text = corpus_scope.hedge("corpus", _sources("a.md"), None)
+    text = corpus_scope.hedge("corpus", _sources("a/x.md"), None, _NO_CONTAINERS)
     assert text is not None and "из None" not in text
 
 
@@ -201,14 +282,15 @@ def test_false_hedge_rate_on_the_control_group_is_zero():
     вердикты, которые может выдать реальный ход, кроме одного:
 
     * ``document`` — правильный вердикт для вопроса про один документ;
-    * отсутствующее поле ``scope`` — старый или обрезанный пользователем промпт;
+    * отсутствующее поле ``scope`` — модель не вернула ключ;
     * сломанный/пустой ответ condense и выключенный condense — оба дают
       :data:`app.corpus_scope.DEFAULT_SCOPE`.
 
     Не проверяется (и офлайн непроверяемо): вердикт ``corpus`` на вопросе класса
     B. Это единственный способ получить здесь ложную оговорку, и он живёт в
     маршрутизации — мерить его можно только на живом стенде по полям
-    ``scope``/``hedge`` в ``rag_log.jsonl``.
+    ``scope``/``hedge`` в ``rag_log.jsonl``. Его цена измерена отдельно —
+    см. `test_forced_corpus_verdict_exposure_on_the_control_group`.
     """
     questions = _control_questions()
     verdicts = [
@@ -224,7 +306,7 @@ def test_false_hedge_rate_on_the_control_group_is_zero():
         # Класс B отвечается ИЗ ОДНОГО документа — то есть сходится ровно в тот
         # признак, на который смотрит оговорка. Единственное, что её удерживает,
         # это охват.
-        if corpus_scope.hedge(scope, _sources(row["source_path"]), 127) is not None
+        if corpus_scope.hedge(scope, _sources(row["source_path"]), 127, _NO_CONTAINERS)
     ]
 
     assert hedged == [], f"ложная оговорка на {len(hedged)} парах (вопрос, вердикт)"
@@ -237,7 +319,134 @@ def test_the_control_measurement_is_not_vacuous():
     ноль выше означает «охват удержал», а не «оговорка мертва».
     """
     row = _control_questions()[0]
-    assert corpus_scope.hedge("corpus", _sources(row["source_path"]), 127) is not None
+    assert (
+        corpus_scope.hedge("corpus", _sources(row["source_path"]), 127, _NO_CONTAINERS)
+        is not None
+    )
+
+
+def test_forced_corpus_verdict_exposure_on_the_control_group():
+    """Сколько из 56 получат ложную оговорку, ЕСЛИ классификатор ошибётся охватом.
+
+    Ноль выше измеряет удержание охвата, а не разделяющую способность оговорки
+    (это и был дефект измерения: 168 пар сводились к одному вердикту
+    ``document``). Здесь охват ПРИНУДИТЕЛЬНО испорчен на всех 56 — это верхняя
+    граница цены ошибки классификатора, и её надо знать числом, а не словами.
+
+    Ответ: ВСЕ 56. Класс B по построению отвечается из одного документа, то есть
+    сходится ровно в тот признак, на который смотрит оговорка, и удерживает её
+    ровно одно — вердикт охвата. Знать это числом важнее, чем считать ноль выше
+    доказательством безопасности: ноль держится на классификаторе, которого
+    офлайн-стенд не видит.
+
+    Исключение по страницам-разделам (`containers`) здесь не срабатывает и не
+    должно: вопрос «перечисли все поля витрины X» отвечается обычной страницей,
+    а не оглавлением раздела. Оно снимает другую популяцию — g500–g505.
+    """
+    questions = _control_questions()
+    exposed = [
+        row["id"]
+        for row in questions
+        if corpus_scope.hedge(
+            "corpus", _sources(row["source_path"]), 127, _NO_CONTAINERS
+        )
+    ]
+
+    assert len(exposed) == len(questions) == 56
+
+
+# --------------------------------------------------------------------------- #
+# ИЗМЕРЕНИЕ: популяция, на которой оговорка БЫЛА БЫ ложной (g500–g505)
+# --------------------------------------------------------------------------- #
+
+# Шесть отвечаемых вопросов охвата приёмочного набора. Каждый ПРАВИЛЬНО и
+# ПОЛНОСТЬЮ отвечается ровно одной страницей — и каждая из этих страниц является
+# страницей-разделом: у неё есть потомки в вольте. Числа сняты с эталонной
+# выгрузки (127 страниц, `~/Downloads/confluence-dump.zip`).
+#
+# Это и есть единственная популяция, до которой оговорка вообще доходила:
+# мотивирующий случай плана теперь ловит матчер, ловушки охвата упираются в
+# отказ грейдера раньше, а сами эти шесть строк ИСКЛЮЧЕНЫ из контрольной группы
+# 56 («строки категории corpus_scope — они и есть измеряемый класс»). То есть до
+# этого теста ложные оговорки на них не мерило ничто.
+_CONTAINER_ANSWERS = {
+    "g500-corpus_scope": 48,  # Продукты/Описание витрин.md
+    "g501-corpus_scope": 2,  # Продукты/Потоки наполнения витрин.md
+    "g502-corpus_scope": 10,  # Продукты/Fincert.md
+    "g503-corpus_scope": 7,  # Продукты/General.md
+    "g504-corpus_scope": 3,  # Продукты/Data Lineage/OASIS UI.md
+    "g505-corpus_scope": 3,  # Продукты/Data Lineage/Data Lineage REST APIs.md
+}
+
+_CORPUS_GOLDEN = (
+    Path(__file__).resolve().parents[2] / "tools" / "eval" / "golden.corpus.jsonl"
+)
+
+
+def _container_answer_rows() -> list[dict]:
+    if not _CORPUS_GOLDEN.exists():  # пакет собран без набора eval
+        pytest.skip(f"набор вопросов охвата недоступен: {_CORPUS_GOLDEN}")
+    rows = [
+        json.loads(line)
+        for line in _CORPUS_GOLDEN.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    found = [row for row in rows if row["id"] in _CONTAINER_ANSWERS]
+    assert len(found) == len(_CONTAINER_ANSWERS), "набор переразмечен, а тест — нет"
+    return found
+
+
+def test_no_hedge_on_questions_a_section_page_answers_completely():
+    """Принудительный вердикт ``corpus`` — и всё равно ни одной оговорки.
+
+    Живой классификатор назовёт эти шесть корпусными с высокой вероятностью:
+    формулировки буквально перечислительные («какие сервисы входят в продукт
+    Fincert?»). Оговорка там была бы ЛОЖНОЙ — ответ полон.
+    """
+    rows = _container_answer_rows()
+    containers = frozenset(row["source_path"] for row in rows)
+
+    hedged = [
+        row["id"]
+        for row in rows
+        if corpus_scope.hedge("corpus", _sources(row["source_path"]), 127, containers)
+    ]
+
+    assert hedged == [], f"ложная оговорка на {hedged}"
+
+
+def test_the_container_exemption_is_what_holds_that_zero():
+    """Без исключения по страницам-разделам оговорку получили бы все шесть."""
+    rows = _container_answer_rows()
+    hedged = [
+        row["id"]
+        for row in rows
+        if corpus_scope.hedge("corpus", _sources(row["source_path"]), 127, _NO_CONTAINERS)
+    ]
+    assert len(hedged) == len(rows)
+
+
+def test_hedge_still_fires_where_the_plan_says_it_should():
+    """Мотивирующий случай плана: «О каких проектах знаешь?» → одна архивная страница.
+
+    Страница-список личных проектов одного инженера, БЕЗ потомков — то есть не
+    перечень раздела, а один документ из 127. Именно этот случай матчер ловит
+    только в узкой формулировке; всё, что мимо неё, доезжает до ретрива, и вот
+    там оговорка и нужна.
+    """
+    archive = (
+        "Confluence/OASISEXT/OASIS External Home/Разработка управления "
+        "моделирования и исследования данных/Архив/Проекты Ислама.md"
+    )
+    text = corpus_scope.hedge(
+        "corpus",
+        [{"n": 1, "path": archive, "title": "Проекты Ислама"}],
+        127,
+        frozenset(_CONTAINER_ANSWERS),  # что угодно, лишь бы этой страницы там не было
+    )
+
+    assert text is not None
+    assert "Проекты Ислама" in text and "127" in text
 
 
 def test_no_control_question_is_swallowed_by_the_meta_matcher():
@@ -246,6 +455,48 @@ def test_no_control_question_is_swallowed_by_the_meta_matcher():
         row["id"] for row in _control_questions() if corpus_scope.match_meta(row["question"])
     ]
     assert matched == []
+
+
+_GOLDEN = [
+    Path(__file__).resolve().parents[2] / "tools" / "eval" / name
+    for name in ("golden.jsonl", "golden.corpus.jsonl")
+]
+
+
+def test_matcher_hits_exactly_the_meta_rows_of_the_whole_golden_set():
+    """Второй стоячий инвариант: на всех 251 вопросах ловятся только строки `meta`.
+
+    Матчер подменяет ответ материалом и обходит грейдер, поэтому его точность —
+    не метрика удобства, а граница безопасности. Расширение формулировок (D5) и
+    новая семья вопросов про сам ассистент (D4) обязаны эту границу удержать:
+    любое новое попадание — либо строка с ``expected_outcome == "meta"``, либо
+    регрессия.
+    """
+    if not all(path.exists() for path in _GOLDEN):  # пакет собран без набора eval
+        pytest.skip("золотой набор недоступен")
+    rows = [
+        json.loads(line)
+        for path in _GOLDEN
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 251
+
+    hits = {
+        row["id"]: corpus_scope.match_meta(row["question"])
+        for row in rows
+        if corpus_scope.match_meta(row["question"])
+    }
+    outcomes = {row["id"]: row.get("expected_outcome") for row in rows}
+
+    assert set(hits) == {
+        "x23-meta",  # D4: вопрос о поведении самого ассистента
+        "g506-corpus_scope",
+        "g507-corpus_scope",
+        "g508-corpus_scope",
+        "g513-corpus_scope",
+    }
+    assert all(outcomes[rid] == "meta" for rid in hits), hits
 
 
 # --------------------------------------------------------------------------- #
@@ -349,7 +600,7 @@ def test_meta_question_is_answered_from_the_section_tree(monkeypatch):
     seen = _install_retrieval(monkeypatch)
     _install_listing(monkeypatch, _corpus())
 
-    ctx = _build("Что ты знаешь?")
+    ctx = _build("О чём эта база?")
 
     assert ctx.intent == "meta"
     assert ctx.sources == []
@@ -360,7 +611,7 @@ def test_meta_question_is_answered_from_the_section_tree(monkeypatch):
     assert "Структура базы знаний" in content
     assert "Всего документов в базе: 28." in content
     assert "- Продукты — 21" in content and "Fincert: 12" in content
-    assert content.endswith("Вопрос: Что ты знаешь?")
+    assert content.endswith("Вопрос: О чём эта база?")
     # Системный турн — свой: `NO_RAG_SYSTEM_PROMPT` запрещает утверждать то,
     # чего нет в истории диалога, то есть запрещает и рассказ об охвате.
     assert ctx.system_message["content"] == rag.META_SYSTEM_PROMPT
@@ -368,15 +619,106 @@ def test_meta_question_is_answered_from_the_section_tree(monkeypatch):
 
 
 def test_meta_branch_falls_through_when_the_listing_is_unavailable(monkeypatch):
-    """Нет дерева — нет и ответа по дереву: ход идёт обычным путём, до грейдера."""
+    """Нет дерева — нет и ответа по дереву: ход идёт обычным путём, до грейдера.
+
+    Только для семьи ``corpus``: у вопроса «о чём эта база?» без структуры нет
+    материала вовсе, и выдумать её хуже, чем отказать. У семьи ``assistant``
+    материал свой — см. `test_question_about_the_assistant_is_answered_…`.
+    """
     seen = _install_retrieval(monkeypatch)
     _install_listing(monkeypatch, None)
 
-    ctx = _build("Что ты знаешь?")
+    ctx = _build("О чём эта база?")
 
     assert ctx.intent == "kb_question"
     assert "search" in seen and "grade" in seen
     assert ctx.sources and ctx.system_message["content"] == rag.SYSTEM_PROMPT
+
+
+# --------------------------------------------------------------------------- #
+# Семья `assistant`: вопрос про самого ассистента (D4, строка `x23-meta`)
+# --------------------------------------------------------------------------- #
+
+
+def test_question_about_the_assistant_is_answered_from_its_own_rules(monkeypatch):
+    """«Всегда ли ответ в Markdown с заголовками?» — вопрос о поведении сервиса.
+
+    Отвечающего документа в корпусе нет и быть не может, поэтому до этой ветки
+    строка приёмочного набора `x23-meta` доезжала до грейдера и получала отказ
+    «в доступных мне документах ответа не нашлось» — ровно то поведение, которое
+    заказчик просил починить, переклассифицировав вопрос в отвечаемый.
+    """
+    seen = _install_retrieval(monkeypatch)
+    _install_listing(monkeypatch, _corpus())
+
+    ctx = _build("Всегда ли ответ в Markdown с заголовками?")
+
+    assert ctx.intent == "meta"
+    assert seen == [] and ctx.sources == []
+    content = ctx.user_message["content"]
+    # Материал — правила, а не дерево папок.
+    assert "Как ты работаешь" in content
+    assert "Markdown" in content and "таблицы интерфейс НЕ разбирает" in content
+    # Дерево тоже на месте: «что ты знаешь» — это и про себя, и про базу.
+    assert "Структура базы знаний" in content
+    assert ctx.system_message["content"] == rag.META_SELF_SYSTEM_PROMPT
+
+
+def test_the_two_meta_families_get_different_material(monkeypatch):
+    """Различение семей несущее, а не декоративное: разный материал, разный промпт."""
+    _install_retrieval(monkeypatch)
+    _install_listing(monkeypatch, _corpus())
+
+    about_base = _build("О чём эта база?")
+    about_self = _build("Кто ты?")
+
+    assert about_base.system_message["content"] == rag.META_SYSTEM_PROMPT
+    assert about_self.system_message["content"] == rag.META_SELF_SYSTEM_PROMPT
+    assert "Как ты работаешь" not in about_base.user_message["content"]
+    assert "Как ты работаешь" in about_self.user_message["content"]
+
+
+def test_question_about_the_assistant_survives_an_unavailable_listing(monkeypatch):
+    """Правила — код, они не могут пропасть вместе с листингом вольта.
+
+    Семья ``assistant`` поэтому НЕ проваливается в обычный путь: там вопрос про
+    сам сервис снова уехал бы в ретрив, где отвечающего документа нет.
+    """
+    seen = _install_retrieval(monkeypatch)
+    _install_listing(monkeypatch, None)
+
+    ctx = _build("Кто ты?")
+
+    assert ctx.intent == "meta"
+    assert seen == []
+    content = ctx.user_message["content"]
+    assert "Как ты работаешь" in content
+    assert "Структура базы знаний" not in content
+
+
+def test_the_effective_answering_rules_are_quoted_not_applied(monkeypatch):
+    """Сохранённый `prompts.system` — это ОТВЕТ на «как ты отвечаешь», а не приказ.
+
+    Он попадает в материал (иначе рассказ о себе описывал бы чужую конфигурацию),
+    но системным турном остаётся `META_SELF_SYSTEM_PROMPT` — иначе правило
+    «отвечай только по блоку Источники» превратило бы этот ход в отказ.
+    """
+    _install_retrieval(monkeypatch)
+    _install_listing(monkeypatch, _corpus())
+
+    ctx = asyncio.run(
+        rag.build_rag_context(
+            "Кто ты?",
+            {"mode": "auto"},
+            None,
+            {},
+            None,
+            prompts={"system": "мой собственный системный промпт"},
+        )
+    )
+
+    assert ctx.system_message["content"] == rag.META_SELF_SYSTEM_PROMPT
+    assert "мой собственный системный промпт" in ctx.user_message["content"]
 
 
 def test_ordinary_question_never_reaches_the_meta_branch(monkeypatch):

@@ -58,16 +58,31 @@ def _default_prompts() -> dict[str, str]:
 
 
 def _readonly_prompts() -> dict[str, str]:
-    """Pipeline prompts the user cannot edit (their JSON contract is parsed).
+    """Pipeline prompts the user cannot edit.
 
-    Only the constant TAILS are exposed: the full prompt is assembled per request
-    from the question, the history and the candidate fragments.
+    Two reasons a prompt lands here rather than in the editable section, and both
+    are "an edit would break a contract the code depends on":
+
+    * ``condense`` / ``grader`` — their replies are parsed as JSON. Only the
+      constant TAILS are exposed; the full prompt is assembled per request from
+      the question, the history and the candidate fragments.
+    * ``meta`` / ``meta_self`` — the system turns of the branch that answers a
+      question about the base itself and about the assistant itself. Their whole
+      job is to keep an ungrounded answer from being generated, and an editable
+      key would freeze at whatever a user saved on the day they saved it.
+
+    Read-only is not secret: a user who cannot change a prompt must still be able
+    to SEE what governs their answers.
     """
     return {
         "condense": _module_text(
             rag_pipeline, "CONDENSE_TASKS", "_CONDENSE_TASKS"
         ),
         "grader": _module_text(rag_pipeline, "GRADE_SCALE", "_GRADE_SCALE"),
+        "meta": _module_text(rag, "META_SYSTEM_PROMPT", "_META_SYSTEM_PROMPT"),
+        "meta_self": _module_text(
+            rag, "META_SELF_SYSTEM_PROMPT", "_META_SELF_SYSTEM_PROMPT"
+        ),
     }
 
 

@@ -161,14 +161,21 @@ def test_single_root_folds_one_level_deeper():
 
 
 def test_descent_continues_through_every_single_folder_level():
-    """Настоящий вольт Confluence-синка ветвится только на ГЛУБИНЕ 4.
+    """Настоящий вольт Confluence-синка ветвится только на ГЛУБИНЕ 5.
 
     `build_vault_path` (app/confluence/convert.py) кладёт страницу в
     ``Confluence/<пространство>/<предки…>/<Заголовок>.md``, и на боевой выгрузке
-    подряд идут три папки-коридора: ``Confluence`` → ``OASISEXT`` → ``OASIS
-    External Home``. Спуск ровно на один уровень оставлял блок со строкой
-    ``- Confluence — 127 (OASISEXT: 127)`` — то есть платой за блок, который про
-    форму базы не говорит НИЧЕГО.
+    подряд идут ЧЕТЫРЕ папки-коридора: ``Confluence`` → ``OASISEXT`` → ``OASIS
+    External Home`` → ``Разработка …``. Спуск ровно на один уровень оставлял блок
+    со строкой ``- Confluence — 127 (OASISEXT: 127)`` — то есть платой за блок,
+    который про форму базы не говорит НИЧЕГО.
+
+    Четвёртый коридор — тот, на котором спуск спотыкался: рядом с папкой лежит
+    её собственная страница-раздел (``…/OASIS External Home/Разработка ….md``),
+    и уровень из «одной папки плюс один файл» читался как ветвление. Итог на
+    боевом корпусе — ``- Разработка … — 126`` и ``- (корень) — 1``: три названия
+    из бюджета в 2 400 символов. Уровень — коридор, когда в нём одна ПАПКА
+    (`_named`), а не одна запись.
     """
     root = "Confluence/OASISEXT/OASIS External Home/Разработка"
     paths = (
@@ -183,11 +190,31 @@ def test_descent_continues_through_every_single_folder_level():
 
     assert block is not None
     assert "Всего документов в базе: 127." in block
-    # Коридор целиком уехал в заголовок, а не съел единственный раздел.
-    assert "Разделы внутри «Confluence/OASISEXT/OASIS External Home»" in block
-    assert "- Разработка — 126" in block
-    assert "Продукты: 110" in block and "Архив: 10" in block
+    # Все четыре коридора уехали в заголовок, а разделы — настоящие.
+    assert "Разделы внутри «Confluence/OASISEXT/OASIS External Home/Разработка»" in block
+    assert "- Продукты — 110" in block
+    assert "- Архив — 10" in block
+    assert "- База знаний — 3" in block
+    # Страницы-разделы, лежащие рядом с папками, остаются видны как «(корень)».
+    assert "- (корень) — 3" in block
     assert len(block) <= corpus_map._MAX_MAP_CHARS
+
+
+def test_descent_does_not_hide_a_level_that_is_mostly_loose_files():
+    """Коридор — это «почти всё под одной папкой», а не «одна папка есть».
+
+    Вольт из 50 заметок в корне и одной папки на два документа: спуск в папку
+    спрятал бы 50 документов из 52, оставив блок, который про базу врёт. Порог
+    :data:`corpus_map._CORRIDOR_MIN_SHARE` держит именно этот случай.
+    """
+    paths = [f"Заметка {i}.md" for i in range(50)] + ["Проекты/а.md", "Проекты/б.md"]
+
+    block = corpus_map.render(paths, extensions=frozenset(_EXTENSIONS))
+
+    assert block is not None
+    assert "Разделы верхнего уровня" in block
+    assert "- (корень) — 50" in block
+    assert "- Проекты — 2" in block
 
 
 def test_descent_stops_before_swallowing_the_documents_themselves():
@@ -530,3 +557,47 @@ def test_citation_validator_catches_only_out_of_range_numbers():
     # Но приписать сведения из карты существующему номеру она может свободно:
     # валидатор проверяет ДИАПАЗОН, а не происхождение утверждения.
     assert chat_routes._invalid_citations("в базе 127 документов [Источник 1]", 5) == []
+
+
+# --------------------------------------------------------------------------- #
+# Страницы-разделы: у какого документа есть потомки
+# --------------------------------------------------------------------------- #
+
+
+def test_containers_finds_pages_that_have_descendants():
+    """``X.md`` рядом с папкой ``X/`` — оглавление раздела, а не рядовая страница.
+
+    Это единственный признак, по которому оговорка (`app.corpus_scope.hedge`)
+    отличает «ответ собран из одной случайной страницы» от «ответ собран из
+    страницы, которая и есть перечень раздела». Считается по листингу, без
+    единого дополнительного запроса.
+    """
+    paths = [
+        "Продукты/Fincert.md",
+        "Продукты/Fincert/Сервис A.md",
+        "Продукты/Fincert/Сервис B.md",
+        "Продукты/Одинокая страница.md",
+        "Продукты.md",
+    ]
+
+    found = corpus_map.containers(paths, frozenset(_EXTENSIONS))
+
+    assert found == {"Продукты/Fincert.md", "Продукты.md"}
+
+
+def test_containers_ignores_non_documents_and_garbage():
+    """Папка вложений не делает страницу разделом, а мусор в листинге не роняет."""
+    paths = ["Стр.md", "Стр/фото.png", None, 42, "Другая.md", "Другая/вложенная.md"]
+
+    found = corpus_map.containers(paths, frozenset(_EXTENSIONS))
+
+    assert found == {"Другая.md"}
+
+
+def test_containers_of_an_empty_listing_is_empty_not_none():
+    """Пустое множество — это ответ «страниц-разделов нет», а не «неизвестно».
+
+    Разницу несёт `container_paths`: ``None`` там означает недоступный листинг,
+    и оговорка при нём молчит.
+    """
+    assert corpus_map.containers([], frozenset(_EXTENSIONS)) == frozenset()

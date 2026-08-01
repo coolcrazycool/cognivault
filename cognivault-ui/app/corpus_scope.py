@@ -10,11 +10,13 @@ Three pure pieces, no model calls anywhere in this module:
   returns ``None`` and the caller does exactly what it did before.
 * :data:`SCOPES` / :func:`parse_scope` — the ``scope`` field the condense call
   now returns alongside ``intent``. Absent, unknown or malformed ⇒
-  :data:`DEFAULT_SCOPE` (``document``), which is today's behaviour: the condense
-  prompt is user-editable, and a user who trimmed the scope sentence out of it
-  must not break the route.
+  :data:`DEFAULT_SCOPE` (``document``), which is today's behaviour. The
+  tolerance is for the MODEL, not for a user: the condense prompt is read-only
+  (``config_routes._readonly_prompts``), but a model that answers with a JSON
+  object missing one key must not break the route.
 * :func:`hedge` — the evidence-concentration caveat, shown only when the
-  question was corpus-wide AND every selected fragment came from one document.
+  question was corpus-wide AND every selected fragment came from one section,
+  and that section is not the base's own index page for it.
 
 None of this touches the refusal path. The grader remains the only thing that
 can decide "not in my documents": the matcher answers a question no document was
@@ -49,9 +51,9 @@ CORPUS_SCOPE = "corpus"
 def parse_scope(raw: Any) -> str:
     """Map the model's ``scope`` field onto :data:`SCOPES`.
 
-    Tolerant on purpose — the field arrives from a user-editable prompt, so
-    ``None``, a missing key, a number, or a hallucinated value all collapse to
-    :data:`DEFAULT_SCOPE` rather than raising or inventing a branch.
+    Tolerant on purpose — the field arrives from a model, so ``None``, a missing
+    key, a number, or a hallucinated value all collapse to :data:`DEFAULT_SCOPE`
+    rather than raising or inventing a branch.
     """
     if not isinstance(raw, str):
         return DEFAULT_SCOPE
@@ -62,6 +64,15 @@ def parse_scope(raw: Any) -> str:
 # --------------------------------------------------------------------------- #
 # Meta-question matcher
 # --------------------------------------------------------------------------- #
+
+#: The two families :func:`match_meta` returns. They are NOT decoration: they
+#: select different material in :func:`app.rag._build_meta` — the section tree
+#: for :data:`META_CORPUS`, the assistant's own operating rules (plus the tree,
+#: when available) for :data:`META_ASSISTANT` — and therefore different
+#: fail-closed behaviour. A question about the base cannot be answered without
+#: the base's structure; a question about the assistant always can.
+META_ASSISTANT = "assistant"
+META_CORPUS = "corpus"
 
 # Longer than this and the turn is carrying subject matter, not a bare question
 # about scope. A cheap guard in front of the patterns (which are anchored anyway)
@@ -86,6 +97,19 @@ _FILLERS = (
     "подскажите",
     "расскажи",
     "расскажите",
+    # Imperatives that introduce a request and carry no meaning of their own.
+    # «Перечисли разделы базы» is «разделы базы» with a verb in front; without
+    # these the clause missed every pattern and fell through to retrieval, where
+    # the only possible outcome is the grader's «в документах ответа не нашлось»
+    # — the exact refusal this branch exists to remove.
+    "перечисли",
+    "перечислите",
+    "покажи",
+    "покажите",
+    "назови",
+    "назовите",
+    "опиши",
+    "опишите",
     "пожалуйста",
     "кстати",
     "а",
@@ -104,23 +128,78 @@ _STRIP_CHARS = " \t«»\"'`“”„-—–:,()[]"
 
 #: Anchored formulations, each matched against a WHOLE clause. Two families:
 #:
-#: * ``assistant`` — about the assistant itself («что ты знаешь», «кто ты»);
+#: * ``assistant`` — about the assistant itself («что ты знаешь», «кто ты»,
+#:   «всегда ли ответ в Markdown»);
 #: * ``corpus`` — about the base as a whole («о чём эта база», «какие разделы»).
 #:
-#: The families differ only in what they are called in the log; both are answered
-#: from the same structure. The list is narrow BY DESIGN — every pattern is a
-#: full-clause match with no room for a topic qualifier, so «Что ты знаешь про
-#: PSI?» falls through to retrieval while «Что ты знаешь?» does not. A pattern
-#: that would need a wildcard tail is a pattern that belongs in retrieval.
+#: The families select different material — see :data:`META_ASSISTANT`. The list
+#: is narrow BY DESIGN: every pattern is a full-clause match with no room for a
+#: topic qualifier, so «Что ты знаешь про PSI?» falls through to retrieval while
+#: «Что ты знаешь?» does not. A pattern that would need a wildcard tail is a
+#: pattern that belongs in retrieval.
 _PATTERNS: tuple[tuple[str, str], ...] = (
     # --- about the assistant ------------------------------------------------ #
-    ("assistant", r"что (?:ты )?(?:вообще |ещё |еще |такого )?знаешь"),
-    ("assistant", r"что (?:ты )?(?:вообще |ещё |еще )?(?:умеешь|можешь)"),
-    ("assistant", r"кто ты(?: такой| такая)?"),
+    ("assistant", r"что (?:ты |вы )?(?:вообще |ещё |еще |такого )?зна(?:ешь|ете)(?: вообще| ещё| еще)?"),
+    ("assistant", r"что (?:ты |вы )?(?:вообще |ещё |еще )?(?:умеешь|умеете|можешь|можете)(?: делать)?"),
+    ("assistant", r"кто (?:ты|вы)(?: такой| такая| такие)?"),
     ("assistant", r"что ты за (?:ассистент|бот|модель|помощник)(?: такой| такая)?"),
     ("assistant", r"(?:с )?чем (?:ты )?(?:можешь |умеешь )?(?:помочь|быть полезен)"),
     ("assistant", r"(?:о чем|о чём|про что) (?:ты )?(?:знаешь|можешь рассказать)"),
     ("assistant", r"(?:о себе|про себя)"),
+    # --- about how the assistant works -------------------------------------- #
+    #
+    # A question about the assistant's own behaviour — the format of its
+    # answers, where they come from — is answered from its OPERATING RULES
+    # (`rag._operating_rules`), not from the corpus. There is no document in any
+    # vault that describes this service, so before these patterns existed the
+    # only reachable outcome was the grader's refusal (`x23-meta` of the
+    # acceptance set). Still full-clause anchored: «в каком формате хранится
+    # витрина?» carries a subject and goes to retrieval.
+    (
+        "assistant",
+        r"(?:в каком (?:виде|формате)|как)(?: ты| вы)? "
+        r"(?:отвечаешь|отвечаете|оформляешь ответ|оформляете ответ|"
+        r"форматируешь ответ|форматируете ответ)",
+    ),
+    (
+        "assistant",
+        r"(?:всегда ли )?(?:твой |ваш |мой )?ответ(?:ы)? "
+        r"(?:всегда |будет |будут )?(?:в |с )?(?:markdown|разметк[еиой]|"
+        r"заголовками|разметкой)(?: с заголовками| с разметкой| и заголовками)?",
+    ),
+    (
+        "assistant",
+        r"(?:всегда ли |всегда )?(?:ты |вы )?(?:отвечаешь|отвечаете) "
+        r"(?:в |с )(?:markdown|разметк[еиой]|заголовками)"
+        r"(?: с заголовками| и заголовками)?",
+    ),
+    (
+        "assistant",
+        r"(?:ты |вы )?(?:используешь|используете)(?: ли)?(?: ты| вы)? "
+        r"(?:markdown|разметку)(?: в ответах| в ответе)?",
+    ),
+    (
+        "assistant",
+        r"откуда (?:ты |вы )?бер[её](?:шь|те) (?:ответы|информацию|данные|факты)",
+    ),
+    ("assistant", r"как (?:ты |вы )?(?:работаешь|работаете|устроен|устроена)"),
+    # Self-referential by construction: the clause names «ты»/«вы», so there is
+    # no subject left for retrieval to look for.
+    (
+        "assistant",
+        r"(?:какие|каких) (?:темы|тем|разделы|направления|вопросы) "
+        r"(?:ты |вы )?(?:покрываешь|покрываете|охватываешь|охватываете|"
+        r"знаешь|знаете)",
+    ),
+    (
+        "assistant",
+        r"на какие вопросы (?:ты |вы )?(?:можешь|можете) ответить",
+    ),
+    (
+        "assistant",
+        r"(?:какая|какие) (?:информация|документы|материалы|данные) "
+        r"у (?:тебя|вас)(?: есть)?",
+    ),
     # --- about the base as a whole ------------------------------------------ #
     ("corpus", r"(?:о чем|о чём|про что) (?:эта |эта твоя |твоя )?база(?: знаний)?"),
     ("corpus", r"что (?:это )?за база(?: знаний)?"),
@@ -141,7 +220,20 @@ _PATTERNS: tuple[tuple[str, str], ...] = (
     ),
     (
         "corpus",
-        r"(?:какая |какова )?структура (?:у )?базы(?: знаний)?",
+        r"(?:какая |какова )?структур[ауы] (?:у )?базы(?: знаний)?",
+    ),
+    # «Какие есть разделы?» / «Разделы базы знаний» — the same question with the
+    # «в базе» dropped or the verb moved. Both are full-clause anchored: the
+    # noun list is closed and nothing may follow it, so «какие есть разделы у
+    # витрины fincert_feeds» is not a match.
+    (
+        "corpus",
+        r"(?:какие|каких) (?:есть )?"
+        r"(?:разделы|разделов|темы|тем|направления)(?: есть)?",
+    ),
+    (
+        "corpus",
+        r"разделы базы(?: знаний)?",
     ),
     (
         "corpus",
@@ -226,7 +318,7 @@ def match_meta(question: str) -> str | None:
         kinds.append(kind)
     if not kinds:
         return None
-    return "corpus" if "corpus" in kinds else "assistant"
+    return META_CORPUS if META_CORPUS in kinds else META_ASSISTANT
 
 
 # --------------------------------------------------------------------------- #
@@ -235,14 +327,17 @@ def match_meta(question: str) -> str | None:
 
 _HEDGE_HEAD = "Оговорка: вопрос охватывает базу целиком"
 
+_HEDGE_TAIL = (
+    "Ответ описывает только его и не является перечнем по всей базе; в других "
+    "разделах может быть больше."
+)
 
-def _one_document(sources: list[dict[str, Any]]) -> str | None:
-    """The single document behind every source, or ``None`` if there are several."""
+
+def _paths(sources: list[dict[str, Any]]) -> set[str]:
+    """The distinct document paths behind ``sources``, blanks dropped."""
     paths = {str(s.get("path") or "") for s in sources if isinstance(s, dict)}
     paths.discard("")
-    if len(paths) != 1:
-        return None
-    return next(iter(paths))
+    return paths
 
 
 def _label(sources: list[dict[str, Any]], path: str) -> str:
@@ -255,12 +350,62 @@ def _label(sources: list[dict[str, Any]], path: str) -> str:
     return path.rsplit("/", 1)[-1].rsplit(".", 1)[0] or path
 
 
+def _plural_docs(n: int) -> str:
+    """Russian plural of «документ» for ``n`` (1 / 2-4 / 5+)."""
+    if n % 10 == 1 and n % 100 != 11:
+        return "документ"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "документа"
+    return "документов"
+
+
+def _concentration(
+    sources: list[dict[str, Any]], containers: frozenset[str]
+) -> tuple[str, int] | None:
+    """``(name, n_documents)`` the evidence collapsed onto, or ``None``.
+
+    ``n == 1`` names a document, ``n > 1`` names the single section its documents
+    share — the two shapes the caveat can talk about.
+
+    Two shapes count as concentrated, and the second is why the first is not
+    enough. Chunks of ``…/Fincert/A.md`` and ``…/Fincert/B.md`` are two paths and
+    used to pass as breadth, while 7.3% of the corpus sits in cross-file
+    near-duplicate clusters: two sibling pages of one section are no more of a
+    survey of the base than one page is.
+
+    The exception is the whole reason this function takes ``containers``. A
+    single document that is itself the index page of a section (it has
+    descendants in the listing) is the base's OWN enumeration: «какие сервисы
+    входят в продукт Fincert?» answered from ``Продукты/Fincert.md`` is
+    complete, and a caveat there is a false alarm. All six answerable
+    corpus-scope questions of the acceptance set have exactly that shape, and
+    they were the only population this hedge could reach.
+    """
+    paths = _paths(sources)
+    if not paths:
+        return None
+    if len(paths) == 1:
+        path = next(iter(paths))
+        if path in containers:
+            return None
+        return _label(sources, path), 1
+    directories = {path.rsplit("/", 1)[0] if "/" in path else "" for path in paths}
+    if len(directories) != 1:
+        return None
+    directory = next(iter(directories))
+    if not directory:
+        # Loose files in the vault root share no section — that is breadth.
+        return None
+    return directory.rsplit("/", 1)[-1], len(paths)
+
+
 def hedge(
     scope: str,
     sources: list[dict[str, Any]] | None,
     total_docs: int | None = None,
+    containers: frozenset[str] | None = None,
 ) -> str | None:
-    """The caveat to append to a corpus-wide answer built on one document.
+    """The caveat to append to a corpus-wide answer built on concentrated evidence.
 
     Returns ``None`` — no caveat — in every other case, and those cases are the
     point:
@@ -270,28 +415,38 @@ def hedge(
       поля витрины X») live here. Since :func:`parse_scope` maps a missing field
       to ``document``, a failed, disabled or skipped condense call cannot produce
       a caveat either;
-    * fragments from two or more documents: the answer already spans the base,
+    * evidence from two or more sections: the answer already spans the base,
       which is what a corpus-wide question needs;
+    * evidence concentrated on a section's own index page: that page IS the
+      enumeration the question asked for (see :func:`_concentration`);
     * no sources at all: there is no answer to qualify (the grader's refusal
-      path never reaches here).
+      path never reaches here);
+    * ``containers is None``: the shape of the base could not be established
+      this turn, so the container exception cannot be evaluated. Silence is the
+      fail-closed answer — the caveat's only reachable population without it is
+      the one where it is wrong.
 
-    The text names the document and the size of the base rather than hedging in
-    the abstract, because "this may be incomplete" on every answer trains the
-    reader to skip it. ``total_docs`` is omitted from the sentence when unknown
-    — an invented denominator would be worse than none.
+    The text names what the evidence collapsed onto and the size of the base
+    rather than hedging in the abstract, because "this may be incomplete" on
+    every answer trains the reader to skip it. ``total_docs`` is omitted from the
+    sentence when unknown — an invented denominator would be worse than none.
     """
     if scope != CORPUS_SCOPE or not sources:
         return None
     if isinstance(total_docs, int) and total_docs <= 1:
         return None
-    path = _one_document(list(sources))
-    if path is None:
+    if containers is None:
         return None
+    found = _concentration(list(sources), containers)
+    if found is None:
+        return None
+    name, count = found
 
     known_total = isinstance(total_docs, int) and total_docs > 1
     scale = f" из {total_docs} в базе" if known_total else ""
-    return (
-        f"{_HEDGE_HEAD}, а все найденные фрагменты — из одного документа "
-        f"«{_label(list(sources), path)}»{scale}. Ответ описывает только его и "
-        "не является перечнем по всей базе; в других разделах может быть больше."
+    subject = (
+        f"из одного документа «{name}»{scale}"
+        if count == 1
+        else f"из одного раздела «{name}» — {count} {_plural_docs(count)}{scale}"
     )
+    return f"{_HEDGE_HEAD}, а все найденные фрагменты — {subject}. {_HEDGE_TAIL}"

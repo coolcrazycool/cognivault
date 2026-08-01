@@ -75,6 +75,18 @@ _MAX_OVERVIEW_CHARS = 2400
 # a Confluence sync needs 4.
 _MAX_DESCENT = 8
 
+# Share of a level's documents that the single sub-folder must hold for the level
+# to count as a corridor (see :func:`_fold`). It exists because a corridor level
+# is rarely *perfectly* empty: a Confluence sync writes the section's own page
+# next to the folder of its children, so ``…/OASIS External Home`` holds one
+# stray page and one folder of 126. Requiring the level to be literally empty
+# stopped the descent there and rendered the whole base as one line; requiring
+# nothing at all would let a vault of 50 loose notes plus one two-file folder
+# descend INTO the folder and hide 50 documents the fold is supposed to show.
+# 0.9 is a guard, not a tuned number — the strays a real corridor leaves behind
+# are the container pages of the corridor itself, one per level.
+_CORRIDOR_MIN_SHARE = 0.9
+
 # Listing cache. A vault listing changes on the indexer's timescale, not the
 # turn's; the failure TTL is shorter so a brief outage self-heals quickly.
 _CACHE_TTL_SECONDS = 300.0
@@ -204,6 +216,16 @@ def _group(docs: list[list[str]], depth: int) -> list[_Section]:
     return sections
 
 
+def _named(sections: list[_Section]) -> list[_Section]:
+    """The sections that are real folders.
+
+    :data:`_ROOT_LABEL` is not a branch of the tree — it is the bucket for files
+    that happen to lie at this level. Counting it as a section is what made the
+    descent in :func:`_fold` stop one level too early on every Confluence vault.
+    """
+    return [s for s in sections if s.label != _ROOT_LABEL]
+
+
 def _fold(docs: list[list[str]]) -> tuple[list[_Section], str]:
     """Fold the corpus into top sections, descending while the level is a corridor.
 
@@ -219,24 +241,33 @@ def _fold(docs: list[list[str]]) -> tuple[list[_Section], str]:
     ``- Confluence — 127 (OASISEXT: 127)`` and nothing else, i.e. paying for a
     block that says nothing about the shape of the base.
 
-    Descending is safe at every step precisely because the level has exactly one
-    folder and every document is under it — no document is dropped. It stops as
-    soon as the level branches, and it never descends INTO the files themselves:
-    a level whose only entry is :data:`_ROOT_LABEL` is worse than the folder
-    above it, so the previous level is kept.
+    A corridor is a level with exactly one FOLDER (:func:`_named`), not a level
+    with exactly one entry. The difference is the whole point: a Confluence sync
+    writes a section's own page beside the folder of its children, so
+    ``…/OASIS External Home`` holds one stray ``.md`` and one folder of 126
+    documents. Read as "two sections" that level was not a corridor, the descent
+    stopped, and the entire 127-document base rendered as ``- Разработка … —
+    126`` plus ``- (корень) — 1``: three names out of a 2 400-character budget.
+
+    Descending past strays is bounded by :data:`_CORRIDOR_MIN_SHARE`: the single
+    folder must hold nearly the whole level, so the documents left behind are the
+    container pages a corridor legitimately leaves and never a real branch. It
+    still stops as soon as the level branches, and it never descends INTO the
+    files themselves: a level whose only entry is :data:`_ROOT_LABEL` is worse
+    than the folder above it, so the previous level is kept.
     """
     sections = _group(docs, 0)
     prefix: list[str] = []
     depth = 0
-    while (
-        len(sections) == 1
-        and sections[0].label != _ROOT_LABEL
-        and depth < _MAX_DESCENT
-    ):
+    while depth < _MAX_DESCENT:
+        named = _named(sections)
+        level = sum(s.count for s in sections)
+        if len(named) != 1 or named[0].count < level * _CORRIDOR_MIN_SHARE:
+            break
         deeper = _group(docs, depth + 1)
         if not deeper or (len(deeper) == 1 and deeper[0].label == _ROOT_LABEL):
             break
-        prefix.append(sections[0].label)
+        prefix.append(named[0].label)
         sections = deeper
         depth += 1
     return sections, "/".join(prefix)
@@ -530,6 +561,58 @@ async def overview_block(cv: dict[str, Any] | None = None) -> str | None:
     try:
         return render_overview(listing[0], extensions=listing[1])
     except Exception:  # noqa: BLE001 — pure code, but the turn is worth more
+        return None
+
+
+def containers(paths: list[Any], extensions: frozenset[str]) -> frozenset[str]:
+    """Documents that are also the index page of a section.
+
+    A Confluence sync writes a page with children as ``…/X.md`` beside a folder
+    ``…/X/`` holding them (``build_vault_path`` in ``app.confluence.convert``),
+    so "this document has descendants" is decidable from the listing alone — no
+    extra request, no guess about what a title means.
+
+    The distinction is what keeps the evidence hedge (:func:`app.corpus_scope.
+    hedge`) off the one population it could reach: a question the classifier
+    called corpus-wide, answered completely by ONE page, is almost always a
+    question about a section answered by that section's own index — «какие
+    сервисы входят в продукт Fincert?» → ``Продукты/Fincert.md``. All six such
+    questions in the acceptance set land on a page with descendants.
+
+    Pure and total: an unusable listing yields an empty set, which is a real
+    answer («no page here indexes anything») and not the same as "unknown" — the
+    caller distinguishes those by getting ``None`` from
+    :func:`container_paths`.
+    """
+    docs = _documents(paths, extensions)
+    known = {"/".join(segments) for segments in docs}
+    prefixes = {
+        "/".join(segments[:i]) + "/"
+        for segments in docs
+        for i in range(1, len(segments))
+    }
+    out = set()
+    for path in known:
+        stem = path.rsplit(".", 1)[0] if "." in path.rsplit("/", 1)[-1] else path
+        if f"{stem}/" in prefixes:
+            out.add(path)
+    return frozenset(out)
+
+
+async def container_paths(cv: dict[str, Any] | None = None) -> frozenset[str] | None:
+    """Section-index documents of this vault, or ``None`` when unknown.
+
+    Reads the SAME cached listing and catalogue as :func:`corpus_block`, so it
+    costs no extra request. ``None`` means the shape of the base could not be
+    established this turn — see :func:`containers` for why that is not the same
+    as an empty set.
+    """
+    listing = await _listing(cv)
+    if listing is None:
+        return None
+    try:
+        return containers(listing[0], listing[1])
+    except Exception:  # noqa: BLE001 — the turn is worth more than the set
         return None
 
 

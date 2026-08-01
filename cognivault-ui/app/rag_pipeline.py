@@ -393,8 +393,8 @@ class Condensed(NamedTuple):
     A named tuple rather than a bare pair: ``scope`` was added later and a
     positional third element would have been invisible at every call site.
     ``scope`` is :data:`app.corpus_scope.DEFAULT_SCOPE` whenever the model did
-    not say (old prompt, trimmed prompt, failed call), which is the behaviour
-    that predates the field.
+    not say (a reply missing the key, a failed call, condense skipped
+    altogether), which is the behaviour that predates the field.
     """
 
     intent: str
@@ -412,9 +412,10 @@ def _parse_condense(data: dict[str, Any], question: str) -> Condensed:
 
     ``scope`` is parsed independently of ``intent``: a turn whose intent had to
     be corrected is still allowed to carry a usable scope, and a missing scope
-    never invalidates an otherwise good verdict (the condense prompt is
-    user-editable — a user who trimmed the scope sentence out of it must keep
-    the routing they had).
+    never invalidates an otherwise good verdict. The tolerance is for the MODEL,
+    not for a user — the condense prompt is read-only
+    (``config_routes._readonly_prompts``) — and a reply that drops one key of the
+    JSON object must not cost the turn its routing.
     """
     scope = corpus_scope.parse_scope(data.get("scope"))
     intent = str(data.get("intent", "") or "").strip().strip('"').lower()

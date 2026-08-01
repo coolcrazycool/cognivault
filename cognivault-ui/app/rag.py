@@ -111,6 +111,69 @@ META_SYSTEM_PROMPT = """Ты — ассистент по базе знаний �
   выполнен поиск по документам.
 - Отвечай на русском языке, кратко и по делу."""
 
+# System turn for the OTHER meta family: a question about the assistant itself —
+# «кто ты?», «что ты умеешь?», «всегда ли ответ в Markdown с заголовками?».
+#
+# `META_SYSTEM_PROMPT` cannot answer these: it orders the model to rely ONLY on
+# the section tree, and the tree says nothing about the assistant's own output.
+# That is why `x23-meta` of the acceptance set — reclassified by the customer
+# from "trap" to "must be answered" — still ended in the grader's refusal: a
+# question about how the service behaves has no answering document in any vault
+# and never will.
+#
+# The material under this prompt is `_operating_rules()` — the configuration in
+# force, not a story about it — plus the section tree when it is available. The
+# ban on inventing corpus facts is unchanged and repeated here: the assistant may
+# describe ITSELF freely because it is looking at its own rules, and may say
+# about the base only what the structure block shows.
+META_SELF_SYSTEM_PROMPT = """Ты — ассистент по базе знаний пользователя. Этот вопрос — о тебе самом: кто ты,
+что умеешь и как работаешь. Поиск по документам для него не выполнялся.
+
+- Ниже даны ТВОИ рабочие правила и — если она доступна — структура базы знаний.
+  Отвечай только по ним.
+- О себе отвечай по блоку «Как ты работаешь»: это описание твоей действующей
+  конфигурации. Не приписывай себе возможностей, которых в нём нет, и не
+  отказывайся отвечать на вопрос о себе — материал для ответа перед тобой.
+- О содержимом базы говори только то, что видно в структуре: названия разделов
+  и число документов. Не придумывай разделов, продуктов и документов, которых в
+  ней нет, и не суди по названию страницы о том, что написано внутри.
+- Не ставь [Источник N]: в этом ходе источников нет.
+- В конце предложи задать конкретный вопрос по базе — тогда будет выполнен
+  поиск по документам.
+- Отвечай на русском языке, кратко и по делу."""
+
+# The code-owned half of `_operating_rules()`: what is true of every turn of this
+# service regardless of any stored prompt. Every claim here is a property of the
+# code — the pipeline is `_build_auto`, the refusal text is `_NO_ANSWER`, and the
+# markdown subset is exactly what `static/app.js:renderMarkdown` parses. A claim
+# that depends on the user's prompt does NOT belong here; it comes from the
+# effective prompt text instead (see `_operating_rules`).
+_PIPELINE_RULES = """Порядок работы над обычным вопросом:
+- по вопросу выполняется гибридный поиск (смысловой + лексический) по
+  проиндексированной базе знаний;
+- найденные фрагменты оценивает отдельная проверка релевантности, нерелевантные
+  отбрасываются;
+- если релевантных фрагментов не осталось, ответ ровно один: «В доступных мне
+  документах ответа на этот вопрос не нашлось»;
+- ответ отдаётся в интерфейс потоком, по мере генерации.
+Разметка ответа: интерфейс показывает ответ как Markdown и разбирает заголовки
+(«###»), маркированные и нумерованные списки, **жирный**, `код`, блоки кода и
+ссылки вида [текст](адрес); Markdown-таблицы интерфейс НЕ разбирает. Разметка не
+обязательна: короткий ответ остаётся обычным абзацем, заголовки появляются
+только там, где ответ длинный и делится на части.
+Этот ход — исключение из порядка выше: поиск по документам для него не
+выполнялся."""
+
+_OPERATING_RULES_CAPTION = (
+    "Как ты работаешь — твоя действующая конфигурация. Это НЕ документ из базы "
+    "знаний и не её содержимое: ссылаться на этот блок как [Источник N] нельзя."
+)
+
+_ANSWER_RULES_CAPTION = (
+    "Правила, по которым ты отвечаешь на вопросы по базе знаний (действующий "
+    "текст, включая изменения, сохранённые пользователем):"
+)
+
 # Backwards-compatible aliases (the private names predate the config API).
 _SYSTEM_PROMPT = SYSTEM_PROMPT
 _CONTEXT_REMINDER = CONTEXT_REMINDER
@@ -529,45 +592,108 @@ async def _head_block(
     return await corpus_map.corpus_block(cv, n_sources)
 
 
+def _operating_rules(prompts: dict[str, Any] | None) -> str:
+    """The assistant's own rules, as material a meta turn can answer FROM.
+
+    Two halves, and the split is the point. :data:`_PIPELINE_RULES` is
+    code-owned: retrieval, the relevance check, the one refusal sentence and the
+    markdown subset the UI actually parses are properties of this repository and
+    are true whatever anyone stored in their config. The other half is the
+    EFFECTIVE answering prompt — quoted, not applied — because "how do you
+    answer" has a different true answer for a user who rewrote it, and a frozen
+    code copy of the shipped text would describe a service they are not running.
+
+    Quoting is not applying: the prompt travels inside the user message as
+    labelled material, while the system turn stays
+    :data:`META_SELF_SYSTEM_PROMPT`. A stored ruleset that orders the model to
+    answer only from «Источники» therefore cannot turn this turn into a refusal
+    — which is exactly why the meta branch stopped applying it in the first
+    place.
+    """
+    return "\n".join(
+        (
+            _OPERATING_RULES_CAPTION,
+            _ANSWER_RULES_CAPTION,
+            _resolve_prompt(prompts, "system", SYSTEM_PROMPT),
+            _PIPELINE_RULES,
+        )
+    )
+
+
+async def _structure_block(
+    rcfg: dict[str, Any], cv: dict[str, Any] | None
+) -> str | None:
+    """The richest structure available for a meta turn, or ``None``.
+
+    The catalogue tree when ``rag.corpus_tree_enabled`` is on and the catalogue
+    answers; the folded listing otherwise; ``None`` when neither is reachable.
+    """
+    if corpus_tree.enabled(rcfg):
+        tree = await corpus_tree.overview_block(cv)
+        if tree:
+            return tree
+    return await corpus_map.overview_block(cv)
+
+
 async def _build_meta(
-    query: str, kind: str, rcfg: dict[str, Any], cv: dict[str, Any] | None
+    query: str,
+    kind: str,
+    rcfg: dict[str, Any],
+    cv: dict[str, Any] | None,
+    prompts: dict[str, Any] | None = None,
 ) -> RagContext | None:
     """Context for a recognised meta question, or ``None`` to fall through.
 
-    ``None`` is the fail-closed outcome and it is not an edge case: without a
-    vault listing there is no structure to answer from, and answering anyway
-    would mean generating the shape of the base from the model's imagination.
-    The caller then routes the turn exactly as it did before — retrieval, grader,
-    and the grader's refusal if the base really has nothing.
+    No model call, no retrieval, no sources: the message is the material plus
+    the question. The user's ``prompts.system`` is not applied as the system turn
+    on purpose — it is the ruleset for answering from «Источники», and this turn
+    has none; applying it would order the model to refuse.
 
-    No model call, no retrieval, no sources: the message is the rendered tree
-    plus the question. The user's ``prompts.system`` is *not* applied here on
-    purpose — it is the ruleset for answering from «Источники», and this turn has
-    none; applying it would order the model to refuse.
+    The two families differ in material, which is what makes the distinction
+    load-bearing rather than a word in a log line:
 
-    The material is the richest structure available: the catalogue tree when
-    ``rag.corpus_tree_enabled`` is on and the catalogue answers, the folded
-    listing otherwise. The fallback matters more here than next to the sources —
-    with no «Источники» block, an unavailable tree would leave the turn with
-    nothing at all, and ``None`` (route it normally) is the only honest outcome.
+    * ``corpus`` («о чём эта база?») is answered from the STRUCTURE alone. With
+      no structure there is nothing grounded to say, so this family fails closed
+      — ``None``, and the caller routes the turn exactly as it did before:
+      retrieval, grader, and the grader's refusal if the base really has
+      nothing. Generating the shape of a base from the model's imagination is
+      the one outcome worse than a refusal.
+    * ``assistant`` («кто ты?», «всегда ли ответ в Markdown?») is answered from
+      the assistant's OWN rules (:func:`_operating_rules`), with the structure
+      appended when it is available. This family never falls through: the
+      material is code-owned and cannot go missing, and falling through would
+      send a question about the service into a retrieval that has no answering
+      document anywhere — i.e. straight back into the refusal this branch
+      exists to remove.
     """
-    overview: str | None = None
-    if corpus_tree.enabled(rcfg):
-        overview = await corpus_tree.overview_block(cv)
-    if not overview:
-        overview = await corpus_map.overview_block(cv)
-    if not overview:
-        log.info(
-            "meta-вопрос (%s) распознан, но структура базы недоступна — "
-            "ход идёт обычным путём",
-            kind,
-        )
-        return None
+    structure = await _structure_block(rcfg, cv)
+    if kind == corpus_scope.META_CORPUS:
+        if not structure:
+            log.info(
+                "meta-вопрос (%s) распознан, но структура базы недоступна — "
+                "ход идёт обычным путём",
+                kind,
+            )
+            return None
+        blocks = [structure]
+        system = META_SYSTEM_PROMPT
+    else:
+        blocks = [_operating_rules(prompts)]
+        if structure:
+            blocks.append(structure)
+        else:
+            log.info(
+                "meta-вопрос (%s): структура базы недоступна, отвечаем только "
+                "по собственным правилам",
+                kind,
+            )
+        system = META_SELF_SYSTEM_PROMPT
+    body = "\n\n".join(blocks)
     return RagContext(
-        system_message=_system_message(META_SYSTEM_PROMPT),
+        system_message=_system_message(system),
         user_message={
             "role": "user",
-            "content": f"{overview}\n\nВопрос: {query}",
+            "content": f"{body}\n\nВопрос: {query}",
         },
         intent=_META_INTENT,
         standalone_question=query,
@@ -606,7 +732,7 @@ async def _build_auto(
     # answer is built from the real tree rather than generated freely.
     meta_kind = corpus_scope.match_meta(query)
     if meta_kind:
-        meta = await _build_meta(query, meta_kind, rcfg, cv)
+        meta = await _build_meta(query, meta_kind, rcfg, cv, prompts)
         if meta is not None:
             return meta
 
@@ -838,10 +964,17 @@ async def _build_auto(
     # Evidence-concentration caveat. Pure Python, zero tokens, and — because
     # `scope` is `document` unless the model explicitly said otherwise — it
     # cannot fire on a question about one document, which is what the whole
-    # control group of 56 enumerations is. `document_count` reads the listing
-    # cache the footprint just filled, so it costs no request.
+    # control group of 56 enumerations is. Both lookups read the listing cache
+    # the head block just filled, so they cost no request: the count is the
+    # denominator of the caveat, the container set is what keeps it off the
+    # section-index pages that answer a corpus-scoped question completely.
     hedge_text = (
-        corpus_scope.hedge(scope, sources, await corpus_map.document_count(cv))
+        corpus_scope.hedge(
+            scope,
+            sources,
+            await corpus_map.document_count(cv),
+            await corpus_map.container_paths(cv),
+        )
         if scope == corpus_scope.CORPUS_SCOPE
         else None
     )

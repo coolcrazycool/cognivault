@@ -165,6 +165,8 @@
     roPrompts: $("ro-prompts"),
     roPromptCondense: $("ro-prompt-condense"),
     roPromptGrader: $("ro-prompt-grader"),
+    roPromptMeta: $("ro-prompt-meta"),
+    roPromptMetaSelf: $("ro-prompt-meta-self"),
     // login modal (server mode)
     loginScrim: $("login-scrim"),
     loginToken: $("login-token"),
@@ -911,14 +913,18 @@
       node.value = typeof prompts[f.key] === "string" ? prompts[f.key] : "";
       refreshPromptDirty(f);
     });
-    // Service prompts carry a strict JSON contract → shown read-only, and only
-    // when the server actually exposes them.
+    // Service prompts are read-only — condense/grader because their replies are
+    // parsed as JSON, meta/meta_self because they are what keeps an ungrounded
+    // answer from being generated. Shown only when the server exposes them: an
+    // older backend sends condense/grader alone.
     const ro = state.config?.readonly?.prompts;
-    const hasRo = !!(ro && (ro.condense || ro.grader));
+    const hasRo = !!(ro && (ro.condense || ro.grader || ro.meta || ro.meta_self));
     if (dom.roPrompts) dom.roPrompts.hidden = !hasRo;
     if (!hasRo) return;
     if (dom.roPromptCondense) dom.roPromptCondense.value = ro.condense || "";
     if (dom.roPromptGrader) dom.roPromptGrader.value = ro.grader || "";
+    if (dom.roPromptMeta) dom.roPromptMeta.value = ro.meta || "";
+    if (dom.roPromptMetaSelf) dom.roPromptMetaSelf.value = ro.meta_self || "";
   }
 
   function bindTuningForm() {
