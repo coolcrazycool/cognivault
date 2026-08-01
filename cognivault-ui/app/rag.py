@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import cognivault, rag_pipeline
+from .tokens import CHARS_PER_TOKEN, estimate_messages_tokens
 
 # Order in which grouped ``/context`` buckets are flattened.
 _CONTEXT_GROUP_ORDER = (
@@ -60,6 +61,23 @@ SYSTEM_PROMPT = """Ты — ассистент по базе знаний пол
 CONTEXT_REMINDER = """Напоминание: отвечай только по источникам выше, ставь [Источник N] после каждого
 утверждения; если ответа в источниках нет — скажи об этом."""
 
+# System turn for the branches that deliberately skip retrieval
+# (`_NO_RAG_INTENTS`). Without it the chat route would send the model a *bare*
+# history: a real knowledge-base question misrouted to `smalltalk` would then be
+# answered from the model's parametric memory — indistinguishable from a normal
+# answer and without a single source. Short on purpose: these turns are
+# greetings and "say that again", not retrieval.
+NO_RAG_SYSTEM_PROMPT = """Ты — ассистент по базе знаний пользователя. Для этой реплики поиск по базе НЕ
+выполнялся, источников нет.
+
+- Отвечай только по истории диалога выше: приветствие, благодарность, просьба
+  переформулировать или повторить уже сказанное.
+- Не сообщай фактических утверждений из собственных знаний — ничего, чего нет в
+  истории диалога.
+- Если для ответа нужен поиск по базе знаний — прямо скажи об этом и попроси
+  задать вопрос отдельной репликой.
+- Отвечай на русском языке, кратко и по делу."""
+
 # Backwards-compatible aliases (the private names predate the config API).
 _SYSTEM_PROMPT = SYSTEM_PROMPT
 _CONTEXT_REMINDER = CONTEXT_REMINDER
@@ -91,12 +109,17 @@ _NO_RAG_INTENTS = ("smalltalk", "clarify")
 # tail is mostly noise that dilutes attention and invites wrong citations.
 _MAX_CONTEXT_BLOCKS = 5
 
-# Token reserves (see `_compute_budget`).
+# Token reserves (see `_compute_budget`). The history reserve is only the
+# fallback used when the caller passed no history — otherwise it is measured.
 _HISTORY_RESERVE_TOKENS = 2000
 _SYSTEM_RESERVE_TOKENS = 500
-# Rough chars-per-token for Russian, with headroom.
-_CHARS_PER_TOKEN = 2.0
+# Chars-per-token comes from `app.tokens` — one constant for the whole project.
+_CHARS_PER_TOKEN = CHARS_PER_TOKEN
 _BUDGET_HEADROOM = 0.85
+
+# Marker inserted between two chunks of one file that are NOT adjacent in the
+# source document, so the model cannot read the join as continuous prose.
+_CHUNK_GAP_MARKER = "[…]"
 
 
 # --------------------------------------------------------------------------- #
@@ -113,9 +136,12 @@ class RagContext:
     keyword-defaulted for the same reason.
 
     * ``system_message`` — rules-only system turn (``None`` when RAG produced
-      nothing usable);
+      nothing usable). Also set — with :data:`NO_RAG_SYSTEM_PROMPT` and *without*
+      a ``user_message`` — on the deliberate no-retrieval intents, so a
+      misrouted turn still cannot be answered from the model's own knowledge;
     * ``user_message`` — the final user turn: «Источники» → напоминание →
-      вопрос. Always set together with ``system_message``;
+      вопрос. Set only when there is a sources block; a ``user_message`` always
+      implies a ``system_message``, but not the other way round;
     * ``sources`` — UI/citation metadata, ``n`` matching the block numbers,
       ``grade`` carrying the grader's 1..5 score (``None`` when not graded);
     * ``notice`` — user-visible reason RAG was skipped (retrieval failure);
@@ -237,16 +263,41 @@ def _group_by_path(
     return groups, order
 
 
-def _compute_budget(rcfg: dict[str, Any], gcfg: dict[str, Any]) -> int:
+def _history_reserve_tokens(
+    messages: list[dict[str, Any]] | None, model_ctx: int
+) -> int:
+    """Tokens to hold back for the dialogue history.
+
+    Measured from the actual outgoing history when the caller passed one — the
+    estimator already exists, so a flat 2000 was either wasteful (first turn) or
+    wishful (long thread). ``None`` (no history supplied) keeps the old flat
+    reserve. Capped at half the window: the chat route trims the history to fit
+    anyway, so reserving more than that would only starve the context block.
+    """
+    if messages is None:
+        measured = _HISTORY_RESERVE_TOKENS
+    else:
+        measured = estimate_messages_tokens(messages)
+    return max(0, min(measured, model_ctx // 2))
+
+
+def _compute_budget(
+    rcfg: dict[str, Any],
+    gcfg: dict[str, Any],
+    messages: list[dict[str, Any]] | None = None,
+) -> int:
     """Context char budget with Russian headroom.
 
     ``min(max_context_chars, (model_ctx - max_tokens - history - system) *
-    chars_per_token * headroom)``.
+    chars_per_token * headroom)``, where ``chars_per_token`` is the project-wide
+    :data:`app.tokens.CHARS_PER_TOKEN` and ``history`` is measured from
+    ``messages`` (see :func:`_history_reserve_tokens`).
     """
     max_context_chars = int(rcfg.get("max_context_chars", 24000))
     model_ctx = int(gcfg.get("model_context_tokens", 32768))
     max_tokens = int(gcfg.get("max_tokens", 4096))
-    avail = model_ctx - max_tokens - _HISTORY_RESERVE_TOKENS - _SYSTEM_RESERVE_TOKENS
+    history = _history_reserve_tokens(messages, model_ctx)
+    avail = model_ctx - max_tokens - history - _SYSTEM_RESERVE_TOKENS
     computed = avail * _CHARS_PER_TOKEN * _BUDGET_HEADROOM
     return max(0, int(min(max_context_chars, computed)))
 
@@ -275,15 +326,33 @@ def _best_grade(frags: list[dict[str, Any]]) -> int | None:
 
 
 def _merge_chunk_text(frags: list[dict[str, Any]]) -> str:
-    """Join the distinct chunk texts of one file into a single block."""
+    """Join the distinct chunk texts of one file into a single block.
+
+    Chunks of one file are rendered as ONE numbered source, so a bare ``\\n\\n``
+    join lets the model read two fragments from opposite ends of the document as
+    continuous prose (and cite them as one statement). Non-adjacent chunks are
+    therefore separated by :data:`_CHUNK_GAP_MARKER`; only chunks whose
+    ``chunk_index`` values are consecutive are joined silently. A missing
+    ``chunk_index`` counts as "adjacency unknown" → marker.
+    """
     seen: set[str] = set()
-    parts: list[str] = []
+    parts: list[tuple[int | None, str]] = []
     for f in frags:
         t = (f.get("text") or "").strip()
-        if t and t not in seen:
-            seen.add(t)
-            parts.append(t)
-    return "\n\n".join(parts)
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        idx = f.get("chunk_index")
+        parts.append((idx if isinstance(idx, int) else None, t))
+
+    out: list[str] = []
+    prev: int | None = None
+    for i, (idx, text) in enumerate(parts):
+        if i and not (prev is not None and idx is not None and idx == prev + 1):
+            out.append(_CHUNK_GAP_MARKER)
+        out.append(text)
+        prev = idx
+    return "\n\n".join(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -374,14 +443,21 @@ async def _build_auto(
     section_max_chars = int(rcfg.get("section_max_chars", 4000))
     max_expanded_files = int(rcfg.get("max_expanded_files", 2))
     limit = int(rcfg.get("rerank_candidates", _RERANK_CANDIDATES))
-    budget = _compute_budget(rcfg, gcfg)
+    budget = _compute_budget(rcfg, gcfg, messages)
 
     # 0. Hidden call 1: route the turn and rewrite it into a standalone query.
     intent, rq = await rag_pipeline.condense(query, messages, rcfg, gcfg)
     if intent in _NO_RAG_INTENTS:
-        # Chit-chat / "say that again": no retrieval, the model answers from
-        # the untouched history.
-        return RagContext(intent=intent, standalone_question=rq)
+        # Chit-chat / "say that again": no retrieval, the model answers from the
+        # untouched history — but NOT without rules. A misrouted knowledge-base
+        # question would otherwise be answered from parametric memory, so these
+        # branches still carry a system turn that forbids exactly that.
+        # `user_message` stays `None`: there is no «Источники» block to build.
+        return RagContext(
+            system_message=_system_message(NO_RAG_SYSTEM_PROMPT),
+            intent=intent,
+            standalone_question=rq,
+        )
 
     # 1. Retrieve with hybrid search, graceful fallback to semantic.
     #
@@ -696,12 +772,15 @@ async def build_rag_context(
 ) -> RagContext:
     """Assemble the RAG messages + sources for ``query``.
 
-    Returns a :class:`RagContext`. ``system_message`` and ``user_message`` are
-    either both set (RAG applies) or both ``None``; in the latter case
-    ``notice`` explains a retrieval failure, ``intent`` explains a deliberate
-    skip (``smalltalk``/``clarify``), ``answer_override`` carries the canned
-    refusal when the grader rejected every candidate, and all three being
-    ``None`` means retrieval simply found nothing. In ``mode == "auto"`` (the
+    Returns a :class:`RagContext`. A ``user_message`` always comes with a
+    ``system_message`` (RAG applies); the deliberate no-retrieval intents
+    (``smalltalk``/``clarify``) return a ``system_message`` alone — the
+    no-sources ruleset — and everything else returns neither. In that last case
+    ``notice`` explains a retrieval failure, ``answer_override`` carries the
+    canned refusal when the grader graded every candidate and rejected them all
+    (the rank insurance does not override a total refusal — an invented answer
+    costs more than an honest "not found"), and both being ``None`` means
+    retrieval simply found nothing. In ``mode == "auto"`` (the
     default) this runs condense → retrieve → grade → select → smart expansion
     using its own internals regardless of any stale stored ``source``/``limit``.
 

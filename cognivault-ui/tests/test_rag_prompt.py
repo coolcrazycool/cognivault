@@ -270,6 +270,64 @@ def test_semantic_fallback_without_new_fields_still_builds(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Склейка чанков одного файла: маркер пропуска
+# --------------------------------------------------------------------------- #
+
+
+def _chunk(index: int | None, text: str) -> dict:
+    return {"text": text, "chunk_index": index}
+
+
+def test_adjacent_chunks_are_joined_without_a_marker():
+    merged = rag._merge_chunk_text(
+        [_chunk(3, "первая часть"), _chunk(4, "вторая часть")]
+    )
+    assert merged == "первая часть\n\nвторая часть"
+    assert rag._CHUNK_GAP_MARKER not in merged
+
+
+def test_non_adjacent_chunks_get_a_gap_marker():
+    merged = rag._merge_chunk_text(
+        [_chunk(1, "начало документа"), _chunk(9, "конец документа")]
+    )
+    assert merged == f"начало документа\n\n{rag._CHUNK_GAP_MARKER}\n\nконец документа"
+
+
+def test_gap_marker_only_between_non_adjacent_chunks():
+    """Смешанный случай: маркер ровно один — на разрыве."""
+    merged = rag._merge_chunk_text(
+        [_chunk(1, "раз"), _chunk(2, "два"), _chunk(7, "семь")]
+    )
+    assert merged.count(rag._CHUNK_GAP_MARKER) == 1
+    assert merged == f"раз\n\nдва\n\n{rag._CHUNK_GAP_MARKER}\n\nсемь"
+
+
+def test_missing_chunk_index_counts_as_a_gap():
+    """Без `chunk_index` смежность неизвестна — честнее показать разрыв."""
+    merged = rag._merge_chunk_text([_chunk(None, "раз"), _chunk(None, "два")])
+    assert rag._CHUNK_GAP_MARKER in merged
+
+
+def test_single_chunk_has_no_marker():
+    assert rag._merge_chunk_text([_chunk(1, "один")]) == "один"
+    assert rag._merge_chunk_text([]) == ""
+
+
+def test_gap_marker_reaches_the_context_block(monkeypatch):
+    """Маркер доезжает до промпта, а не теряется при рендере блока."""
+    hits = [
+        {**_hit(1, text="первый кусок файла"), "chunk_index": 1},
+        {**_hit(1, text="далёкий кусок того же файла"), "chunk_index": 8},
+    ]
+    _install_retrieval(monkeypatch, hits)
+    ctx = _build("что написано в документе про кластер", hits)
+
+    content = ctx.user_message["content"]
+    assert content.count("### Источник ") == 1, "чанки одного файла — один источник"
+    assert rag._CHUNK_GAP_MARKER in content
+
+
+# --------------------------------------------------------------------------- #
 # system: только правила
 # --------------------------------------------------------------------------- #
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any
 
 from . import gigachat
@@ -37,13 +38,30 @@ _GRADE_TIMEOUT = 20.0
 # Dialogue turns fed to the condenser (after history trimming upstream).
 _HISTORY_TURNS = 6
 
-# Prefix of a chunk shown to the grader. Enough to judge relevance, cheap
-# enough to grade 20-40 candidates in one prompt.
+# How much of a chunk the grader sees. Enough to judge relevance, cheap enough
+# to grade 20-40 candidates in one prompt. Split head + tail (see `_preview`):
+# a pure prefix of a long or tabular fragment shows the model the opening rows
+# and nothing else, which systematically under-scores exactly those.
 _CHUNK_PREVIEW_CHARS = 600
+_PREVIEW_HEAD_CHARS = 400
+_PREVIEW_GAP = " […] "
+
+# The indexer prepends a one-paragraph document annotation to EVERY chunk of a
+# document (`src/plugins/pipeline.ts`), then the chunker prepends the section
+# breadcrumb. Both are identical across the chunks of one document, so leaving
+# them in the preview burns the budget on boilerplate and makes every preview of
+# a document look the same to the judge.
+_DOC_ANNOTATION_PREFIX = "Аннотация документа: "
 
 # Above this many candidates the grader is split into parallel batches.
 _BATCH_THRESHOLD = 15
 _BATCH_SIZE = 12
+
+# A reply the model called `smalltalk` is demoted to `kb_question` when it looks
+# like a real question: greetings and thanks are short and never interrogative,
+# so the false-positive cost (an answer from parametric memory, no sources) is
+# far higher than the false-negative one (one wasted retrieval).
+_SMALLTALK_MAX_WORDS = 6
 
 # Hard cap on fragments handed to context assembly (matches `rag._MAX_CONTEXT_BLOCKS`).
 _MAX_SELECTED = 5
@@ -70,6 +88,9 @@ _CONDENSE_TASKS = """
 - Если kb_question — переформулируй реплику в самодостаточный поисковый запрос:
   подставь вместо местоимений и отсылок конкретные названия из истории.
   НЕ отвечай на вопрос. Если реплика уже самодостаточна — верни её без изменений.
+- При любом сомнении выбирай "kb_question". "smalltalk" — только для чистых
+  приветствий, благодарностей и прощаний, где нет ни одного вопроса по существу;
+  если в реплике есть вопрос или просьба что-то объяснить — это "kb_question".
 
 Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null}"""
 
@@ -137,14 +158,56 @@ async def _call(
     )
 
 
-def _preview(fragment: dict[str, Any]) -> str:
-    """First ``_CHUNK_PREVIEW_CHARS`` chars of a chunk, on a single line.
+def _strip_indexer_prefix(text: str, section_path: str) -> str:
+    """Drop the document annotation and the section breadcrumb from a chunk.
 
-    Collapsing whitespace keeps the ``[N]`` markers unambiguous — a chunk that
-    happens to start a line with ``[3]`` cannot masquerade as another item.
+    Stored chunk text is ``Аннотация документа: …\\n\\n{breadcrumb}\\n\\n{body}``
+    (annotation only when the indexer's doc-summary is on). Neither part
+    distinguishes one chunk of a document from another, and together they can
+    eat most of the preview budget. Falls back to the original text if stripping
+    would leave nothing — an annotation-only chunk is still better than an empty
+    preview.
+    """
+    body = text
+    if body.startswith(_DOC_ANNOTATION_PREFIX):
+        _, sep, rest = body.partition("\n\n")
+        body = rest if sep else ""
+    crumb = (section_path or "").strip()
+    if crumb:
+        head = body.lstrip()
+        if head.startswith(crumb):
+            body = head[len(crumb) :]
+    return body.strip() or text.strip()
+
+
+def _head_tail(text: str, limit: int, head: int) -> str:
+    """``text`` clipped to ``limit`` chars as ``head`` + gap + tail.
+
+    A pure prefix hides how a fragment ends, which is where a table's last rows
+    and a section's conclusion live; the judge then scores long and tabular
+    chunks on their opening alone.
+    """
+    if len(text) <= limit:
+        return text
+    tail = limit - head - len(_PREVIEW_GAP)
+    if tail <= 0:
+        return text[:limit]
+    return text[:head] + _PREVIEW_GAP + text[-tail:]
+
+
+def _preview(fragment: dict[str, Any]) -> str:
+    """Up to ``_CHUNK_PREVIEW_CHARS`` chars of a chunk, on a single line.
+
+    The indexer's boilerplate is stripped first (:func:`_strip_indexer_prefix`),
+    then head and tail are kept (:func:`_head_tail`). Collapsing whitespace keeps
+    the ``[N]`` markers unambiguous — a chunk that happens to start a line with
+    ``[3]`` cannot masquerade as another item.
     """
     text = str(fragment.get("text", "") or "")
-    return " ".join(text.split())[:_CHUNK_PREVIEW_CHARS]
+    body = _strip_indexer_prefix(text, str(fragment.get("section_path", "") or ""))
+    return _head_tail(
+        " ".join(body.split()), _CHUNK_PREVIEW_CHARS, _PREVIEW_HEAD_CHARS
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -172,11 +235,29 @@ def _history_turns(
     return turns[-_HISTORY_TURNS:]
 
 
+def _too_substantive_for_smalltalk(question: str) -> bool:
+    """Cheap veto over the model's ``smalltalk`` verdict.
+
+    A question mark, or more than :data:`_SMALLTALK_MAX_WORDS` words, means the
+    turn carries content — greetings and thanks do neither. ``clarify`` is left
+    alone: "объясни попроще, я не понял этот кусок" is a legitimate long
+    clarification and still answers from the history.
+    """
+    text = question.strip()
+    return "?" in text or len(text.split()) > _SMALLTALK_MAX_WORDS
+
+
 def _parse_condense(data: dict[str, Any], question: str) -> tuple[str, str]:
     """Map the model's JSON onto ``(intent, standalone_question)``."""
     intent = str(data.get("intent", "") or "").strip().strip('"').lower()
     if intent not in _INTENTS:
         log.warning("condense: неизвестный intent %r — фолбэк на kb_question", intent)
+        return _DEFAULT_INTENT, question
+    if intent == "smalltalk" and _too_substantive_for_smalltalk(question):
+        log.warning(
+            "condense: smalltalk на содержательной реплике — переклассифицирую в %s",
+            _DEFAULT_INTENT,
+        )
         return _DEFAULT_INTENT, question
     raw = data.get("standalone_question")
     if intent == "kb_question" and isinstance(raw, str) and raw.strip():
@@ -285,7 +366,15 @@ async def grade(
     passes the candidates through untouched.
 
     Up to ``_BATCH_THRESHOLD`` candidates go in a single call; beyond that the
-    list is split into ``_BATCH_SIZE`` chunks graded concurrently.
+    list is split into batches of at most ``_BATCH_SIZE``, graded concurrently.
+
+    Batches are dealt **round-robin**, not sliced by rank. The judge calibrates
+    itself inside its own batch while the threshold downstream is fixed, so a
+    contiguous slice made batch #1 "the top 12" and batch #4 "ranks 37-40": the
+    best of a batch of bad candidates got an inflated score and vice versa.
+    Round-robin puts strong and weak candidates in every batch. Within a batch
+    the search order is preserved, and the ``id → candidate`` mapping is restored
+    positionally, so the prompt is unchanged in shape.
     """
     if not candidates:
         return []
@@ -295,16 +384,20 @@ async def grade(
     if len(candidates) <= _BATCH_THRESHOLD:
         return await _grade_batch(question, candidates, gcfg)
 
-    batches = [
-        candidates[i : i + _BATCH_SIZE]
-        for i in range(0, len(candidates), _BATCH_SIZE)
-    ]
+    n_batches = int(math.ceil(len(candidates) / _BATCH_SIZE))
+    batches: list[list[dict[str, Any]]] = [[] for _ in range(n_batches)]
+    origins: list[list[int]] = [[] for _ in range(n_batches)]
+    for i, candidate in enumerate(candidates):
+        batches[i % n_batches].append(candidate)
+        origins[i % n_batches].append(i)
+
     results = await asyncio.gather(
         *(_grade_batch(question, batch, gcfg) for batch in batches)
     )
-    out: list[int | None] = []
-    for part in results:
-        out.extend(part)
+    out: list[int | None] = [None] * len(candidates)
+    for indices, part in zip(origins, results):
+        for origin, score in zip(indices, part):
+            out[origin] = score
     return out
 
 
@@ -324,31 +417,46 @@ def select(
 ) -> tuple[list[dict[str, Any]], bool]:
     """Pick the fragments that actually reach the context.
 
-    Returns ``(selected, refused)``. ``refused`` is ``True`` only when the
-    grader ran and judged *everything* below the fallback bar — the caller then
-    answers with a canned "not in my documents" instead of feeding the model
-    noise.
+    Returns ``(selected, refused)``. ``refused`` is ``True`` when the grader
+    judged *every* candidate below the fallback bar — the caller then answers
+    with a canned "not in my documents". A hallucination costs more than an
+    honest "not found": on a topic that genuinely is not in the base, handing
+    the model the two top-ranked (i.e. knowingly irrelevant) hits would buy an
+    invented answer.
 
     Rule order (deliberate, see plan §2.2):
 
     1. keep everything at or above ``grader_threshold``;
     2. if that is empty, retry at grade ``3``;
-    3. if that is empty too — refusal;
-    4. always re-add the top ``grader_keep_top`` candidates *by search rank*,
-       even when the judge scored them low (insurance against an over-strict
-       judge throwing away the one relevant hit);
-    5. sort by grade desc, ties by search rank asc, cap at five.
+    3. if that is empty too — **refusal**. ``grader_keep_top`` does NOT apply
+       here: the insurance exists for an over-strict judge who still kept
+       *something*, not for one who rejected everything. Candidates the grader
+       never scored (a failed batch — grading is best-effort and batches fail
+       independently) are not "rejected": they join the pool **by search rank**,
+       so a refusal requires a grade on *every* candidate. Silently dropping a
+       dead batch is how three failed batches out of four used to refuse;
+    4. otherwise add the top ``grader_keep_top`` candidates *by search rank*,
+       even when the judge scored them low — insurance against an over-strict
+       judge throwing away the one relevant hit. Their slots are reserved
+       *before* the ``_MAX_SELECTED`` cap, so the insurance cannot be evicted by
+       the cap the way it used to be;
+    5. sort by grade desc (an ungraded candidate sorts as ``_FALLBACK_GRADE`` —
+       unknown, not bad), ties by search rank asc, cap at five.
 
-    When the grader was skipped (all grades ``None``) the candidates are
-    returned unchanged and ``refused`` is ``False``.
+    When the grader was skipped entirely (all grades ``None``) the candidates
+    are returned unchanged and ``refused`` is ``False``.
     """
     if not candidates:
         return [], False
-    if all(_grade_at(grades, i) is None for i in range(len(candidates))):
+
+    ungraded = [
+        i for i in range(len(candidates)) if _grade_at(grades, i) is None
+    ]
+    if len(ungraded) == len(candidates):
         return list(candidates), False
 
     threshold = int(rcfg.get("grader_threshold", 4))
-    keep_top = int(rcfg.get("grader_keep_top", 2))
+    keep_top = max(0, int(rcfg.get("grader_keep_top", 2)))
 
     def rank_of(i: int) -> int:
         r = candidates[i].get("rank")
@@ -361,15 +469,26 @@ def select(
             if (g := _grade_at(grades, i)) is not None and g >= bar
         ]
 
-    keep = above(threshold) or above(_FALLBACK_GRADE)
+    # Steps 1-3: the judge's verdict alone decides whether we answer at all.
+    keep = set(above(threshold) or above(_FALLBACK_GRADE)) | set(ungraded)
     if not keep:
         return [], True
 
-    keep_set = set(keep)
-    for i in sorted(range(len(candidates)), key=rank_of)[: max(0, keep_top)]:
-        keep_set.add(i)
+    # Step 4: only now does the rank insurance join in.
+    insured = set(sorted(range(len(candidates)), key=rank_of)[:keep_top])
+    pool = keep | insured
 
-    ordered = sorted(
-        keep_set, key=lambda i: (-(_grade_at(grades, i) or 0), rank_of(i))
-    )
+    def sort_key(i: int) -> tuple[int, int]:
+        g = _grade_at(grades, i)
+        return (-(g if g is not None else _FALLBACK_GRADE), rank_of(i))
+
+    ordered = sorted(pool, key=sort_key)
+    if len(ordered) > _MAX_SELECTED:
+        # The cap must not be what evicts the insurance: reserve its slots
+        # first, then fill the rest in grade order.
+        survivors = [i for i in ordered if i in insured][:_MAX_SELECTED]
+        room = _MAX_SELECTED - len(survivors)
+        survivors += [i for i in ordered if i not in insured][:room]
+        chosen = set(survivors)
+        ordered = [i for i in ordered if i in chosen]
     return [candidates[i] for i in ordered[:_MAX_SELECTED]], False

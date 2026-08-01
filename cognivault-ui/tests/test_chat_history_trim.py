@@ -28,7 +28,12 @@ from app.config import AppPaths  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.rag import RagContext  # noqa: E402
 from app.routes import chat_routes  # noqa: E402
-from app.tokens import estimate_messages_tokens, estimate_tokens, trim_history  # noqa: E402
+from app.tokens import (  # noqa: E402
+    CHARS_PER_TOKEN,
+    estimate_messages_tokens,
+    estimate_tokens,
+    trim_history,
+)
 
 
 def _paths(tmp_path) -> AppPaths:
@@ -76,15 +81,25 @@ def test_estimate_tokens_empty():
 
 def test_estimate_tokens_rounds_up():
     assert estimate_tokens("a") == 1
-    assert estimate_tokens("abc") == 1
-    assert estimate_tokens("abcd") == 2
-    assert estimate_tokens("я" * 300) == 100
+    assert estimate_tokens("аб") == 1  # 2 / 2.5 → вверх до 1
+    assert estimate_tokens("абв") == 2
+    assert estimate_tokens("я" * 300) == 120
+
+
+def test_chars_per_token_is_the_single_project_constant():
+    """Одна константа «символов на токен» на весь проект (баг: 3.0 и 2.0 рядом)."""
+    from app import rag, tokens
+
+    assert CHARS_PER_TOKEN == 2.5
+    assert tokens._CHARS_PER_TOKEN == CHARS_PER_TOKEN
+    # `rag._compute_budget` считает бюджет ею же, а не своей копией.
+    assert rag._CHARS_PER_TOKEN is CHARS_PER_TOKEN
 
 
 def test_estimate_messages_tokens_adds_per_message_overhead():
     msgs = [{"role": "user", "content": "abc"}, {"role": "assistant", "content": "abc"}]
-    # 1 токен на content + фиксированный оверхед на сообщение.
-    assert estimate_messages_tokens(msgs) == 2 * (1 + 4)
+    # 2 токена на content (3 символа / 2.5) + фиксированный оверхед на сообщение.
+    assert estimate_messages_tokens(msgs) == 2 * (2 + 4)
 
 
 def test_estimate_messages_tokens_tolerates_missing_content():
@@ -166,6 +181,44 @@ def test_fit_to_context_defaults_when_keys_missing():
     send = [{"role": "user", "content": "привет"}]
     out, dropped = chat_routes._fit_to_context(send, {})
     assert (out, dropped) == (send, 0)
+
+
+# --------------------------------------------------------------------------- #
+# Резерв истории в бюджете контекста считается по факту
+# --------------------------------------------------------------------------- #
+
+
+def test_history_reserve_is_measured_not_fixed():
+    """Длинная история резервирует больше токенов, чем короткая."""
+    from app import rag
+
+    short = [{"role": "user", "content": "привет"}]
+    long = [{"role": "user", "content": "я" * 200_000}]
+
+    assert rag._history_reserve_tokens(short, 32768) < rag._history_reserve_tokens(
+        long, 32768
+    )
+    assert rag._history_reserve_tokens(short, 32768) == estimate_messages_tokens(short)
+    # Пустая история резервирует ноль, а не фиксированные 2000.
+    assert rag._history_reserve_tokens([], 32768) == 0
+    # Без истории (None) — прежний фиксированный резерв.
+    assert rag._history_reserve_tokens(None, 32768) == rag._HISTORY_RESERVE_TOKENS
+    # Резерв не съедает больше половины окна: роут историю всё равно урежет.
+    assert rag._history_reserve_tokens(long, 32768) == 32768 // 2
+
+
+def test_compute_budget_shrinks_as_history_grows():
+    from app import rag
+
+    gcfg = {"model_context_tokens": 32768, "max_tokens": 4096}
+    # `max_context_chars` не должен упираться в потолок, иначе разницы не видно.
+    rcfg = {"max_context_chars": 10**9}
+
+    empty = rag._compute_budget(rcfg, gcfg, [])
+    heavy = rag._compute_budget(rcfg, gcfg, [{"role": "user", "content": "я" * 200_000}])
+
+    assert heavy < empty
+    assert rag._compute_budget(rcfg, gcfg) <= empty
 
 
 # --------------------------------------------------------------------------- #
