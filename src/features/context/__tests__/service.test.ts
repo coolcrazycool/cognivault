@@ -44,7 +44,7 @@ describe('ContextService.assemble()', () => {
 
     const pack = service.assemble(results, { tokenBudget: 100000, minScore: 0.5 });
 
-    // Only the high-score one passes floor (score 0.9 normalizes to 1.0, score 0.1 normalizes to ~0.111)
+    // Only the high-score one passes the cut-off (0.9 >= 0.5; 0.1 < 0.5) — scores used as given
     expect(pack.summary).toBeDefined();
     expect(pack.summary?.length).toBe(1);
     expect(pack.summary?.[0]?.source.path).toBe('a.md');
@@ -119,25 +119,54 @@ describe('ContextService.assemble()', () => {
     expect(pack.implementation?.length).toBe(1); // meeting-note -> implementation
   });
 
-  it('returns empty pack when min_score=1.0 (all excluded — no results normalize to >1.0)', () => {
-    // With min_score=1.0: only entries with normalized score = 1.0 pass the floor.
-    // Normalization: score / maxScore. The top result always normalizes to 1.0 and passes.
-    // To get an empty pack with min_score=1.0, use min_score > 1.0 or check behavior with equal scores.
-    // Plan behavior: min_score=1.0 means "at least 100% of top relevance" — only the max score(s) pass.
-    // Here we verify that chunks_excluded counts excluded chunks correctly with a strict floor.
-    //
-    // Use all equal scores (all normalize to 1.0, all included) to test chunks_excluded=0,
-    // then test with different min_score to show exclusion works.
+  it('can return an EMPTY pack when every score sits below minScore (no renormalisation rescue)', () => {
+    // The old double-normalisation made this impossible: 0.5/0.5 became 1.0 and always
+    // passed any floor. Now scores are used as given, so a uniformly poor result set with
+    // a strict cut-off honestly yields nothing.
     const results: SearchResult[] = [
       makeResult({ path: 'a.md', text: 'Alpha', score: 0.5 }),
       makeResult({ path: 'b.md', text: 'Beta', score: 0.5 }),
     ];
 
-    // Both normalize to 1.0 (0.5/0.5), so with min_score=1.0 both pass
     const pack = service.assemble(results, { tokenBudget: 100000, minScore: 1.0 });
 
-    expect(pack.meta.chunks_included).toBe(2);
-    expect(pack.meta.chunks_excluded).toBe(0);
+    expect(pack.meta.chunks_included).toBe(0);
+    expect(pack.meta.chunks_excluded).toBe(2);
+    expect(pack.meta.total_tokens).toBe(0);
+    expect(pack.summary).toBeUndefined();
+    expect(pack.implementation).toBeUndefined();
+  });
+
+  it('does not dress up a poor best hit as a perfect match', () => {
+    // Best hit 0.4 must be reported as 0.4 — the old code renormalised it to 1.0.
+    const results: SearchResult[] = [
+      makeResult({ path: 'a.md', text: 'Weak best', score: 0.4, type: 'implementation' }),
+      makeResult({ path: 'b.md', text: 'Weaker', score: 0.1, type: 'implementation' }),
+    ];
+
+    const pack = service.assemble(results, { tokenBudget: 100000, minScore: 0.3 });
+
+    expect(pack.implementation?.length).toBe(1);
+    expect(pack.implementation?.[0]?.source.score).toBe(0.4);
+    // 0.1 fails the cut-off on its own value (old behaviour kept it: 0.1/0.4 = 0.25 vs
+    // renormalised — here 0.1 < 0.3, excluded)
+    expect(pack.meta.chunks_excluded).toBe(1);
+  });
+
+  it('acts as a fraction-of-top trim on hybrid-shaped input (top hit exactly 1.0)', () => {
+    // SearchService.rescaleToTop guarantees hybrid batches arrive with the best hit at 1.0.
+    // minScore then reads directly as "fraction of the top hit".
+    const results: SearchResult[] = [
+      makeResult({ path: 'a.md', text: 'Top', score: 1.0, type: 'implementation' }),
+      makeResult({ path: 'b.md', text: 'Half', score: 0.5, type: 'implementation' }),
+      makeResult({ path: 'c.md', text: 'Tail', score: 0.2, type: 'implementation' }),
+    ];
+
+    const pack = service.assemble(results, { tokenBudget: 100000, minScore: 0.3 });
+
+    expect(pack.implementation?.map((e) => e.source.path)).toEqual(['a.md', 'b.md']);
+    expect(pack.implementation?.[0]?.source.score).toBe(1.0);
+    expect(pack.meta.chunks_excluded).toBe(1);
   });
 
   it('chunks_excluded counts entries below floor', () => {
@@ -147,7 +176,7 @@ describe('ContextService.assemble()', () => {
       makeResult({ path: 'c.md', text: 'Lower', score: 0.05, type: 'implementation' }),
     ];
 
-    // max=1.0, normalized: 1.0, 0.1, 0.05. With minScore=0.5, only 1.0 passes
+    // Raw scores 1.0, 0.1, 0.05. With minScore=0.5, only 1.0 passes
     const pack = service.assemble(results, { tokenBudget: 100000, minScore: 0.5 });
 
     expect(pack.meta.chunks_included).toBe(1);
@@ -155,10 +184,9 @@ describe('ContextService.assemble()', () => {
     expect(pack.implementation?.length).toBe(1);
   });
 
-  it('normalizes scores before applying min_score floor', () => {
-    // With raw scores 0.5 and 0.1, max is 0.5
-    // Normalized: 0.5/0.5=1.0 and 0.1/0.5=0.2
-    // With min_score=0.3, only the 0.5 raw score entry should pass
+  it('applies min_score to scores exactly as received — no second normalisation', () => {
+    // Raw scores 0.5 and 0.1, min_score=0.3: 0.5 passes, 0.1 does not, and the survivor
+    // keeps its raw score (the old code would have reported 0.5/0.5 = 1.0).
     const results: SearchResult[] = [
       makeResult({ path: 'a.md', text: 'High', score: 0.5, type: 'implementation' }),
       makeResult({ path: 'b.md', text: 'Low', score: 0.1, type: 'implementation' }),
@@ -168,6 +196,7 @@ describe('ContextService.assemble()', () => {
 
     expect(pack.implementation?.length).toBe(1);
     expect(pack.implementation?.[0]?.source.path).toBe('a.md');
+    expect(pack.implementation?.[0]?.source.score).toBe(0.5);
     expect(pack.meta.chunks_excluded).toBe(1);
   });
 

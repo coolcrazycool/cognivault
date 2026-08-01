@@ -344,7 +344,12 @@ describe('context routes', () => {
       expect(body.meta.total_tokens).toBeLessThanOrEqual(1000);
     });
 
-    it('custom min_score=1.0 returns pack with no entries (all excluded)', async () => {
+    it('custom min_score=1.0 keeps exactly the top hit (fraction-of-top semantics)', async () => {
+      // SearchService rescales the fused batch against its top hit and dedups by
+      // path + chunk_index (the fixture payloads carry no chunk_index, so uuid-2 folds
+      // into uuid-1): ContextService receives scores 1.0, ~0.6, ~0.5. min_score is a
+      // fraction of the top hit: at 1.0 only the top chunk itself survives — the cut-off
+      // is applied ONCE, with no second normalisation in ContextService.
       const response = await app.inject({
         method: 'POST',
         url: '/api/vault/context',
@@ -357,14 +362,11 @@ describe('context routes', () => {
 
       expect(response.statusCode).toBe(200);
       const body = response.json();
-      // All entries should be excluded — only the top-scoring item (score=1.0 after normalization) may be included
-      // With min_score=1.0, only entries with normalized score exactly 1.0 are included
-      // The chunks_excluded should be positive (some chunks filtered)
-      expect(body.meta.chunks_excluded).toBeGreaterThan(0);
-      // No section arrays should be present (unless one entry has score exactly 1.0)
-      // But since uuid-1 and uuid-2 are merged and uuid-1 has score=0.95 (=1.0 normalized),
-      // the merged entry's score=1.0 might be included. Let's assert excluded > 0.
-      expect(body.meta).toBeDefined();
+      expect(body.meta.chunks_excluded).toBe(2);
+      expect(body.meta.chunks_included).toBe(1);
+      expect(body.architecture).toHaveLength(1);
+      expect(body.architecture[0].source.path).toBe('Architecture/system.md');
+      expect(body.architecture[0].source.score).toBe(1);
     });
 
     it('default token_budget is 32000 when not provided', async () => {
@@ -515,6 +517,50 @@ describe('context routes', () => {
         expect(entry.source.score).toBeGreaterThanOrEqual(0.3);
         expect(entry.source.score).toBeLessThanOrEqual(1);
       }
+    });
+
+    it('returns an empty pack when search yields no results — the only empty case', async () => {
+      // The emptiness contract: because hybrid rescales its batch so the top hit is 1.0,
+      // that hit passes any min_score in [0, 1]. The pack is therefore empty exactly when
+      // the search itself returns nothing (documented in the min_score schema description).
+      mockQdrantQuery.mockResolvedValue({ points: [] });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/context',
+        headers: {
+          authorization: 'Bearer cv-test-context-key',
+          'content-type': 'application/json',
+        },
+        payload: { query: 'nothing matches this', min_score: 0.99 },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.meta.chunks_included).toBe(0);
+      expect(body.meta.chunks_excluded).toBe(0);
+      expect(body.meta.total_tokens).toBe(0);
+      for (const section of ['summary', 'architecture', 'adrs', 'glossary', 'implementation']) {
+        expect(section in body).toBe(false);
+      }
+    });
+
+    it('top hit always passes any min_score in [0, 1] when search returns anything', async () => {
+      // Corollary of the rescale: even a batch whose raw fused scores are all terrible
+      // produces a non-empty pack, because rank 1 is rescaled to exactly 1.0. min_score is
+      // a tail trim relative to the best hit, NOT an absolute relevance floor.
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/context',
+        headers: {
+          authorization: 'Bearer cv-test-context-key',
+          'content-type': 'application/json',
+        },
+        payload: { query: 'system architecture', min_score: 1.0 },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().meta.chunks_included).toBeGreaterThan(0);
     });
 
     it('embeds the query via embedQuery (query side), never via embed', async () => {

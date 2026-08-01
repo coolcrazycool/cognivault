@@ -8,6 +8,16 @@ export type SectionName = 'summary' | 'architecture' | 'adrs' | 'glossary' | 'im
 
 export interface AssembleOptions {
   tokenBudget: number;
+  /**
+   * Score cut-off applied to results exactly as the search service scored them — no second
+   * normalisation happens here. `/context` feeds hybrid results, which `SearchService`
+   * already rescales against the batch's own top hit (rank 1 === 1.0), so for that path
+   * this is a fraction-of-top tail trim, NOT an absolute relevance floor: the top hit
+   * passes for any value in [0, 1] even when it is a poor match in absolute terms.
+   * If a caller ever feeds `semantic` results (absolute clamped cosine similarities,
+   * never rescaled), the same comparison becomes an absolute cosine floor — which is the
+   * correct reading for those scores precisely because nothing is renormalised here.
+   */
   minScore: number;
 }
 
@@ -94,38 +104,31 @@ function classifyEntry(type: string | null, path: string): SectionName {
 
 export class ContextService {
   assemble(results: SearchResult[], opts: AssembleOptions): ContextPack {
-    // 1. Score normalization: divide by max to get [0, 1] relative scores
-    const maxScore = results.reduce((max, r) => Math.max(max, r.score), 0);
-
-    type NormalizedResult = SearchResult & { normalizedScore: number };
-
-    const normalized: NormalizedResult[] = results.map((r) => ({
-      ...r,
-      normalizedScore: maxScore > 0 ? r.score / maxScore : 0,
-    }));
-
-    // 2. Relevance floor filter
-    const aboveFloor = normalized.filter((r) => r.normalizedScore >= opts.minScore);
+    // 1. Score cut-off, on scores exactly as received. Rescaling happens ONCE, in
+    // SearchService.rescaleToTop (hybrid/lexical only) — renormalising again here would
+    // dress up an arbitrarily poor best hit as a perfect 1.0 and turn `minScore` into a
+    // double-transformed value nobody can reason about. See AssembleOptions.minScore.
+    const aboveFloor = results.filter((r) => r.score >= opts.minScore);
     const chunksExcluded = results.length - aboveFloor.length;
 
-    // 3. Group by path
-    const groups = new Map<string, { results: NormalizedResult[]; maxScore: number }>();
+    // 2. Group by path
+    const groups = new Map<string, { results: SearchResult[]; maxScore: number }>();
     for (const r of aboveFloor) {
       const existing = groups.get(r.path);
       if (existing) {
         existing.results.push(r);
-        existing.maxScore = Math.max(existing.maxScore, r.normalizedScore);
+        existing.maxScore = Math.max(existing.maxScore, r.score);
       } else {
-        groups.set(r.path, { results: [r], maxScore: r.normalizedScore });
+        groups.set(r.path, { results: [r], maxScore: r.score });
       }
     }
 
-    // 4. Sort chunks within each group by section_path (lexicographic = document order)
+    // 3. Sort chunks within each group by section_path (lexicographic = document order)
     for (const group of groups.values()) {
       group.results.sort((a, b) => a.section_path.localeCompare(b.section_path));
     }
 
-    // 5. Merge groups into candidate entries
+    // 4. Merge groups into candidate entries
     interface CandidateEntry {
       mergedText: string;
       tokenCount: number;
@@ -160,10 +163,10 @@ export class ContextService {
       });
     }
 
-    // 6. Sort candidates by maxScore descending
+    // 5. Sort candidates by maxScore descending
     candidates.sort((a, b) => b.maxScore - a.maxScore);
 
-    // 7. Greedy budget fill (do NOT break on skip — a smaller entry later may fit)
+    // 6. Greedy budget fill (do NOT break on skip — a smaller entry later may fit)
     let totalTokens = 0;
     let chunksIncluded = 0;
     const includedEntries: ContextEntry[] = [];
@@ -180,7 +183,7 @@ export class ContextService {
       }
     }
 
-    // 8. Group entries by section, order within section by score descending
+    // 7. Group entries by section, order within section by score descending
     const sectionMap = new Map<SectionName, ContextEntry[]>();
     for (const entry of includedEntries) {
       const section = entry.section;
@@ -197,7 +200,7 @@ export class ContextService {
       entries.sort((a, b) => b.source.score - a.source.score);
     }
 
-    // 9. Build response — only include sections with entries
+    // 8. Build response — only include sections with entries
     const pack: ContextPack = {
       meta: {
         total_tokens: totalTokens,
