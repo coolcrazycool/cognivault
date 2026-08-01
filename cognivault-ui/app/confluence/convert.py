@@ -52,9 +52,34 @@ _PH_OPEN = "\ue000"
 _PH_CLOSE = "\ue001"
 _PH_RE = re.compile(_PH_OPEN + r"PH\d+" + _PH_CLOSE)
 
-# Table sizing heuristics (Russian headroom: ~3 chars / token).
+# Table sizing heuristics.
+#
+# Token counting here is the same deliberately-conservative heuristic the rest
+# of the UI uses (see ``app/tokens.py``): **3 characters per token**.  There is
+# no tiktoken in the UI, and for Cyrillic ``cl100k`` counts ~20% fewer tokens
+# than GigaChat actually spends, so 3 chars/token over-estimates on purpose.
+#
+# ``_MAX_TABLE_TOKENS`` is aligned with the backend chunker's table budget
+# (~1200 cl100k tokens per row-group).  Previously it was 350, which meant a
+# large table was cut twice -- once here, once again by the chunker -- and both
+# halves lost their meaning.  The point of sharing the budget is a single seam,
+# so the split has to be measured in the CHUNKER's unit, and 3 chars/token is
+# the wrong conversion for it: cl100k spends ~2.0-2.4 characters per token on
+# Cyrillic table rows (measured), not 3, so a part that "fits" 1200 UI tokens
+# was really ~1550 cl100k tokens and the chunker cut it again.  The split budget
+# therefore converts at 2 chars/token and reserves headroom for the context
+# prefix + header + delimiter the chunker prepends to every row group.
 _CHARS_PER_TOKEN = 3
-_MAX_TABLE_TOKENS = 350
+_MAX_TABLE_TOKENS = 1200
+_TABLE_CHARS_PER_TOKEN = 2
+_TABLE_CHUNKER_OVERHEAD_TOKENS = 200
+_MAX_TABLE_CHARS = (_MAX_TABLE_TOKENS - _TABLE_CHUNKER_OVERHEAD_TOKENS) * _TABLE_CHARS_PER_TOKEN
+# Hard cap on ONE fully expanded table (rowspan/colspan duplication can blow a
+# modest Confluence grid up into megabytes of Markdown -- the root cause of the
+# past 413s on indexing).  Beyond this the table is truncated with an explicit
+# in-text notice.
+_MAX_EXPANDED_TABLE_TOKENS = 20_000
+_MAX_EXPANDED_TABLE_CHARS = _MAX_EXPANDED_TABLE_TOKENS * _CHARS_PER_TOKEN
 _WIDE_TABLE_COLS = 8
 _WIDE_CELL_CHARS = 200
 
@@ -347,13 +372,13 @@ def _transform_macros(soup: BeautifulSoup, ctx: _Context) -> None:
         elif name == "expand":
             _handle_expand(macro)
         elif name == "status":
-            _handle_status(macro)
+            _handle_status(macro, ctx)
         elif name in ("include", "excerpt-include"):
-            _handle_include(macro)
+            _handle_include(macro, ctx)
         elif name == "jira":
-            _handle_jira(macro)
+            _handle_jira(macro, ctx)
         elif name in ("drawio", "gliffy", "chart"):
-            _handle_diagram(macro)
+            _handle_diagram(macro, ctx)
         elif name in _DROP_MACROS:
             macro.decompose()
         else:
@@ -436,35 +461,39 @@ def _handle_expand(macro: Tag) -> None:
     macro.decompose()
 
 
-def _handle_status(macro: Tag) -> None:
+def _handle_status(macro: Tag, ctx: _Context) -> None:
     title = (_param(macro, "title") or "").strip()
     strong = _new_tag(macro, "strong")
-    strong.string = f"[{title}]"
+    # The bracketed label goes through the placeholder map so markdownify never
+    # sees it and cannot escape it into `\[ГОТОВО]` / `PROJ\-42`.  Escaping is
+    # suppressed *only* for these generated macro labels -- ordinary body text
+    # with brackets still travels the normal markdownify path and stays escaped.
+    strong.string = ctx.add_placeholder("literal", f"[{title}]")
     macro.replace_with(strong)
 
 
-def _placeholder_line(macro: Tag, text: str) -> None:
+def _placeholder_line(macro: Tag, ctx: _Context, text: str) -> None:
     p = _new_tag(macro, "p")
     em = _new_tag(macro, "em")
-    em.string = text
+    em.string = ctx.add_placeholder("literal", text)
     p.append(em)
     macro.replace_with(p)
 
 
-def _handle_include(macro: Tag) -> None:
+def _handle_include(macro: Tag, ctx: _Context) -> None:
     page_ref = macro.find("ri:page")
     name = ""
     if page_ref is not None:
         name = (page_ref.get("ri:content-title") or "").strip()
-    _placeholder_line(macro, f"[Включение: {name or 'страница'}]")
+    _placeholder_line(macro, ctx, f"[Включение: {name or 'страница'}]")
 
 
-def _handle_jira(macro: Tag) -> None:
+def _handle_jira(macro: Tag, ctx: _Context) -> None:
     key = (_param(macro, "key") or _param(macro, "jqlQuery") or "").strip()
-    _placeholder_line(macro, f"[JIRA: {key or '—'}]")
+    _placeholder_line(macro, ctx, f"[JIRA: {key or '—'}]")
 
 
-def _handle_diagram(macro: Tag) -> None:
+def _handle_diagram(macro: Tag, ctx: _Context) -> None:
     name = (
         _param(macro, "diagramName")
         or _param(macro, "name")
@@ -472,7 +501,7 @@ def _handle_diagram(macro: Tag) -> None:
         or ""
     ).strip()
     label = f"[Диаграмма: {name}]" if name else "[Диаграмма]"
-    _placeholder_line(macro, label)
+    _placeholder_line(macro, ctx, label)
 
 
 def _handle_unknown_macro(macro: Tag, ctx: _Context) -> None:
@@ -599,7 +628,17 @@ def _flatten_nested_table(table: Tag, ctx: _Context) -> None:
 
 def _emit_table(table: Tag, ctx: _Context) -> None:
     header, body_rows, caption = _grid_to_rows(table, ctx)
-    md = _render_table(header, body_rows, caption)
+    body_rows, dropped = _cap_expanded_rows(header, body_rows)
+    if dropped:
+        logger.warning(
+            "confluence page %s: table truncated -- expanded size over %d tokens, "
+            "kept %d of %d body rows",
+            ctx.page_id,
+            _MAX_EXPANDED_TABLE_TOKENS,
+            len(body_rows),
+            len(body_rows) + dropped,
+        )
+    md = _render_table(header, body_rows, caption, dropped)
     key = ctx.add_placeholder("table", md)
     ph = _new_tag(table, "p")
     ph.string = key
@@ -800,19 +839,51 @@ def _restore_inline_placeholders(text: str, placeholders: dict) -> str:
 # ---- table Markdown emission ----------------------------------------------
 
 
-def _render_table(header: list[str], body: list[list[str]], caption: str) -> str:
+def _cap_expanded_rows(
+    header: list[str], body: list[list[str]]
+) -> tuple[list[list[str]], int]:
+    """Cap one fully expanded table at :data:`_MAX_EXPANDED_TABLE_CHARS`.
+
+    ``rowspan``/``colspan`` expansion duplicates cell text, so a merged-cell
+    grid can explode into megabytes of Markdown -- exactly what produced the
+    413s during indexing.  Rows are kept until the running size would exceed
+    the cap; the first row is always kept so a single huge row still yields a
+    table.  Returns ``(kept_rows, dropped_row_count)``.
+    """
+    budget = _MAX_EXPANDED_TABLE_CHARS - sum(len(c) + 3 for c in header)
+    kept: list[list[str]] = []
+    used = 0
+    for i, row in enumerate(body):
+        cost = sum(len(c) + 3 for c in row) + 2
+        if kept and used + cost > budget:
+            return kept, len(body) - i
+        used += cost
+        kept.append(row)
+    return kept, 0
+
+
+def _truncation_notice(dropped: int) -> str:
+    return (
+        f"*[Таблица обрезана: пропущено строк — {dropped}. "
+        f"Развёрнутый размер превысил лимит {_MAX_EXPANDED_TABLE_TOKENS} токенов.]*"
+    )
+
+
+def _render_table(
+    header: list[str], body: list[list[str]], caption: str, dropped: int = 0
+) -> str:
     if not header and not body:
-        return ""
-    ncol = len(header)
+        return _truncation_notice(dropped) if dropped else ""
 
     if _is_wide(header, body):
-        return _linearize_table(header, body, caption)
+        rendered = _linearize_table(header, body, caption)
+        return _with_notice(rendered, dropped)
 
     full = _gfm_table(header, body)
-    if _est_tokens(full) <= _MAX_TABLE_TOKENS:
+    if len(full) <= _MAX_TABLE_CHARS:
         if caption:
-            return f"**Таблица: {caption}**\n\n{full}"
-        return full
+            return _with_notice(f"**Таблица: {caption}**\n\n{full}", dropped)
+        return _with_notice(full, dropped)
 
     # Split into complete sub-tables, each repeating the header row.
     chunks = _split_body(header, body)
@@ -824,7 +895,13 @@ def _render_table(header: list[str], body: list[list[str]], caption: str) -> str
         else:
             label = f"**Таблица (часть {k} из {total})**"
         parts.append(f"{label}\n\n{_gfm_table(header, chunk)}")
-    return "\n\n".join(parts)
+    return _with_notice("\n\n".join(parts), dropped)
+
+
+def _with_notice(rendered: str, dropped: int) -> str:
+    if not dropped:
+        return rendered
+    return f"{rendered}\n\n{_truncation_notice(dropped)}"
 
 
 def _is_wide(header: list[str], body: list[list[str]]) -> bool:
@@ -851,16 +928,12 @@ def _gfm_table(header: list[str], body: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
-def _est_tokens(text: str) -> float:
-    return len(text) / _CHARS_PER_TOKEN
-
-
 def _split_body(header: list[str], body: list[list[str]]) -> list[list[list[str]]]:
     chunks: list[list[list[str]]] = []
     current: list[list[str]] = []
     for row in body:
         trial = current + [row]
-        if current and _est_tokens(_gfm_table(header, trial)) > _MAX_TABLE_TOKENS:
+        if current and len(_gfm_table(header, trial)) > _MAX_TABLE_CHARS:
             chunks.append(current)
             current = [row]
         else:

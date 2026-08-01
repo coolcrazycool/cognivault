@@ -177,16 +177,19 @@ def test_table_rowspan_and_colspan_duplication():
     assert "| R | x | y |" in md
 
 
-def test_table_split_repeats_header_each_part():
-    rows = "".join(
+def _two_col_rows(count: int) -> str:
+    return "".join(
         f"<tr><td>значение ячейки номер {i} с длинным текстом</td>"
         f"<td>второй столбец данных номер {i}</td></tr>"
-        for i in range(30)
+        for i in range(count)
     )
+
+
+def test_table_split_repeats_header_each_part():
     md = _md(
         "<table><tbody>"
         "<tr><th>Колонка А</th><th>Колонка Б</th></tr>"
-        f"{rows}</tbody></table>"
+        f"{_two_col_rows(150)}</tbody></table>"
     )
     # More than one part, each labelled and each repeating the header row.
     assert md.count("| Колонка А | Колонка Б |") >= 2
@@ -194,6 +197,74 @@ def test_table_split_repeats_header_each_part():
     assert "часть 2 из" in md
     # Every part is a complete GFM table (header + separator).
     assert md.count("| --- | --- |") == md.count("| Колонка А | Колонка Б |")
+
+
+def test_table_split_threshold_matches_chunker_budget():
+    """~1200 chunker tokens, not ~350: one seam with the chunker, not two."""
+    assert convert._MAX_TABLE_TOKENS == 1200
+    # The budget is spent in the CHUNKER's unit. cl100k spends ~2.0-2.4 chars
+    # per token on Cyrillic table rows, so converting at 3 chars/token would
+    # emit ~1550-token parts and the chunker would cut every one of them again.
+    assert convert._TABLE_CHARS_PER_TOKEN == 2
+    assert convert._MAX_TABLE_CHARS <= convert._MAX_TABLE_TOKENS * 2
+
+    # A table that the OLD 350-token threshold would have split, but that now
+    # fits a single chunker-sized group -> emitted whole, no "часть N из M".
+    md = _md(
+        "<table><tbody>"
+        "<tr><th>Колонка А</th><th>Колонка Б</th></tr>"
+        f"{_two_col_rows(20)}</tbody></table>"
+    )
+    assert len(md) > 350 * 3
+    assert "часть" not in md
+    assert md.count("| Колонка А | Колонка Б |") == 1
+    assert md.count("| --- | --- |") == 1
+
+    # And when a table does exceed the new budget, every emitted part stays
+    # within it -- so the chunker never has to cut a second time.
+    big = _md(
+        "<table><tbody>"
+        "<tr><th>Колонка А</th><th>Колонка Б</th></tr>"
+        f"{_two_col_rows(150)}</tbody></table>"
+    )
+    parts = re.split(r"\*\*Таблица \(часть \d+ из \d+\)\*\*", big)[1:]
+    assert len(parts) >= 2
+    for part in parts:
+        assert len(part.strip()) <= convert._MAX_TABLE_CHARS
+
+
+def test_expanded_merged_cell_table_is_capped_and_marked(caplog):
+    """A rowspan blow-up is truncated with an in-text notice + a warn log."""
+    # Cells stay under the "wide cell" limit so this exercises the GFM path.
+    cell = "объединённая ячейка " * 4
+    rows = "".join(
+        f'<tr><td rowspan="2">{cell}{i}</td><td>{cell}{i}</td></tr>'
+        for i in range(800)
+    )
+    with caplog.at_level(logging.WARNING, logger="cognivault.confluence.convert"):
+        md = _md(
+            "<table><tbody>"
+            "<tr><th>Ключ</th><th>Значение</th></tr>"
+            f"{rows}</tbody></table>"
+        )
+
+    assert "Таблица обрезана" in md
+    assert "пропущено строк" in md
+    assert "truncated" in caplog.text
+    # Truncated well below the raw expanded size.
+    cap_chars = convert._MAX_EXPANDED_TABLE_CHARS
+    assert len(md) < cap_chars * 1.5
+    # Late rows are gone, early rows survive.
+    assert f"{cell}799" not in md
+    assert f"{cell}0" in md
+    assert md.count("| Ключ | Значение |") >= 1
+
+
+def test_square_brackets_in_plain_text_still_escaped():
+    """Escaping is lifted for macro labels only, not for ordinary body text."""
+    md = _md("<p>обычный текст [в скобках] и ещё [АБВ-42]</p>")
+    assert r"\[в скобках]" in md
+    assert r"\[АБВ" in md
 
 
 def test_wide_table_is_linearized():
