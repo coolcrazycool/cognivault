@@ -16,6 +16,7 @@ import { countTokens, DOC_SUMMARY_PREFIX, MAX_CHUNK_TOKENS } from '../../src/lib
 import {
   auditPage,
   chunkBody,
+  chunkExportLine,
   distribution,
   exactDuplicateGroups,
   extractFencedBlocks,
@@ -30,6 +31,7 @@ import {
   jaccard,
   nearDuplicateClusters,
   occurrenceFilter,
+  parseArgs,
   pipeRuns,
   quantile,
   startsMidLinearizedRow,
@@ -331,5 +333,40 @@ describe('дубликаты', () => {
     const groups = exactDuplicateGroups([...a.records, ...b.records]);
     expect(groups.length).toBeGreaterThanOrEqual(1);
     expect(groups[0]?.files).toEqual(['a.md', 'b.md']);
+  });
+});
+
+// --- выгрузка чанков (--chunks, вход для стыка 3) --------------------------
+
+describe('выгрузка чанков', () => {
+  it('строка выгрузки несёт ровно те поля, по которым считается попадание', () => {
+    const page = auditPage(
+      'Confluence/OASISEXT/Регламент.md',
+      '# Регламент\n\n## Шаги\n\nПервый шаг.\n',
+    );
+    const record = page.records[0];
+    expect(record).toBeDefined();
+    const line = JSON.parse(chunkExportLine(record!)) as Record<string, unknown>;
+    expect(line.path).toBe('Confluence/OASISEXT/Регламент.md');
+    expect(line.section_path).toBe(record?.sectionPath);
+    expect(line.parent_id).toBe(record?.parentId);
+    expect(line.content_kind).toBe(record?.contentKind);
+    expect(line.text).toBe(record?.text);
+    expect(line.chunk_index).toBe(record?.chunkIndex);
+    // Разреженный вектор НЕ выгружается: лексическую сторону обоих корпусов
+    // («до» и «после») обязан считать один и тот же bm25.ts, а не два разных.
+    expect(line).not.toHaveProperty('indices');
+  });
+
+  it('строка выгрузки — одна строка JSON, без переводов внутри', () => {
+    const page = auditPage('a.md', '# Заголовок\n\nСтрока один.\nСтрока два.\n');
+    for (const record of page.records) {
+      expect(chunkExportLine(record)).not.toContain('\n');
+    }
+  });
+
+  it('--chunks разбирается и по умолчанию пуст', () => {
+    expect(parseArgs(['--vault', 'v', '--out', 'o']).chunks).toBe('');
+    expect(parseArgs(['--vault', 'v', '--out', 'o', '--chunks', 'c.jsonl']).chunks).toBe('c.jsonl');
   });
 });

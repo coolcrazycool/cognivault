@@ -1276,6 +1276,8 @@ function printSummary(
 interface Args {
   vault: string;
   out: string;
+  /** Куда выгрузить сами чанки (JSONL) — вход для стыка 3. Пусто = не выгружать. */
+  chunks: string;
   top: number;
   limit: number | null;
   threshold: number;
@@ -1285,6 +1287,7 @@ export function parseArgs(argv: string[]): Args {
   const args: Args = {
     vault: '',
     out: '',
+    chunks: '',
     top: 15,
     limit: null,
     threshold: DUPLICATE_THRESHOLD,
@@ -1299,6 +1302,10 @@ export function parseArgs(argv: string[]): Args {
         break;
       case '--out':
         args.out = value ?? '';
+        i += 1;
+        break;
+      case '--chunks':
+        args.chunks = value ?? '';
         i += 1;
         break;
       case '--top':
@@ -1321,6 +1328,31 @@ export function parseArgs(argv: string[]): Args {
     throw new Error('нужны --vault <каталог> и --out <report.json>');
   }
   return args;
+}
+
+/**
+ * Одна строка выгрузки чанков (`--chunks`) — вход для стыка 3 (`audit_retrieval.py`).
+ *
+ * Поля ровно те, по которым потом считается попадание: `path` сверяется с
+ * `source_path` золотого набора, `section_path` — с `section_path`, `parent_id`
+ * повторяет группировку по разделам из `/search/hybrid?group_by_section=true`.
+ * `indices` (разреженный вектор) НЕ выгружается намеренно: «до/после» строится на
+ * старом чанкере в отдельном worktree, и его `bm25.ts` — тоже старый; лексическая
+ * сторона обеих выгрузок должна считаться ОДНИМ модулем (`sparse_vectors.ts` из
+ * текущего дерева), иначе сравнение мерило бы заодно и дрейф токенизации.
+ */
+export function chunkExportLine(record: ChunkRecord): string {
+  return JSON.stringify({
+    path: record.file,
+    title: record.title,
+    chunk_index: record.chunkIndex,
+    section_path: record.sectionPath,
+    parent_id: record.parentId,
+    content_kind: record.contentKind,
+    tokens: record.tokens,
+    chars: record.chars,
+    text: record.text,
+  });
 }
 
 function main(argv: string[]): number {
@@ -1370,8 +1402,13 @@ function main(argv: string[]): number {
   };
 
   writeFileSync(args.out, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  if (args.chunks !== '') {
+    // Порядок — тот же обход файлов, что и у метрик: выгрузка детерминирована.
+    writeFileSync(args.chunks, records.map((r) => `${chunkExportLine(r)}\n`).join(''), 'utf8');
+  }
   printSummary(corpus, pages, clusters, exact, duplicateShare, args.top);
   process.stdout.write(`\nотчёт: ${args.out}\n`);
+  if (args.chunks !== '') process.stdout.write(`чанки: ${args.chunks} (${records.length})\n`);
   return 0;
 }
 
