@@ -50,6 +50,14 @@ const configSchema = z
       .enum(['true', 'false'])
       .default('true')
       .transform((v) => v === 'true'),
+    // Scalar int8 quantization for the dense vector, applied at COLLECTION CREATION
+    // only. Off by default: the database is external and centrally managed, so the
+    // memory/accuracy trade-off is the operator's call — it can be switched on later
+    // with a single `update_collection` without touching this service.
+    QDRANT_QUANTIZATION: z
+      .enum(['true', 'false'])
+      .default('false')
+      .transform((v) => v === 'true'),
     COGNIVAULT_DATA_DIR: z.string().default('./.cognivault'),
     POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
     STABILITY_DELAY_MS: z.coerce.number().int().positive().default(2000),

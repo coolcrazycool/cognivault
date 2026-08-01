@@ -10,9 +10,13 @@ beforeAll(() => {
 
 const mockGetCollections = vi.fn();
 const mockGetCollection = vi.fn();
+const mockCollectionExists = vi.fn();
 const mockCreateCollection = vi.fn();
 const mockCreatePayloadIndex = vi.fn();
+const mockGetAliases = vi.fn();
+const mockUpdateCollectionAliases = vi.fn();
 const mockDelete = vi.fn();
+const mockQuery = vi.fn();
 const mockVersionInfo = vi.fn();
 /** Records the options object the plugin passes to `new QdrantClient(...)`. */
 const mockClientConstructor = vi.fn();
@@ -21,9 +25,13 @@ vi.mock('@qdrant/js-client-rest', () => {
   class MockQdrantClient {
     getCollections = mockGetCollections;
     getCollection = mockGetCollection;
+    collectionExists = mockCollectionExists;
     createCollection = mockCreateCollection;
     createPayloadIndex = mockCreatePayloadIndex;
+    getAliases = mockGetAliases;
+    updateCollectionAliases = mockUpdateCollectionAliases;
     delete = mockDelete;
+    query = mockQuery;
     versionInfo = mockVersionInfo;
 
     constructor(params?: unknown) {
@@ -32,6 +40,30 @@ vi.mock('@qdrant/js-client-rest', () => {
   }
   return { QdrantClient: MockQdrantClient };
 });
+
+/** Runtime name — an ALIAS since the hybrid rework, not a collection. */
+const ALIAS = 'cognivault';
+/** Physical collection the alias points at. */
+const PHYSICAL = 'cognivault_v2';
+
+/** Nothing provisioned yet: no alias, no collections. */
+function emptyCluster(): void {
+  mockGetAliases.mockResolvedValue({ aliases: [] });
+  mockGetCollections.mockResolvedValue({ collections: [] });
+}
+
+/** Steady state: the alias exists and points at the current physical collection. */
+function provisioned(): void {
+  mockGetAliases.mockResolvedValue({
+    aliases: [{ alias_name: ALIAS, collection_name: PHYSICAL }],
+  });
+  mockGetCollections.mockResolvedValue({ collections: [{ name: PHYSICAL }] });
+}
+
+/** Options `createCollection` was called with. */
+function createdSchema(): Record<string, unknown> {
+  return mockCreateCollection.mock.calls[0]?.[1] as Record<string, unknown>;
+}
 
 /** Hands out IAM tokens without touching the network. */
 const mockGetToken = vi.fn();
@@ -53,8 +85,12 @@ vi.mock('../../lib/qdrant-auth.js', async (importOriginal) => {
   };
 });
 
-/** Fields the plugin indexes when it has to create the collection from scratch. */
-const ALL_INDEXED_FIELDS = [
+/**
+ * Fields that MUST be indexed when the plugin creates the collection from scratch.
+ * Asserted as a subset, not as an exact list — adding a filterable field is a routine
+ * change and must not break unrelated tests.
+ */
+const REQUIRED_INDEXED_FIELDS = [
   'path',
   'tags',
   'project',
@@ -70,27 +106,42 @@ const ALL_INDEXED_FIELDS = [
 /** Fields re-asserted idempotently on every start, even for an existing collection. */
 const IDEMPOTENT_INDEXED_FIELDS = ['text', 'title', 'section_path', 'user_id'];
 
+/** Fields only created together with the collection, never on a restart. */
+const CREATION_ONLY_INDEXED_FIELDS = ['path', 'tags', 'project', 'status', 'type', 'chunk_index'];
+
 function indexedFieldNames(): string[] {
   return mockCreatePayloadIndex.mock.calls.map((call) => call[1].field_name);
+}
+
+/** Collection names every `createPayloadIndex` call targeted. */
+function indexedCollections(): string[] {
+  return mockCreatePayloadIndex.mock.calls.map((call) => call[0]);
 }
 
 describe('qdrantPlugin', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockDelete.mockResolvedValue({});
+    mockCreateCollection.mockResolvedValue({});
+    mockUpdateCollectionAliases.mockResolvedValue(true);
     mockVersionInfo.mockResolvedValue({
       title: 'qdrant - vector search engine',
       version: '1.16.3',
     });
-    // Existing-collection probe defaults to a matching vector size (openai 1536)
+    // Existing-collection probe defaults to the hybrid schema at the openai size.
     mockGetCollection.mockResolvedValue({
-      config: { params: { vectors: { size: 1536, distance: 'Cosine' } } },
+      config: {
+        params: {
+          vectors: { dense: { size: 1536, distance: 'Cosine', on_disk: true } },
+          sparse_vectors: { bm25: { modifier: 'idf' } },
+        },
+      },
     });
+    emptyCluster();
   });
 
-  it('creates collection when it does not exist', async () => {
-    mockGetCollections.mockResolvedValue({ collections: [] });
-    mockCreateCollection.mockResolvedValue({});
+  it('creates the physical collection with the hybrid schema when nothing exists', async () => {
+    emptyCluster();
     mockCreatePayloadIndex.mockResolvedValue({});
 
     const Fastify = (await import('fastify')).default;
@@ -100,17 +151,19 @@ describe('qdrantPlugin', () => {
     await app.register(qdrantPlugin);
     await app.ready();
 
-    expect(mockCreateCollection).toHaveBeenCalledWith('cognivault', {
-      vectors: { size: 1536, distance: 'Cosine' },
+    // The collection is created under its PHYSICAL name — `cognivault` is the alias.
+    expect(mockCreateCollection.mock.calls[0]?.[0]).toBe(PHYSICAL);
+    expect(createdSchema()).toMatchObject({
+      vectors: { dense: { size: 1536, distance: 'Cosine', on_disk: true } },
+      sparse_vectors: { bm25: { modifier: 'idf' } },
+      on_disk_payload: true,
     });
 
     await app.close();
   });
 
   it('does not create collection when it already exists', async () => {
-    mockGetCollections.mockResolvedValue({
-      collections: [{ name: 'cognivault' }],
-    });
+    provisioned();
     mockCreatePayloadIndex.mockResolvedValue({});
 
     const Fastify = (await import('fastify')).default;
@@ -126,8 +179,7 @@ describe('qdrantPlugin', () => {
   });
 
   it('creates payload indexes for all required fields when creating collection', async () => {
-    mockGetCollections.mockResolvedValue({ collections: [] });
-    mockCreateCollection.mockResolvedValue({});
+    emptyCluster();
     mockCreatePayloadIndex.mockResolvedValue({});
 
     const Fastify = (await import('fastify')).default;
@@ -137,16 +189,17 @@ describe('qdrantPlugin', () => {
     await app.register(qdrantPlugin);
     await app.ready();
 
-    // 6 keyword/integer indexes + 3 full-text indexes + 1 user_id keyword index
-    expect(indexedFieldNames().sort()).toEqual([...ALL_INDEXED_FIELDS].sort());
+    // Keyword/integer + full-text + the user_id tenant index. A superset is fine —
+    // what matters is that none of these is missing.
+    expect(indexedFieldNames()).toEqual(expect.arrayContaining(REQUIRED_INDEXED_FIELDS));
+    // …all of them on the physical collection, never on the alias.
+    expect(new Set(indexedCollections())).toEqual(new Set([PHYSICAL]));
 
     await app.close();
   });
 
-  it('creates user_id keyword index idempotently', async () => {
-    mockGetCollections.mockResolvedValue({
-      collections: [{ name: 'cognivault' }],
-    });
+  it('creates the user_id index as a tenant index', async () => {
+    provisioned();
     mockCreatePayloadIndex.mockResolvedValue({});
 
     const Fastify = (await import('fastify')).default;
@@ -156,21 +209,19 @@ describe('qdrantPlugin', () => {
     await app.register(qdrantPlugin);
     await app.ready();
 
-    const indexedFields = mockCreatePayloadIndex.mock.calls.map((call) => call[1].field_name);
-    expect(indexedFields).toContain('user_id');
+    expect(indexedFieldNames()).toContain('user_id');
 
     const userIdCall = mockCreatePayloadIndex.mock.calls.find(
       (call) => call[1].field_name === 'user_id',
     );
-    expect(userIdCall?.[1].field_schema).toBe('keyword');
+    // `is_tenant` co-locates one user's points on disk — every query filters by it.
+    expect(userIdCall?.[1].field_schema).toMatchObject({ type: 'keyword', is_tenant: true });
 
     await app.close();
   });
 
   it('purges legacy vectors without user_id on startup', async () => {
-    mockGetCollections.mockResolvedValue({
-      collections: [{ name: 'cognivault' }],
-    });
+    provisioned();
     mockCreatePayloadIndex.mockResolvedValue({});
 
     const Fastify = (await import('fastify')).default;
@@ -180,7 +231,8 @@ describe('qdrantPlugin', () => {
     await app.register(qdrantPlugin);
     await app.ready();
 
-    expect(mockDelete).toHaveBeenCalledWith('cognivault', {
+    // Maintenance work targets the physical collection, not the alias.
+    expect(mockDelete).toHaveBeenCalledWith(PHYSICAL, {
       wait: true,
       filter: {
         must: [{ is_empty: { key: 'user_id' } }],
@@ -191,8 +243,7 @@ describe('qdrantPlugin', () => {
   });
 
   it('decorates fastify.createTenantQdrant factory (not fastify.qdrant)', async () => {
-    mockGetCollections.mockResolvedValue({ collections: [] });
-    mockCreateCollection.mockResolvedValue({});
+    emptyCluster();
     mockCreatePayloadIndex.mockResolvedValue({});
 
     const Fastify = (await import('fastify')).default;
@@ -215,8 +266,7 @@ describe('qdrantPlugin', () => {
   });
 
   it('decorates fastify.purgeUserVectors function', async () => {
-    mockGetCollections.mockResolvedValue({ collections: [] });
-    mockCreateCollection.mockResolvedValue({});
+    emptyCluster();
     mockCreatePayloadIndex.mockResolvedValue({});
 
     const Fastify = (await import('fastify')).default;
@@ -233,9 +283,7 @@ describe('qdrantPlugin', () => {
   });
 
   it('skips keyword/integer indexes but still creates text and user_id indexes when collection already exists', async () => {
-    mockGetCollections.mockResolvedValue({
-      collections: [{ name: 'cognivault' }],
-    });
+    provisioned();
     mockCreatePayloadIndex.mockResolvedValue({});
 
     const Fastify = (await import('fastify')).default;
@@ -245,17 +293,19 @@ describe('qdrantPlugin', () => {
     await app.register(qdrantPlugin);
     await app.ready();
 
-    // Keyword/integer indexes are NOT created (inside if (!exists) block)
+    // Keyword/integer indexes are NOT re-created for an existing collection
     expect(mockCreateCollection).not.toHaveBeenCalled();
-    // Text indexes + user_id index ARE created idempotently (outside if (!exists) block)
-    expect(indexedFieldNames().sort()).toEqual([...IDEMPOTENT_INDEXED_FIELDS].sort());
+    const fields = indexedFieldNames();
+    expect(fields).toEqual(expect.arrayContaining(IDEMPOTENT_INDEXED_FIELDS));
+    for (const field of CREATION_ONLY_INDEXED_FIELDS) {
+      expect(fields).not.toContain(field);
+    }
 
     await app.close();
   });
 
   it('creates full-text text indexes with multilingual tokenizer and lowercase', async () => {
-    mockGetCollections.mockResolvedValue({ collections: [] });
-    mockCreateCollection.mockResolvedValue({});
+    emptyCluster();
     mockCreatePayloadIndex.mockResolvedValue({});
 
     const Fastify = (await import('fastify')).default;
@@ -268,7 +318,10 @@ describe('qdrantPlugin', () => {
     const textIndexCalls = mockCreatePayloadIndex.mock.calls.filter(
       (call) => typeof call[1].field_schema === 'object' && call[1].field_schema.type === 'text',
     );
-    expect(textIndexCalls.length).toBe(3);
+    // Whichever fields get full-text indexes, they all share the same analyzer.
+    expect(textIndexCalls.map((call) => call[1].field_name)).toEqual(
+      expect.arrayContaining(['text', 'title', 'section_path']),
+    );
     for (const call of textIndexCalls) {
       expect(call[1].field_schema).toMatchObject({
         type: 'text',
@@ -280,9 +333,220 @@ describe('qdrantPlugin', () => {
     await app.close();
   });
 
+  describe('alias resolution', () => {
+    /** Boot the plugin and hand the app back; caller closes it. */
+    async function boot(): Promise<FastifyInstance> {
+      mockCreatePayloadIndex.mockResolvedValue({});
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+      const app = Fastify({ logger: false });
+      await app.register(qdrantPlugin);
+      await app.ready();
+      return app;
+    }
+
+    it('attaches the alias atomically after creating the collection', async () => {
+      emptyCluster();
+
+      const app = await boot();
+
+      expect(mockUpdateCollectionAliases).toHaveBeenCalledWith({
+        actions: [{ create_alias: { collection_name: PHYSICAL, alias_name: ALIAS } }],
+      });
+
+      await app.close();
+    });
+
+    it('leaves an alias that already points at the physical collection alone', async () => {
+      provisioned();
+
+      const app = await boot();
+
+      expect(mockUpdateCollectionAliases).not.toHaveBeenCalled();
+      expect(mockCreateCollection).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('only attaches the alias when the collection is already there', async () => {
+      mockGetAliases.mockResolvedValue({ aliases: [] });
+      mockGetCollections.mockResolvedValue({ collections: [{ name: PHYSICAL }] });
+
+      const app = await boot();
+
+      // Half-finished previous start: collection created, alias never attached.
+      expect(mockCreateCollection).not.toHaveBeenCalled();
+      expect(mockUpdateCollectionAliases).toHaveBeenCalledTimes(1);
+      // …and the schema of the collection we adopted is verified.
+      expect(mockGetCollection).toHaveBeenCalledWith(PHYSICAL);
+
+      await app.close();
+    });
+
+    it('refuses to start when the alias name is taken by a COLLECTION', async () => {
+      mockGetAliases.mockResolvedValue({ aliases: [] });
+      mockGetCollections.mockResolvedValue({ collections: [{ name: ALIAS }] });
+      mockCreatePayloadIndex.mockResolvedValue({});
+
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+      const app = Fastify({ logger: false });
+      // NOT awaited: awaiting `register` boots the app, and the rejection would then
+      // escape the assertion below.
+      void app.register(qdrantPlugin);
+
+      await expect(app.ready()).rejects.toThrow(/exists as a COLLECTION, not as an alias/);
+      // The legacy collection is the rollback path — nothing may touch it.
+      expect(mockUpdateCollectionAliases).not.toHaveBeenCalled();
+      expect(mockCreateCollection).not.toHaveBeenCalled();
+      expect(mockDelete).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('warns but keeps serving when the alias points at an older collection', async () => {
+      mockGetAliases.mockResolvedValue({
+        aliases: [{ alias_name: ALIAS, collection_name: 'cognivault_v1' }],
+      });
+      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault_v1' }] });
+      mockCreatePayloadIndex.mockResolvedValue({});
+
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+      const app = Fastify({ logger: false });
+      const warnSpy = vi.spyOn(app.log, 'warn');
+
+      await app.register(qdrantPlugin);
+      await app.ready();
+
+      const reindexWarning = warnSpy.mock.calls.find((call) =>
+        String(call[1]).includes('points at an older collection'),
+      );
+      expect(reindexWarning).toBeDefined();
+      // A rolled-back deployment keeps working against whatever the alias points at.
+      expect(mockCreateCollection).not.toHaveBeenCalled();
+      expect(mockGetCollection).toHaveBeenCalledWith('cognivault_v1');
+      expect(app.createTenantQdrant).toBeDefined();
+
+      await app.close();
+    });
+  });
+
+  describe('existing collection schema', () => {
+    async function expectStartupError(pattern: RegExp): Promise<void> {
+      mockCreatePayloadIndex.mockResolvedValue({});
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+      const app = Fastify({ logger: false });
+      // NOT awaited — see the comment in the alias-conflict test.
+      void app.register(qdrantPlugin);
+      await expect(app.ready()).rejects.toThrow(pattern);
+      await app.close();
+    }
+
+    beforeEach(() => {
+      provisioned();
+    });
+
+    it('refuses to start on the legacy UNNAMED vector schema', async () => {
+      mockGetCollection.mockResolvedValue({
+        config: { params: { vectors: { size: 1536, distance: 'Cosine' } } },
+      });
+
+      await expectStartupError(/legacy UNNAMED vector schema/);
+    });
+
+    it('refuses to start when the named "dense" vector is missing', async () => {
+      mockGetCollection.mockResolvedValue({
+        config: { params: { vectors: { embedding: { size: 1536, distance: 'Cosine' } } } },
+      });
+
+      await expectStartupError(/has no "dense" vector/);
+    });
+
+    it('refuses to start when the dense vector size does not match the provider', async () => {
+      mockGetCollection.mockResolvedValue({
+        config: {
+          params: {
+            vectors: { dense: { size: 1024, distance: 'Cosine' } },
+            sparse_vectors: { bm25: { modifier: 'idf' } },
+          },
+        },
+      });
+
+      await expectStartupError(/has vector size 1024, but the active embedding provider/);
+    });
+
+    it('warns but starts when the sparse bm25 vector is missing', async () => {
+      mockGetCollection.mockResolvedValue({
+        config: { params: { vectors: { dense: { size: 1536, distance: 'Cosine' } } } },
+      });
+      mockCreatePayloadIndex.mockResolvedValue({});
+
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+      const app = Fastify({ logger: false });
+      const warnSpy = vi.spyOn(app.log, 'warn');
+
+      await app.register(qdrantPlugin);
+      await app.ready();
+
+      const sparseWarning = warnSpy.mock.calls.find((call) =>
+        String(call[1]).includes('sparse vector'),
+      );
+      expect(sparseWarning).toBeDefined();
+      expect(app.createTenantQdrant).toBeDefined();
+
+      await app.close();
+    });
+  });
+
+  describe('quantization', () => {
+    /** Re-import the plugin so `config.ts` re-reads QDRANT_QUANTIZATION. */
+    async function bootWithQuantization(value: string | undefined): Promise<FastifyInstance> {
+      if (value === undefined) {
+        delete process.env.QDRANT_QUANTIZATION;
+      } else {
+        process.env.QDRANT_QUANTIZATION = value;
+      }
+      emptyCluster();
+      mockCreatePayloadIndex.mockResolvedValue({});
+
+      vi.resetModules();
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+      const app = Fastify({ logger: false });
+      await app.register(qdrantPlugin);
+      await app.ready();
+      return app;
+    }
+
+    afterEach(() => {
+      delete process.env.QDRANT_QUANTIZATION;
+    });
+
+    it('is off by default — the external database decides', async () => {
+      const app = await bootWithQuantization(undefined);
+
+      expect(createdSchema()).not.toHaveProperty('quantization_config');
+
+      await app.close();
+    });
+
+    it('adds a scalar int8 quantization config when QDRANT_QUANTIZATION=true', async () => {
+      const app = await bootWithQuantization('true');
+
+      expect(createdSchema()).toMatchObject({
+        quantization_config: { scalar: { type: 'int8', quantile: 0.99, always_ram: true } },
+      });
+
+      await app.close();
+    });
+  });
+
   describe('payload index error handling', () => {
     it('logs an error and still starts when index creation fails for a real reason', async () => {
-      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      provisioned();
       mockCreatePayloadIndex.mockRejectedValue(new Error('Connection refused'));
 
       const Fastify = (await import('fastify')).default;
@@ -305,7 +569,7 @@ describe('qdrantPlugin', () => {
     });
 
     it('stays silent when the index already exists', async () => {
-      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      provisioned();
       mockCreatePayloadIndex.mockRejectedValue(
         new Error('Index already exists for field "user_id"'),
       );
@@ -325,7 +589,7 @@ describe('qdrantPlugin', () => {
     });
 
     it('stays silent when the server answers 409 Conflict', async () => {
-      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      provisioned();
       mockCreatePayloadIndex.mockRejectedValue(
         Object.assign(new Error('Conflict'), { status: 409 }),
       );
@@ -347,7 +611,7 @@ describe('qdrantPlugin', () => {
 
   describe('server version logging', () => {
     it('logs the server version on startup', async () => {
-      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      provisioned();
       mockCreatePayloadIndex.mockResolvedValue({});
 
       const Fastify = (await import('fastify')).default;
@@ -368,7 +632,7 @@ describe('qdrantPlugin', () => {
     });
 
     it('warns on major version skew but still starts', async () => {
-      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      provisioned();
       mockCreatePayloadIndex.mockResolvedValue({});
       mockVersionInfo.mockResolvedValue({ title: 'qdrant', version: '2.0.0' });
 
@@ -388,7 +652,7 @@ describe('qdrantPlugin', () => {
     });
 
     it('starts even when the version probe fails', async () => {
-      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      provisioned();
       mockCreatePayloadIndex.mockResolvedValue({});
       mockVersionInfo.mockRejectedValue(new Error('Connection refused'));
 
@@ -409,7 +673,7 @@ describe('qdrantPlugin', () => {
   });
 
   it('purges user vectors with wait: true', async () => {
-    mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+    provisioned();
     mockCreatePayloadIndex.mockResolvedValue({});
 
     const Fastify = (await import('fastify')).default;
@@ -422,7 +686,8 @@ describe('qdrantPlugin', () => {
     mockDelete.mockClear();
     await app.purgeUserVectors('user-42');
 
-    expect(mockDelete).toHaveBeenCalledWith('cognivault', {
+    // Runtime point traffic goes through the ALIAS, so a re-index can repoint it.
+    expect(mockDelete).toHaveBeenCalledWith(ALIAS, {
       wait: true,
       filter: { must: [{ key: 'user_id', match: { value: 'user-42' } }] },
     });
@@ -500,7 +765,7 @@ describe('qdrantPlugin', () => {
     }
 
     beforeEach(() => {
-      mockGetCollections.mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+      provisioned();
       mockCreatePayloadIndex.mockResolvedValue({});
       mockGetToken.mockResolvedValue(TOKEN);
       mockExpiresAt = Date.now() + 3_600_000;

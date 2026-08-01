@@ -18,9 +18,19 @@ vi.mock('openai', () => {
 // Mock Qdrant client to avoid connection to localhost:6333 during plugin init
 vi.mock('@qdrant/js-client-rest', () => {
   class MockQdrantClient {
-    getCollections = vi.fn().mockResolvedValue({ collections: [{ name: 'cognivault' }] });
+    // `cognivault` is an ALIAS on top of the physical collection since the hybrid rework.
+    getCollections = vi.fn().mockResolvedValue({ collections: [{ name: 'cognivault_v2' }] });
+    getAliases = vi.fn().mockResolvedValue({
+      aliases: [{ alias_name: 'cognivault', collection_name: 'cognivault_v2' }],
+    });
+    updateCollectionAliases = vi.fn().mockResolvedValue(true);
     getCollection = vi.fn().mockResolvedValue({
-      config: { params: { vectors: { size: 1536, distance: 'Cosine' } } },
+      config: {
+        params: {
+          vectors: { dense: { size: 1536, distance: 'Cosine' } },
+          sparse_vectors: { bm25: { modifier: 'idf' } },
+        },
+      },
     });
     createCollection = vi.fn().mockResolvedValue({});
     createPayloadIndex = vi.fn().mockResolvedValue({});
