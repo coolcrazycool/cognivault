@@ -396,7 +396,12 @@ def _chunk_text(body: str, *, annotation: str, breadcrumb: str) -> str:
 
 
 def test_preview_drops_annotation_and_breadcrumb():
-    """Превью — про сам фрагмент, а не про документ целиком."""
+    """Тело превью — про сам фрагмент, а не про документ целиком.
+
+    Хлебная крошка из ТЕЛА вычищается, но возвращается одной строкой-идентичностью
+    «(Документ: …)» в начале: для почти одинаковых страниц-сиблингов она —
+    единственный различитель.
+    """
     frag = {
         "section_path": "Регламент > Сертификаты",
         "text": _chunk_text(
@@ -410,8 +415,10 @@ def test_preview_drops_annotation_and_breadcrumb():
 
     assert "Аннотация документа" not in preview
     assert "порядок выпуска сертификатов" not in preview
-    assert not preview.startswith("Регламент > Сертификаты")
-    assert preview.startswith("тело фрагмента про отзыв сертификата")
+    assert preview == (
+        "(Документ: Регламент > Сертификаты) "
+        "тело фрагмента про отзыв сертификата"
+    )
 
 
 def test_previews_of_one_document_differ():
@@ -453,6 +460,206 @@ def test_preview_falls_back_when_stripping_empties_the_chunk():
     """Чанк из одной аннотации — лучше показать её, чем пустую строку."""
     text = "Аннотация документа: только аннотация и ничего больше"
     assert rag_pipeline._preview({"section_path": "", "text": text}) == text
+
+
+# --------------------------------------------------------------------------- #
+# Строка-идентичность «(Документ: …)»
+# --------------------------------------------------------------------------- #
+
+
+def test_identity_prefers_breadcrumb_that_already_starts_with_title():
+    """Крошка чанкера начинается с заголовка — второй раз он не повторяется."""
+    frag = {
+        "title": "Регламент",
+        "path": "wiki/Регламент.md",
+        "section_path": "Регламент > Сертификаты",
+    }
+    assert rag_pipeline._identity(frag) == "Регламент > Сертификаты"
+
+
+def test_identity_prepends_title_when_breadcrumb_lacks_it():
+    frag = {
+        "title": "Данные о правилах по каналу СБОЛ",
+        "path": "wiki/sbol.md",
+        "section_path": "Структура таблицы",
+    }
+    assert (
+        rag_pipeline._identity(frag)
+        == "Данные о правилах по каналу СБОЛ > Структура таблицы"
+    )
+
+
+def test_identity_falls_back_to_path_stem():
+    frag = {"title": "", "path": "wiki/afpc_sss_inc.cards_event.md", "section_path": ""}
+    assert rag_pipeline._identity(frag) == "afpc_sss_inc.cards_event"
+
+
+def test_identity_is_capped_but_keeps_both_ends():
+    """Глубокая крошка Confluence (200+ символов) не раздувает промпт ×40."""
+    crumb = "Заголовок страницы > " + " > ".join(f"Раздел {i}" for i in range(30))
+    frag = {"title": "Заголовок страницы", "path": "a.md", "section_path": crumb}
+
+    identity = rag_pipeline._identity(frag)
+
+    assert len(identity) <= rag_pipeline._IDENTITY_MAX_CHARS
+    assert identity.startswith("Заголовок страницы")  # голова — название
+    assert identity.endswith("Раздел 29")  # хвост — самый вложенный раздел
+    assert rag_pipeline._PREVIEW_GAP.strip() in identity
+
+
+def test_identity_absent_leaves_preview_bare():
+    """Совсем без идентичности (легаси-фикстуры) — превью без пометки."""
+    preview = rag_pipeline._preview({"section_path": "", "text": "просто текст"})
+    assert preview == "просто текст"
+
+
+def test_previews_of_duplicate_bodies_differ_by_identity():
+    """Байт-в-байт одинаковые тела страниц-сиблингов различимы для судьи.
+
+    Это сценарий, ради которого строка-идентичность существует: 8% корпуса —
+    почти дословные копии, различающиеся только названием страницы.
+    """
+    body = "Витрина содержит данные о сработавших правилах." * 5
+    frags = [
+        {
+            "title": f"Данные по каналу {channel}",
+            "path": f"wiki/{channel}.md",
+            "section_path": f"Данные по каналу {channel} > Описание",
+            "text": body,
+        }
+        for channel in ("Карты", "ДБО")
+    ]
+
+    a, b = (rag_pipeline._preview(f) for f in frags)
+    assert a != b
+    assert "Карты" in a and "ДБО" in b
+    # Тела при этом одинаковы — различие только в пометке.
+    assert a.split(") ", 1)[1] == b.split(") ", 1)[1]
+
+
+def test_grade_prompt_explains_the_identity_line(monkeypatch):
+    """Промпт говорит судье, что это за пометка, — иначе название может
+    перевесить содержимое."""
+    calls = _install_complete_json(monkeypatch, lambda p: {"grades": []})
+
+    asyncio.run(rag_pipeline.grade("вопрос", [_frag(1)], {}, {}))
+
+    prompt = calls[0]
+    assert "«(Документ: …)»" in prompt
+    assert "релевантность оценивай по содержимому" in prompt
+    assert "(Документ: Документ 1)" in prompt
+
+
+# --------------------------------------------------------------------------- #
+# Превью табличных чанков (content_kind == 'table_rows')
+# --------------------------------------------------------------------------- #
+
+_TABLE_BODY = (
+    "Регламент > Таблица: витрина событий\n\n"
+    "| канал | tablename | описание |\n"
+    "| --- | --- | --- |\n"
+    "| Карты | afpc_sss_inc.cards_event | события по картам |\n"
+    "| ДБО | afpc_sss_inc.uko_event | события по ДБО |\n"
+    "| СБОЛ | afpc_sss_inc.sbol_event | события по СБОЛ |\n"
+)
+
+
+def _table_frag(**overrides) -> dict:
+    frag = {
+        "title": "Регламент",
+        "path": "wiki/Регламент.md",
+        "section_path": "Регламент",
+        "content_kind": "table_rows",
+        "text": _TABLE_BODY,
+    }
+    frag.update(overrides)
+    return frag
+
+
+def test_table_preview_keeps_header_and_matching_rows_only():
+    preview = rag_pipeline._preview(_table_frag(), "какая витрина по каналу ДБО")
+
+    lines = preview.splitlines()
+    assert lines[0].startswith("(Документ: Регламент) | канал | tablename |")
+    assert any("uko_event" in ln for ln in lines[1:])
+    # Несовпавшие строки и разделитель в превью не попадают.
+    assert "cards_event" not in preview
+    assert "sbol_event" not in preview
+    assert "| --- |" not in preview
+
+
+def test_table_preview_matches_inflected_query_terms():
+    """«каналу» в вопросе находит строку со словом «канал» (усечение хвоста)."""
+    body = (
+        "| канал | значение |\n| --- | --- |\n"
+        "| основной канал | 42 |\n| резерв | 7 |\n"
+    )
+    preview = rag_pipeline._preview(
+        _table_frag(text=body), "что известно про основному каналу"
+    )
+
+    assert "основной канал" in preview
+    assert "резерв" not in preview
+
+
+def test_table_preview_continuation_lines_cannot_masquerade_as_items():
+    """Все строки после первой начинаются с «|» — маркер [N] не подделать."""
+    preview = rag_pipeline._preview(_table_frag(), "какая витрина по каналу ДБО")
+    for line in preview.splitlines()[1:]:
+        assert line.startswith("|")
+
+
+def test_table_preview_falls_back_when_no_row_matches():
+    fallback = rag_pipeline._preview(_table_frag(), "ничего общего")
+    plain = rag_pipeline._preview(
+        _table_frag(content_kind=""), "ничего общего"
+    )
+    assert fallback == plain
+    assert rag_pipeline._PREVIEW_GAP not in fallback  # короткая таблица целиком
+
+
+def test_table_preview_ignored_without_content_kind():
+    """Старый бэкенд/semantic-фолбэк не шлют content_kind — поведение прежнее."""
+    frag = _table_frag()
+    frag.pop("content_kind")
+    query = "какая витрина по каналу ДБО"
+    assert rag_pipeline._preview(frag, query) == (
+        rag_pipeline._preview(_table_frag(content_kind=""), query)
+    )
+
+
+def test_table_preview_respects_the_char_budget():
+    wide_row = "| Карты | " + "х" * 200 + " |"
+    rows = "\n".join(wide_row for _ in range(20))
+    body = f"| канал | данные |\n| --- | --- |\n{rows}\n"
+
+    preview = rag_pipeline._preview(_table_frag(text=body), "карты")
+
+    body_part = preview.split(") ", 1)[1]
+    assert len(body_part) <= rag_pipeline._CHUNK_PREVIEW_CHARS
+    assert body_part.count("Карты") >= 1
+
+
+def test_table_preview_falls_back_when_header_leaves_no_room():
+    """Ни одна совпавшая строка не влезает рядом с широченной шапкой."""
+    header = "| " + " | ".join("колонка" * 3 for _ in range(30)) + " |"
+    body = f"{header}\n| --- |\n| Карты | 1 |\n"
+
+    preview = rag_pipeline._preview(_table_frag(text=body), "карты")
+
+    # Фолбэк на голову+хвост, а не шапка без единой строки данных.
+    assert preview == rag_pipeline._preview(
+        _table_frag(text=body, content_kind=""), "карты"
+    )
+
+
+def test_query_needles_drop_short_words_and_stem_long_ones():
+    needles = rag_pipeline._query_needles("Как настроить каналы по ЕФС?")
+    assert "по" not in needles
+    assert "ефс" in needles  # короткое слово — как есть
+    assert "кана" in needles  # «каналы» усечены на два символа
+    assert "настрои" in needles
+    assert "каналы" not in needles
 
 
 def test_grade_clamps_and_ignores_unknown_ids(monkeypatch):
@@ -819,6 +1026,38 @@ def test_grades_reach_sources_and_candidates(monkeypatch):
     assert ctx.candidates[0] == {
         "path": "doc1.md", "chunk_index": 1, "score": 0.99, "rank": 1
     }
+
+
+def test_content_kind_flows_from_search_to_grader_preview(monkeypatch):
+    """`content_kind` из ответа поиска доходит до превью грейдера.
+
+    Табличный чанк показывается судье шапкой + совпавшими строками, а не
+    головой и хвостом (где совпавшая строка обычно в вырезанной середине).
+    """
+    hit = _frag(1)
+    hit["content_kind"] = "table_rows"
+    hit["text"] = (
+        "| канал | tablename |\n| --- | --- |\n"
+        "| ДБО | afpc_sss_inc.uko_event |\n"
+        "| Карты | afpc_sss_inc.cards_event |"
+    )
+    _install_retrieval(monkeypatch, [hit])
+
+    def handler(prompt):
+        if _is_condense(prompt):
+            return {
+                "intent": "kb_question",
+                "standalone_question": "витрина событий ДБО",
+            }
+        return {"grades": [{"id": 1, "score": 5}]}
+
+    calls = _install_complete_json(monkeypatch, handler)
+
+    _build("а какая витрина событий у ДБО?", _history())
+
+    grade_prompt = next(p for p in calls if not _is_condense(p))
+    assert "uko_event" in grade_prompt
+    assert "cards_event" not in grade_prompt, "несовпавшая строка попала в превью"
 
 
 def test_grader_failure_keeps_previous_behaviour(monkeypatch):

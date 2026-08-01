@@ -45,6 +45,12 @@ export const SearchResultSchema = Type.Object({
   // Identifier of the section this chunk belongs to; "" for formats without sections
   // (pdf/csv/canvas/excalidraw) and for points indexed before parent tracking existed.
   parent_id: Type.String(),
+  // Shape of the chunk's text as stamped by the indexer: 'text', 'table_rows' (header row
+  // plus data rows) or 'table_summary'. Open string, not an enum, so future kinds are not
+  // a breaking schema change. Always present in responses ('text' when the payload
+  // predates the field); Optional only so existing consumers of the Static type that
+  // build SearchResult values do not have to declare it.
+  content_kind: Type.Optional(Type.String()),
   // Full text of that section, only filled when the request asked for group_by_section.
   section_text: Type.String(),
   // 1-based position of this result in the returned list

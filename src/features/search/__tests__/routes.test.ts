@@ -487,6 +487,8 @@ describe('search routes', () => {
       expect(first.section_text).toBe('');
       // chunk_index defaults to 0 when the payload has none; rank is 1-based
       expect(first.chunk_index).toBe(0);
+      // content_kind defaults to 'text' when the payload predates the field
+      expect(first.content_kind).toBe('text');
       expect(body.results.map((r: { rank: number }) => r.rank)).toEqual([1, 2]);
     });
 
@@ -874,6 +876,59 @@ describe('search routes', () => {
         expect(result.score).toBeGreaterThanOrEqual(0);
         expect(result.score).toBeLessThanOrEqual(1);
       }
+    });
+
+    it('propagates content_kind from the payload and defaults absent ones to text', async () => {
+      mockQdrantQuery.mockResolvedValueOnce({
+        points: [
+          {
+            id: 'uuid-k1',
+            score: 0.033,
+            payload: {
+              text: '| id | name |\n| --- | --- |\n| 1 | a |',
+              path: 'notes/table.md',
+              title: 'table',
+              section_path: 'table > rows',
+              chunk_index: 0,
+              content_kind: 'table_rows',
+              tags: [],
+              project: null,
+              status: null,
+              type: null,
+            },
+          },
+          {
+            id: 'uuid-k2',
+            score: 0.02,
+            payload: {
+              // Indexed before content_kind existed: the field is simply absent.
+              text: 'plain prose chunk',
+              path: 'notes/prose.md',
+              title: 'prose',
+              section_path: 'prose > intro',
+              chunk_index: 0,
+              tags: [],
+              project: null,
+              status: null,
+              type: null,
+            },
+          },
+        ],
+      });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'table' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.results.map((r: { content_kind: string }) => r.content_kind)).toEqual([
+        'table_rows',
+        'text',
+      ]);
     });
 
     it('keeps multiple chunks of the same file (dedup key is path + chunk_index)', async () => {

@@ -19,6 +19,7 @@ interface QdrantPayload {
   section_path?: string;
   chunk_index?: number;
   parent_id?: string | null;
+  content_kind?: string;
   tags?: string[];
   project?: string | null;
   status?: string | null;
@@ -542,6 +543,9 @@ export class SearchService {
       type: typeof payload.type === 'string' ? payload.type : null,
       chunk_index: typeof payload.chunk_index === 'number' ? payload.chunk_index : 0,
       parent_id: typeof payload.parent_id === 'string' ? payload.parent_id : '',
+      // 'text' mirrors the indexer's own default (`chunk.contentKind ?? 'text'`), so a
+      // point indexed before the field existed reads the same as a plain prose chunk.
+      content_kind: typeof payload.content_kind === 'string' ? payload.content_kind : 'text',
       section_text: sectionText,
       rank,
     };

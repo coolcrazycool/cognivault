@@ -185,6 +185,11 @@ def _norm_semantic(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     with ``group_by_section=True``; both default to the empty string so the
     semantic fallback (and any older backend) normalises without a KeyError and
     simply degrades to bare chunk text downstream.
+
+    ``content_kind`` (``'text'`` / ``'table_rows'`` / …) lets the grader preview
+    treat tabular chunks differently; an older backend does not send it and the
+    empty string means "unknown" — every consumer must degrade to the plain-text
+    behaviour then.
     """
     out: list[dict[str, Any]] = []
     for r in results:
@@ -199,6 +204,7 @@ def _norm_semantic(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "rank": r.get("rank"),
                 "section_text": r.get("section_text") or "",
                 "parent_id": r.get("parent_id") or "",
+                "content_kind": r.get("content_kind") or "",
             }
         )
     return out
