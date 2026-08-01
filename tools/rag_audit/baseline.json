@@ -1,22 +1,36 @@
 {
   "tool": "cognivault-rag-audit/audit_all",
   "format_version": 1,
-  "created_utc": "2026-08-01T18:08:29+00:00",
-  "label": "e28c1cc",
+  "created_utc": "2026-08-01T18:43:28+00:00",
+  "label": "defects-D2-D8",
   "provenance": {
-    "commit": "e28c1cc",
+    "commit": "356d166",
     "dirty": true,
     "dirty_files": [
-      "ools/eval/README.md",
-      "tools/eval/golden.categories.json",
+      "README.md",
+      "cognivault-ui/README.md",
+      "cognivault-ui/app/config.py",
+      "cognivault-ui/app/corpus_map.py",
+      "cognivault-ui/app/rag.py",
+      "cognivault-ui/app/rag_log.py",
+      "cognivault-ui/app/rag_pipeline.py",
+      "cognivault-ui/app/routes/chat_routes.py",
+      "cognivault-ui/app/settings.py",
+      "cognivault-ui/static/app.js",
+      "cognivault-ui/static/index.html",
+      "cognivault-ui/tests/test_corpus_map.py",
+      "cognivault-ui/tests/test_feedback.py",
+      "cognivault-ui/tests/test_rag_pipeline.py",
+      "src/features/catalog/__tests__/service.test.ts",
+      "src/features/catalog/schemas.ts",
+      "src/features/catalog/service.ts",
+      "src/lib/__tests__/indexer.test.ts",
+      "src/lib/indexer.ts",
       "tools/eval/golden.corpus.jsonl",
-      "tools/eval/golden.jsonl",
-      "tools/eval/run.py",
-      "tools/eval/tests/test_run.py",
-      "tools/rag_audit/README.md",
-      "tools/rag_audit/tests/test_golden_shape.py",
-      "tools/rag_audit/tests/test_xlsx_to_golden.py",
-      "tools/rag_audit/xlsx_to_golden.py"
+      "tools/rag_audit/audit_all.py",
+      "tools/rag_audit/scorecard.py",
+      "tools/rag_audit/tests/test_scorecard.py",
+      "tools/rag_audit/thresholds.json"
     ],
     "dump": {
       "name": "confluence-dump.zip",
@@ -33,7 +47,7 @@
       {
         "name": "golden.corpus.jsonl",
         "path": "tools/eval/golden.corpus.jsonl",
-        "sha256": "a04c21522893a44f353643f857346663e91387ce478ec08ec63a58c3b90adda1",
+        "sha256": "530c54039fe3d1be46b8f3034503da4f2369485bab81458dd7131586d3d43f36",
         "rows": 212
       }
     ],
@@ -123,6 +137,14 @@
       "value": 0.905,
       "n": 160
     },
+    "retrieval.hit1.authored": {
+      "value": 0.6667,
+      "n": 6
+    },
+    "retrieval.mrr.authored": {
+      "value": 0.8056,
+      "n": 6
+    },
     "window.contained.customer": {
       "value": 0.9286,
       "n": 28
@@ -130,6 +152,10 @@
     "window.contained.generated": {
       "value": 0.9281,
       "n": 153
+    },
+    "window.contained.authored": {
+      "value": 1.0,
+      "n": 5
     },
     "window.contained.oversized": {
       "value": 0.8143,
@@ -152,7 +178,8 @@
     "chunk.parent_id_collisions": 0,
     "window.anchor_failures": 0,
     "retrieval.unretrieved.customer": 0,
-    "retrieval.unretrieved.generated": 0
+    "retrieval.unretrieved.generated": 0,
+    "retrieval.unretrieved.authored": 0
   },
   "context": {
     "pages": 127,
@@ -175,8 +202,11 @@
     "retrieval.hit1.generated": 0.8375,
     "retrieval.mrr.customer": 0.7958,
     "retrieval.mrr.generated": 0.8987,
+    "retrieval.hit1.authored": 0.5,
+    "retrieval.mrr.authored": 0.6389,
     "window.contained.customer": 0.8929,
     "window.contained.generated": 0.9216,
+    "window.contained.authored": 0.8,
     "window.contained.oversized": 0.8
   },
   "comparison": {
@@ -192,7 +222,7 @@
       ]
     },
     "warnings": [
-      "рабочее дерево грязное — прогон не привязан к коммиту: ools/eval/README.md, tools/eval/golden.categories.json, tools/eval/golden.corpus.jsonl, tools/eval/golden.jsonl, tools/eval/run.py, tools/eval/tests/test_run.py, tools/rag_audit/README.md, tools/rag_audit/tests/test_golden_shape.py, tools/rag_audit/tests/test_xlsx_to_golden.py, tools/rag_audit/xlsx_to_golden.py"
+      "рабочее дерево грязное — прогон не привязан к коммиту: README.md, cognivault-ui/README.md, cognivault-ui/app/config.py, cognivault-ui/app/corpus_map.py, cognivault-ui/app/rag.py, cognivault-ui/app/rag_log.py, cognivault-ui/app/rag_pipeline.py, cognivault-ui/app/routes/chat_routes.py, cognivault-ui/app/settings.py, cognivault-ui/static/app.js, cognivault-ui/static/index.html, cognivault-ui/tests/test_corpus_map.py, cognivault-ui/tests/test_feedback.py, cognivault-ui/tests/test_rag_pipeline.py, src/features/catalog/__tests__/service.test.ts, src/features/catalog/schemas.ts, src/features/catalog/service.ts, src/lib/__tests__/indexer.test.ts, src/lib/indexer.ts, tools/eval/golden.corpus.jsonl, tools/rag_audit/audit_all.py, tools/rag_audit/scorecard.py, tools/rag_audit/tests/test_scorecard.py, tools/rag_audit/thresholds.json"
     ],
     "comparable": {
       "1": true,
@@ -202,9 +232,9 @@
     }
   },
   "baseline": {
-    "created_utc": "2026-08-01T15:21:48+00:00",
-    "commit": "ba0133b",
-    "label": "ba0133b"
+    "created_utc": "2026-08-01T18:08:29+00:00",
+    "commit": "e28c1cc",
+    "label": "e28c1cc"
   },
   "changes": {
     "metrics": {
@@ -262,10 +292,19 @@
       "retrieval.mrr.generated": {
         "verdict": "incomparable"
       },
+      "retrieval.hit1.authored": {
+        "verdict": "incomparable"
+      },
+      "retrieval.mrr.authored": {
+        "verdict": "incomparable"
+      },
       "window.contained.customer": {
         "verdict": "incomparable"
       },
       "window.contained.generated": {
+        "verdict": "incomparable"
+      },
+      "window.contained.authored": {
         "verdict": "incomparable"
       },
       "window.contained.oversized": {
@@ -279,15 +318,15 @@
     "стык 4 (выдача → окно раздела (cap 4000, центрирование)): золотой набор другой (состав файлов или их содержимое) — метрика двигалась бы вместе с разметкой, а не с качеством"
   ],
   "warnings": [
-    "рабочее дерево грязное — прогон не привязан к коммиту: ools/eval/README.md, tools/eval/golden.categories.json, tools/eval/golden.corpus.jsonl, tools/eval/golden.jsonl, tools/eval/run.py, tools/eval/tests/test_run.py, tools/rag_audit/README.md, tools/rag_audit/tests/test_golden_shape.py, tools/rag_audit/tests/test_xlsx_to_golden.py, tools/rag_audit/xlsx_to_golden.py"
+    "рабочее дерево грязное — прогон не привязан к коммиту: README.md, cognivault-ui/README.md, cognivault-ui/app/config.py, cognivault-ui/app/corpus_map.py, cognivault-ui/app/rag.py, cognivault-ui/app/rag_log.py, cognivault-ui/app/rag_pipeline.py, cognivault-ui/app/routes/chat_routes.py, cognivault-ui/app/settings.py, cognivault-ui/static/app.js, cognivault-ui/static/index.html, cognivault-ui/tests/test_corpus_map.py, cognivault-ui/tests/test_feedback.py, cognivault-ui/tests/test_rag_pipeline.py, src/features/catalog/__tests__/service.test.ts, src/features/catalog/schemas.ts, src/features/catalog/service.ts, src/lib/__tests__/indexer.test.ts, src/lib/indexer.ts, tools/eval/golden.corpus.jsonl, tools/rag_audit/audit_all.py, tools/rag_audit/scorecard.py, tools/rag_audit/tests/test_scorecard.py, tools/rag_audit/thresholds.json"
   ],
   "timing": {
-    "convert": 4.93,
-    "chunk": 6.61,
-    "sections": 3.96,
-    "retrieval": 2.54,
-    "window": 68.04,
-    "total_s": 86.08
+    "convert": 5.23,
+    "chunk": 7.48,
+    "sections": 4.42,
+    "retrieval": 2.86,
+    "window": 72.89,
+    "total_s": 92.88
   },
   "exit_code": 2,
   "per_query": {

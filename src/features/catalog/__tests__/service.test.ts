@@ -6,6 +6,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDatabase } from '../../../db/client.js';
 import type * as schema from '../../../db/schema.js';
 import { docSummaries, indexedFiles } from '../../../db/schema.js';
+import { DOCUMENT_EXTENSIONS, IMAGE_EXTENSIONS, INDEXED_EXTENSIONS } from '../../../lib/indexer.js';
 import type { SummaryAvailability } from '../service.js';
 import { catalogStatus, readCatalog, summaryAvailability } from '../service.js';
 
@@ -238,6 +239,53 @@ describe('readCatalog', () => {
       'table',
       '2025.q1',
     ]);
+  });
+
+  // ── One definition of "document" ──
+  //
+  // The corpus footprint in the UI used to count files on disk by its own extension
+  // allowlist, which included `txt` and `markdown` — two extensions the poller never
+  // scans. On an all-`.md` corpus the two totals happened to agree; a single `.txt` file
+  // would have made the footprint promise a document search can never return. These tests
+  // pin the shared definition so the divergence cannot come back silently.
+
+  it('serves the indexer’s own document extensions, images excluded', () => {
+    indexDoc(db, 'a.md');
+    const response = readCatalog(db, OPTIONS);
+
+    expect(response.document_extensions).toEqual([...DOCUMENT_EXTENSIONS]);
+    expect(response.document_extensions).toEqual(['md', 'pdf', 'canvas', 'excalidraw', 'csv']);
+    for (const image of IMAGE_EXTENSIONS) {
+      expect(response.document_extensions).not.toContain(image);
+    }
+  });
+
+  it('never advertises an extension the poller does not scan', () => {
+    indexDoc(db, 'a.md');
+    const advertised = readCatalog(db, OPTIONS).document_extensions;
+
+    // The exact failure this closes: a footprint counting `.txt`/`.markdown` as documents.
+    expect(advertised).not.toContain('txt');
+    expect(advertised).not.toContain('markdown');
+    for (const ext of advertised) {
+      expect(INDEXED_EXTENSIONS as readonly string[]).toContain(ext);
+    }
+  });
+
+  it('counts exactly the extensions it advertises — images are the only exclusion', () => {
+    // `documentsOnly()` filters rows by file_type; `document_extensions` filters paths by
+    // extension. Same rule, two shapes: they must agree on every scanned extension.
+    for (const ext of INDEXED_EXTENSIONS) {
+      indexDoc(db, `file.${ext}`, {
+        fileType: (IMAGE_EXTENSIONS as readonly string[]).includes(ext) ? 'image' : ext,
+      });
+    }
+    const response = readCatalog(db, OPTIONS);
+
+    expect(response.total).toBe(DOCUMENT_EXTENSIONS.length);
+    expect(response.documents.map((d) => d.path).sort()).toEqual(
+      [...DOCUMENT_EXTENSIONS].map((ext) => `file.${ext}`).sort(),
+    );
   });
 
   it('reads only the database it is handed — one tenant never sees another', () => {

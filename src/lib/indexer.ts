@@ -62,7 +62,12 @@ interface IndexerEvents {
 const BATCH_SIZE = 100;
 const LOG_PROGRESS_EVERY = 500;
 
-const INDEXED_EXTENSIONS = [
+/**
+ * Every extension the poller picks up. A file whose extension is absent here is never
+ * scanned, never chunked and never embedded — search cannot return it under any
+ * configuration.
+ */
+export const INDEXED_EXTENSIONS = [
   'md',
   'pdf',
   'canvas',
@@ -77,7 +82,22 @@ const INDEXED_EXTENSIONS = [
   'bmp',
 ] as const;
 
-const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp']);
+export const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp'] as const;
+
+/**
+ * THE definition of "document" for this service: indexed, and not an image.
+ *
+ * Derived, never written out by hand. Anything that counts documents — the catalogue,
+ * and the UI's corpus footprint through it — must read this list rather than keep its
+ * own allowlist. Two hand-maintained lists is how a `.txt` file ends up counted in a
+ * footprint that promises documents search can never return; a footprint that lies about
+ * scale is the same defect as an answer that lies about content, moved one screen over.
+ */
+export const DOCUMENT_EXTENSIONS: readonly string[] = INDEXED_EXTENSIONS.filter(
+  (ext) => !(IMAGE_EXTENSIONS as readonly string[]).includes(ext),
+);
+
+const IMAGE_EXTS = new Set(IMAGE_EXTENSIONS.map((ext) => `.${ext}`));
 
 /**
  * indexed_files.mtime is an INTEGER column; fs.stat gives fractional milliseconds.

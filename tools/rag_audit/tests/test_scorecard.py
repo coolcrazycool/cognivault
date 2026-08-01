@@ -81,6 +81,14 @@ def make_reports() -> dict[str, dict]:
                             "hit_at": {"1": 0.84},
                             "mrr": 0.9,
                         },
+                        # Авторский срез мелкий НАМЕРЕННО: судятся только отвечаемые
+                        # строки класса corpus_scope, ловушки и метавопросы — нет.
+                        "authored": {
+                            "n": 6,
+                            "found": 6,
+                            "hit_at": {"1": 0.6667},
+                            "mrr": 0.8056,
+                        },
                     }
                 }
             }
@@ -92,6 +100,7 @@ def make_reports() -> dict[str, dict]:
                 "by_origin": {
                     "customer": {"contained": 0.9, "judged": 28},
                     "generated": {"contained": 0.92, "judged": 156},
+                    "authored": {"contained": 1.0, "judged": 5},
                 },
                 "oversized_only": {"contained": 0.8, "judged": 71},
             },
@@ -138,6 +147,9 @@ def make_thresholds(**overrides: float) -> dict:
         "window.contained.customer": 0.85,
         "window.contained.generated": 0.91,
         "window.contained.oversized": 0.78,
+        "retrieval.hit1.authored": 0.5,
+        "retrieval.mrr.authored": 0.6389,
+        "window.contained.authored": 0.8,
     }
     base.update(overrides)
     return {"metrics": {key: {"threshold": value} for key, value in base.items()}}
@@ -237,8 +249,41 @@ def test_quantum_is_zero_for_deterministic_metrics():
 def test_quantum_differs_per_origin():
     customer = sc.METRICS_BY_KEY["retrieval.hit1.customer"]
     generated = sc.METRICS_BY_KEY["retrieval.hit1.generated"]
+    authored = sc.METRICS_BY_KEY["retrieval.hit1.authored"]
     assert sc.quantum(customer, sc.Measurement(0.75, 28)) == 0.0357
     assert sc.quantum(generated, sc.Measurement(0.84, 160)) == 0.0063
+    # Авторский срез — 6 судимых строк. Квант в четыре с половиной раза грубее
+    # приёмочного, и линейка обязана говорить это числом, а не молчать.
+    assert sc.quantum(authored, sc.Measurement(0.6667, 6)) == 0.1667
+
+
+def test_authored_slice_is_coarse_and_says_so():
+    """Сдвиг в один приёмочный вопрос на авторском срезе — всё ещё шум.
+
+    Не дефект, а честная разрешающая способность: класс из шести судимых строк
+    ловит ПРОПАДАНИЕ, а не настройку. Тест держит это свойство явным, чтобы
+    порог 0.5 не прочитали как заниженную планку.
+    """
+    entry = sc.classify(
+        sc.METRICS_BY_KEY["retrieval.hit1.authored"],
+        sc.Measurement(0.5, 6),
+        sc.Measurement(0.6667, 6),
+    )
+    assert entry["verdict"] == sc.NOISE
+    # А выпадение двух из шести — уже не шум.
+    worse = sc.classify(
+        sc.METRICS_BY_KEY["retrieval.hit1.authored"],
+        sc.Measurement(0.3333, 6),
+        sc.Measurement(0.6667, 6),
+    )
+    assert worse["verdict"] == sc.WORSE
+
+
+def test_every_origin_with_a_metric_also_has_a_tripwire():
+    """Разрез, чьё качество меряют, обязан иметь и сигнализацию «вопрос не найден вовсе»."""
+    metric_origins = {m.origin for m in sc.METRICS if m.stage == 3}
+    wire_origins = {t.key.rsplit(".", 1)[1] for t in sc.TRIPWIRES if t.key.startswith("retrieval.")}
+    assert metric_origins == wire_origins == set(sc.ORIGINS)
 
 
 def test_one_question_is_noise_on_customer_and_change_on_generated():

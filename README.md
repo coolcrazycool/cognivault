@@ -232,6 +232,38 @@ curl -X POST http://localhost:3030/api/vault/context \
 
 `min_score` is compared against the semantic (cosine) score this endpoint produces.
 
+### Catalogue
+
+One row per indexed document — path, title, and the annotation the indexer cached for it:
+
+```bash
+curl "http://localhost:3030/api/catalog?limit=500&offset=0" \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+An empty `documents` array has four distinct causes; read `status` (`ok`, `empty_vault`,
+`summaries_disabled`, `summaries_pending`) before concluding anything about the corpus.
+Only `empty_vault` means the corpus itself is empty.
+
+**"Document" means retrievable, and it is defined in exactly one place.** The response
+carries `document_extensions`, served from `DOCUMENT_EXTENSIONS` in `src/lib/indexer.ts` —
+the list the poller scans by, minus images. It is the answer to "what counts as a
+document", and it is authoritative because it is *derived from* the scanning list rather
+than restated next to it.
+
+Any client that counts, sizes or summarises the corpus MUST use one of these two, and no
+third rule of its own:
+
+1. count `total` from `GET /api/catalog` (rows the index actually has), **or**
+2. walk `GET /api/vault/files` and keep only files whose extension is in
+   `document_extensions` from the same response.
+
+A hard-coded extension allowlist in a client is a defect even while it happens to agree.
+A file whose extension is outside `document_extensions` — `.txt` and `.markdown` are the
+near misses — is never scanned, never chunked and never embedded, so counting it promises
+a document that search can never return. That is the same lie as a wrong answer, moved
+into the part of the UI a reader trusts to describe scale.
+
 ### Vault Operations
 
 ```bash

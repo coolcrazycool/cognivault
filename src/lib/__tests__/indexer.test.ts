@@ -4,7 +4,12 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDatabase } from '../../db/client.js';
 import type { FileChangeEvent } from '../indexer.js';
-import { VaultIndexer } from '../indexer.js';
+import {
+  DOCUMENT_EXTENSIONS,
+  IMAGE_EXTENSIONS,
+  INDEXED_EXTENSIONS,
+  VaultIndexer,
+} from '../indexer.js';
 
 // Records every fs.readFile the indexer performs, so the mtime/size pretest can be
 // asserted directly ("this file was never opened"). The real implementation still runs.
@@ -161,6 +166,37 @@ function waitForChanges(
     });
   });
 }
+
+describe('document extensions', () => {
+  // "Document" has to mean ONE thing across the service. It is defined here — the list the
+  // poller scans by, minus images — and served to clients through the catalogue's
+  // `document_extensions`. A second, hand-written allowlist anywhere else is the defect:
+  // it counts files that are never indexed, and promises documents search cannot return.
+
+  it('is the scanned set minus images, with nothing left over', () => {
+    expect([...DOCUMENT_EXTENSIONS, ...IMAGE_EXTENSIONS].sort()).toEqual(
+      [...INDEXED_EXTENSIONS].sort(),
+    );
+    expect(new Set(DOCUMENT_EXTENSIONS).size).toBe(DOCUMENT_EXTENSIONS.length);
+  });
+
+  it('contains no extension the poller does not scan', () => {
+    for (const ext of DOCUMENT_EXTENSIONS) {
+      expect(INDEXED_EXTENSIONS as readonly string[]).toContain(ext);
+    }
+    // Named because they were counted as documents by the UI footprint while the indexer
+    // ignored them entirely — the exact divergence this constant closes.
+    expect(DOCUMENT_EXTENSIONS).not.toContain('txt');
+    expect(DOCUMENT_EXTENSIONS).not.toContain('markdown');
+  });
+
+  it('is stated lower-case and without a leading dot, the way scanning uses it', () => {
+    for (const ext of INDEXED_EXTENSIONS) {
+      expect(ext).toBe(ext.toLowerCase());
+      expect(ext.startsWith('.')).toBe(false);
+    }
+  });
+});
 
 describe('VaultIndexer', () => {
   let tmpDir: string;

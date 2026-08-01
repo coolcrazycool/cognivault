@@ -79,13 +79,40 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _git(*args: str) -> str:
+def _git(*args: str, strip: bool = True) -> str:
+    """Вывод git как есть.
+
+    `strip=False` обязателен для `status --porcelain`: там первые два символа —
+    это КОД состояния (`' M'`, `'M '`, `'??'`), и у самой первой строки первый
+    символ бывает пробелом. `.strip()` его съедал, разбор `line[3:]` уезжал на
+    символ, и в провенансе оказывалось `ools/eval/README.md` — но только у первой
+    строки, отчего ошибка и жила незамеченной.
+    """
     try:
-        return subprocess.run(
+        out = subprocess.run(
             ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, check=True
-        ).stdout.strip()
+        ).stdout
     except (OSError, subprocess.CalledProcessError):
         return ""
+    return out.strip() if strip else out
+
+
+def parse_porcelain(porcelain: str) -> list[str]:
+    """Пути из `git status --porcelain`, отсортированные.
+
+    Формат строки — `XY<пробел>ПУТЬ`, то есть путь начинается ровно с третьего
+    символа. Переименование приезжает как `ПУТЬ -> ПУТЬ`; берётся сторона
+    НАЗНАЧЕНИЯ — она и лежит в рабочем дереве, которым сделан прогон.
+    """
+    paths: list[str] = []
+    for line in porcelain.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:]
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        paths.append(path.strip('"'))
+    return sorted(paths)
 
 
 def _count_lines(path: Path) -> int:
@@ -230,8 +257,8 @@ def run_pipeline(args: argparse.Namespace, run_dir: Path) -> dict[str, float]:
 def build_provenance(args: argparse.Namespace, reports: Mapping[str, Any]) -> dict[str, Any]:
     retrieval = reports["retrieval"]
     window = reports["window"]
-    dirty_files = sorted(
-        line[3:] for line in _git("status", "--porcelain", "--untracked-files=no").splitlines()
+    dirty_files = parse_porcelain(
+        _git("status", "--porcelain", "--untracked-files=no", strip=False)
     )
     return {
         "commit": _git("rev-parse", "--short", "HEAD") or "?",

@@ -120,6 +120,16 @@ export const CatalogResponseSchema = Type.Object(
         'How many of `total` carry an annotation — counted over the whole index, not over ' +
         'the returned page, so it is comparable with `total` regardless of paging.',
     }),
+    document_extensions: Type.Array(Type.String(), {
+      description:
+        'THE definition of "document" for this service: the extensions the indexer picks ' +
+        'up, minus images. Served from `DOCUMENT_EXTENSIONS` in `src/lib/indexer.ts`, the ' +
+        'same constant the poller scans by — so it cannot drift from what is actually ' +
+        'indexed. A client that counts documents by walking the filesystem ' +
+        '(`GET /api/vault/files`) MUST filter by this list rather than keep its own ' +
+        'allowlist: a file with any other extension is never indexed, and counting it ' +
+        'promises a document that search can never return. Lower-case, no leading dot.',
+    }),
   },
   {
     description:

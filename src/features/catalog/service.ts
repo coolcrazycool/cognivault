@@ -3,6 +3,7 @@ import { count, eq, isNull, ne, or, type SQL } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import type * as schema from '../../db/schema.js';
 import { docSummaries, indexedFiles } from '../../db/schema.js';
+import { DOCUMENT_EXTENSIONS } from '../../lib/indexer.js';
 import type { CatalogEntry, CatalogResponse, CatalogStatus } from './schemas.js';
 
 type UserDb = BetterSQLite3Database<typeof schema>;
@@ -61,6 +62,11 @@ export function summaryAvailability(support: SummarySupport): SummaryAvailabilit
  *
  * `file_type` is stamped by `fileTypeFromPath` in `src/lib/indexer.ts`; it is nullable
  * because rows written before the column existed have no value, and those are documents.
+ *
+ * The row-level filter and the extension list served as `document_extensions` are two
+ * views of ONE rule — a row exists only for a scanned extension, and `file_type` is
+ * `'image'` for exactly the image ones — which is why `DOCUMENT_EXTENSIONS` is derived
+ * there rather than restated here.
  */
 function documentsOnly(): SQL | undefined {
   return or(isNull(indexedFiles.fileType), ne(indexedFiles.fileType, 'image'));
@@ -141,6 +147,12 @@ export function readCatalog(db: UserDb, options: CatalogOptions): CatalogRespons
     total,
     offset: options.offset,
     documents_with_summary: documentsWithSummary,
+    // Served, not restated: `DOCUMENT_EXTENSIONS` is derived from the very list the
+    // poller scans by, so a caller that counts documents from the filesystem gets the
+    // same definition of "document" this catalogue counted `total` with. Two consumers,
+    // one constant — the divergence is closed by construction, not by two lists that
+    // happen to agree today.
+    document_extensions: [...DOCUMENT_EXTENSIONS],
   };
 }
 
