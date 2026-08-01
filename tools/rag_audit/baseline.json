@@ -1,0 +1,2644 @@
+{
+  "tool": "cognivault-rag-audit/audit_all",
+  "format_version": 1,
+  "created_utc": "2026-08-01T14:29:44+00:00",
+  "label": "d27c997",
+  "provenance": {
+    "commit": "b4c329c",
+    "dirty": false,
+    "dirty_files": [],
+    "dump": {
+      "name": "confluence-dump.zip",
+      "sha256": "8ebffe34ab623939fe16da6510f9ae08b7193f830acc9d11db2f8fe1f3539104",
+      "pages": 127
+    },
+    "golden": [
+      {
+        "name": "golden.jsonl",
+        "path": "tools/eval/golden.jsonl",
+        "sha256": "3c5e4d0b3b6a8574c8088bf914a3e18aa177ad8433afd48b1a7a2fe99ace35bc",
+        "rows": 39
+      },
+      {
+        "name": "golden.corpus.jsonl",
+        "path": "tools/eval/golden.corpus.jsonl",
+        "sha256": "5787d549f777517fa7591183dabaf8446f7127e41584fe516d4480733396ef2e",
+        "rows": 191
+      }
+    ],
+    "model": "intfloat/multilingual-e5-base",
+    "retrieval_config": {
+      "limit": 40,
+      "fetch_limit": 80,
+      "candidate_limit": 160,
+      "fusion": {
+        "mode": "rrf",
+        "k": 2.0,
+        "weights": [
+          1.0,
+          1.0
+        ],
+        "norm": "minmax"
+      },
+      "query_transform": {
+        "dense": "identity",
+        "sparse": "identity"
+      },
+      "doc_text": {
+        "dense": "as_indexed",
+        "sparse": "as_indexed"
+      },
+      "post": [
+        "dedupe_chunks",
+        "group_by_section"
+      ],
+      "group_by_section": true
+    },
+    "window_config": {
+      "prod_cap": 4000,
+      "threshold": 0.8,
+      "locus_coverage": 0.8,
+      "min_attainable_terms": 3
+    },
+    "rulers": {
+      "audit_convert.py": "cab4f7c5dd39b8bd47db3dd2ba94040953c131bcae493caddb68fa97bb58e023",
+      "audit_chunk.ts": "f742f4ed88b6b0c84a508ddcabb88f8b0e69924fc4cba092fd8af740c6e6f27f",
+      "audit_retrieval.py": "8e98ac21b5280d270f61859d35ad7f8ec349c8aa9025114f91101a22332cdb84",
+      "audit_window.py": "6afbfb3baf09881ba2a73f590e5b7517cdd8cf889dec153fe9702786bc535c2c",
+      "section_windows.ts": "bcf98fbdc58c8efbbf6fbb7986d08e34d9f648b919bb49e25ea729902e8a00d1",
+      "sparse_vectors.ts": "4237745216efbe61c78a9baceb38c3c85f0e9321d3afb55ffdab35b971e35123"
+    }
+  },
+  "headline": {
+    "convert.word_recall": {
+      "value": 0.9993,
+      "n": null
+    },
+    "convert.cell_placement": {
+      "value": 0.9997,
+      "n": null
+    },
+    "convert.code_exact": {
+      "value": 0.9655,
+      "n": null
+    },
+    "chunk.torn_code_share": {
+      "value": 0.1746,
+      "n": null
+    },
+    "chunk.torn_row_share": {
+      "value": 0.0216,
+      "n": null
+    },
+    "chunk.duplicate_share": {
+      "value": 0.0728,
+      "n": null
+    },
+    "retrieval.hit1.customer": {
+      "value": 0.75,
+      "n": 28
+    },
+    "retrieval.mrr.customer": {
+      "value": 0.8311,
+      "n": 28
+    },
+    "retrieval.hit1.generated": {
+      "value": 0.8438,
+      "n": 160
+    },
+    "retrieval.mrr.generated": {
+      "value": 0.9045,
+      "n": 160
+    },
+    "window.contained.customer": {
+      "value": 0.9286,
+      "n": 28
+    },
+    "window.contained.generated": {
+      "value": 0.9231,
+      "n": 156
+    },
+    "window.contained.oversized": {
+      "value": 0.8028,
+      "n": 71
+    }
+  },
+  "tripwires": {
+    "convert.converter_errors": 0,
+    "convert.links_broken": 0,
+    "convert.tables_with_cell_mismatch": 0,
+    "convert.gfm_ragged_out": 0,
+    "convert.images_dropped_no_filename": 0,
+    "convert.pages_below_50pct": 0,
+    "chunk.over_budget": 0,
+    "chunk.tables_split": 0,
+    "chunk.table_rows_lost": 0,
+    "chunk.headerless_table_chunks": 0,
+    "chunk.code_blocks_lost": 0,
+    "chunk.unbalanced_fence_chunks": 0,
+    "chunk.parent_id_collisions": 0,
+    "window.anchor_failures": 0,
+    "retrieval.unretrieved.customer": 0,
+    "retrieval.unretrieved.generated": 0
+  },
+  "context": {
+    "pages": 127,
+    "chunks": 920,
+    "sections": 260,
+    "sections_over_cap": 44,
+    "chunks_in_oversized_sections": 603,
+    "window_chars_mean": 2259.7,
+    "window_chars_5_blocks": 11298,
+    "window_ceiling": 0.7875
+  },
+  "thresholds": {
+    "convert.word_recall": 0.9993,
+    "convert.cell_placement": 0.9997,
+    "convert.code_exact": 0.9655,
+    "chunk.torn_code_share": 0.1746,
+    "chunk.torn_row_share": 0.0216,
+    "chunk.duplicate_share": 0.0728,
+    "retrieval.hit1.customer": 0.7143,
+    "retrieval.hit1.generated": 0.8375,
+    "retrieval.mrr.customer": 0.7954,
+    "retrieval.mrr.generated": 0.8982,
+    "window.contained.customer": 0.8929,
+    "window.contained.generated": 0.9167,
+    "window.contained.oversized": 0.7887
+  },
+  "comparison": {},
+  "baseline": null,
+  "changes": {},
+  "failures": [],
+  "refusals": [],
+  "warnings": [
+    "базового прогона нет — сравнивать не с чем; первый прогон записывается через --update-baseline"
+  ],
+  "timing": {
+    "convert": 4.86,
+    "chunk": 6.74,
+    "sections": 4.11,
+    "retrieval": 1.09,
+    "window": 73.68,
+    "total_s": 90.48
+  },
+  "exit_code": 0,
+  "per_query": {
+    "retrieval": [
+      {
+        "id": "x01-definition",
+        "origin": "customer",
+        "rank": 2
+      },
+      {
+        "id": "x02-definition",
+        "origin": "customer",
+        "rank": 3
+      },
+      {
+        "id": "x03-process",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x04-definition",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x05-definition",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x06-refusal_trap",
+        "origin": "customer",
+        "rank": null
+      },
+      {
+        "id": "x07-refusal_trap",
+        "origin": "customer",
+        "rank": null
+      },
+      {
+        "id": "x08-refusal_trap",
+        "origin": "customer",
+        "rank": null
+      },
+      {
+        "id": "x09-procedure",
+        "origin": "customer",
+        "rank": 2
+      },
+      {
+        "id": "x10-precision",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x11-code",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x12-procedure",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x13-table",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x14-procedure",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x15-synthesis",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x16-process",
+        "origin": "customer",
+        "rank": 5
+      },
+      {
+        "id": "x17-refusal_trap",
+        "origin": "customer",
+        "rank": null
+      },
+      {
+        "id": "x18-table",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x19-table",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x20-definition",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x21-comparison",
+        "origin": "customer",
+        "rank": 8
+      },
+      {
+        "id": "x22-process",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x23-meta",
+        "origin": "customer",
+        "rank": null
+      },
+      {
+        "id": "x24-exclusion",
+        "origin": "customer",
+        "rank": 9
+      },
+      {
+        "id": "x25-cross_lingual",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x26-refusal_trap",
+        "origin": "customer",
+        "rank": null
+      },
+      {
+        "id": "x27-refusal_trap",
+        "origin": "customer",
+        "rank": null
+      },
+      {
+        "id": "x28-refusal_trap",
+        "origin": "customer",
+        "rank": null
+      },
+      {
+        "id": "x29-procedure",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x30-refusal_trap",
+        "origin": "customer",
+        "rank": null
+      },
+      {
+        "id": "x31-process",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x32-comparison",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x33-procedure",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x34-comparison",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x35-precision",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "x36-table",
+        "origin": "customer",
+        "rank": 2
+      },
+      {
+        "id": "x37-refusal_trap",
+        "origin": "customer",
+        "rank": null
+      },
+      {
+        "id": "x38-refusal_trap",
+        "origin": "customer",
+        "rank": null
+      },
+      {
+        "id": "x39-synthesis",
+        "origin": "customer",
+        "rank": 1
+      },
+      {
+        "id": "g100-definition",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g101-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g102-exclusion",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g103-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g104-table",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g105-process",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g106-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g107-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g108-exclusion",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g109-synthesis",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g110-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g111-procedure",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g112-definition",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g113-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g114-procedure",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g115-synthesis",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g116-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g117-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g119-comparison",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g120-exclusion",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g121-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g122-cross_lingual",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g123-procedure",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g124-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g125-code",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g126-disambiguation",
+        "origin": "generated",
+        "rank": 3
+      },
+      {
+        "id": "g127-comparison",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g128-table",
+        "origin": "generated",
+        "rank": 3
+      },
+      {
+        "id": "g129-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g130-precision",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g131-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g132-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g133-table",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g134-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g135-code",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g136-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g137-comparison",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g138-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g139-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g140-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g141-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g142-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g143-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g144-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g200-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g201-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g202-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g203-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g204-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g205-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g206-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g207-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g208-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g209-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g210-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g211-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g212-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g213-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g214-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g215-exclusion",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g216-exclusion",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g217-exclusion",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g218-comparison",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g219-comparison",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g220-comparison",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g221-code",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g222-code",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g223-code",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g224-code",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g225-procedure",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g226-procedure",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g227-process",
+        "origin": "generated",
+        "rank": 3
+      },
+      {
+        "id": "g228-definition",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g229-synthesis",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g230-cross_lingual",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g231-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g232-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g233-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g234-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g235-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g236-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g237-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g238-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g239-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g240-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g241-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g242-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g300-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g301-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g302-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g303-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g304-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g305-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g306-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g307-table",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g308-table",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g309-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g310-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g311-table",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g312-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g313-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g314-precision",
+        "origin": "generated",
+        "rank": 29
+      },
+      {
+        "id": "g315-precision",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g316-precision",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g317-precision",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g318-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g319-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g320-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g321-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g322-precision",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g323-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g324-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g325-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g326-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g327-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g328-disambiguation",
+        "origin": "generated",
+        "rank": 3
+      },
+      {
+        "id": "g329-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g330-disambiguation",
+        "origin": "generated",
+        "rank": 31
+      },
+      {
+        "id": "g331-exclusion",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g332-exclusion",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g333-exclusion",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g334-exclusion",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g335-exclusion",
+        "origin": "generated",
+        "rank": 7
+      },
+      {
+        "id": "g336-process",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g337-process",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g338-procedure",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g339-procedure",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g340-synthesis",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g341-comparison",
+        "origin": "generated",
+        "rank": 10
+      },
+      {
+        "id": "g342-definition",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g343-cross_lingual",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g344-cross_lingual",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g345-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g346-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g347-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g348-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g349-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g350-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g351-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g400-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g401-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g402-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g403-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g404-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g405-disambiguation",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g406-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g407-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g408-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g409-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g410-disambiguation",
+        "origin": "generated",
+        "rank": 3
+      },
+      {
+        "id": "g411-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g412-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g413-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g414-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g415-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g416-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g417-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g418-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g419-disambiguation",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g420-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g421-disambiguation",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g422-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g423-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g424-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g425-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g426-disambiguation",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g429-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g430-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g431-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g433-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g434-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g435-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g436-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g437-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g438-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g439-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g440-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g441-refusal_trap",
+        "origin": "generated",
+        "rank": null
+      },
+      {
+        "id": "g442-synthesis",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g443-synthesis",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g444-synthesis",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g445-synthesis",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g446-synthesis",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g447-synthesis",
+        "origin": "generated",
+        "rank": 4
+      },
+      {
+        "id": "g448-synthesis",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g449-robustness",
+        "origin": "generated",
+        "rank": 2
+      },
+      {
+        "id": "g450-cross_lingual",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g451-robustness",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g452-robustness",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g453-cross_lingual",
+        "origin": "generated",
+        "rank": 1
+      },
+      {
+        "id": "g454-robustness",
+        "origin": "generated",
+        "rank": 1
+      }
+    ],
+    "window": [
+      {
+        "id": "g100-definition",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g101-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g102-exclusion",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g103-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g104-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g105-process",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g106-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g107-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g108-exclusion",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.9444,
+        "contained": true
+      },
+      {
+        "id": "g109-synthesis",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g110-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g111-procedure",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g112-definition",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.9615,
+        "contained": true
+      },
+      {
+        "id": "g113-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.8889,
+        "contained": true
+      },
+      {
+        "id": "g114-procedure",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.9833,
+        "contained": true
+      },
+      {
+        "id": "g115-synthesis",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.6,
+        "contained": false
+      },
+      {
+        "id": "g116-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g117-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g119-comparison",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g120-exclusion",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g121-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g122-cross_lingual",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g123-procedure",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g124-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g125-code",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g126-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g127-comparison",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g128-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g129-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g130-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.9688,
+        "contained": true
+      },
+      {
+        "id": "g131-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g132-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g133-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.9677,
+        "contained": true
+      },
+      {
+        "id": "g134-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g135-code",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g136-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g137-comparison",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g138-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g200-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g201-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g203-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g204-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g205-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.6111,
+        "contained": false
+      },
+      {
+        "id": "g206-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.9231,
+        "contained": true
+      },
+      {
+        "id": "g207-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g208-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g209-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g210-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g211-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g212-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.9565,
+        "contained": true
+      },
+      {
+        "id": "g213-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g214-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g215-exclusion",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g216-exclusion",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g217-exclusion",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g218-comparison",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g219-comparison",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g220-comparison",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g221-code",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.2258,
+        "contained": false
+      },
+      {
+        "id": "g223-code",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.0556,
+        "contained": false
+      },
+      {
+        "id": "g224-code",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g225-procedure",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g226-procedure",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g227-process",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g228-definition",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g229-synthesis",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g230-cross_lingual",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g231-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.4444,
+        "contained": false
+      },
+      {
+        "id": "g232-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g233-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g234-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g235-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g236-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g300-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g301-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g302-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g303-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g304-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g305-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g306-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g307-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g308-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g309-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g310-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g311-table",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g312-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g313-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g314-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g315-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g316-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.9231,
+        "contained": true
+      },
+      {
+        "id": "g317-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g318-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g319-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g320-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g321-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g322-precision",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.32,
+        "contained": false
+      },
+      {
+        "id": "g323-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g324-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g325-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g326-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g327-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g328-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.7667,
+        "contained": false
+      },
+      {
+        "id": "g329-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.9565,
+        "contained": true
+      },
+      {
+        "id": "g330-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g331-exclusion",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g332-exclusion",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.2609,
+        "contained": false
+      },
+      {
+        "id": "g333-exclusion",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g334-exclusion",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.8235,
+        "contained": true
+      },
+      {
+        "id": "g335-exclusion",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g336-process",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.7895,
+        "contained": false
+      },
+      {
+        "id": "g337-process",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.4884,
+        "contained": false
+      },
+      {
+        "id": "g338-procedure",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g339-procedure",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g340-synthesis",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.7949,
+        "contained": false
+      },
+      {
+        "id": "g341-comparison",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g342-definition",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g343-cross_lingual",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g344-cross_lingual",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.973,
+        "contained": true
+      },
+      {
+        "id": "g400-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g401-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.4444,
+        "contained": false
+      },
+      {
+        "id": "g402-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g403-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g404-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g405-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g406-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g407-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g408-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g409-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g410-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g411-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g412-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g413-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g414-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g415-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.9714,
+        "contained": true
+      },
+      {
+        "id": "g416-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g417-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g418-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g419-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 0.85,
+        "contained": true
+      },
+      {
+        "id": "g420-disambiguation",
+        "origin": "generated",
+        "judgeable": false,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g421-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g422-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g423-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g424-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g425-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g426-disambiguation",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g442-synthesis",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g443-synthesis",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g444-synthesis",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g445-synthesis",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g446-synthesis",
+        "origin": "generated",
+        "judgeable": false,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g447-synthesis",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g448-synthesis",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g449-robustness",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g450-cross_lingual",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g451-robustness",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g452-robustness",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g453-cross_lingual",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g454-robustness",
+        "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x01-definition",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x02-definition",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x03-process",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x04-definition",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x05-definition",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x09-procedure",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x10-precision",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x11-code",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 0.8364,
+        "contained": true
+      },
+      {
+        "id": "x12-procedure",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x13-table",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x14-procedure",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x15-synthesis",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 0.9667,
+        "contained": true
+      },
+      {
+        "id": "x16-process",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x18-table",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 0.9583,
+        "contained": true
+      },
+      {
+        "id": "x19-table",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x20-definition",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x21-comparison",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 0.4286,
+        "contained": false
+      },
+      {
+        "id": "x22-process",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x24-exclusion",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 0.3226,
+        "contained": false
+      },
+      {
+        "id": "x25-cross_lingual",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x29-procedure",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x31-process",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x32-comparison",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x33-procedure",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x34-comparison",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x35-precision",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x36-table",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "x39-synthesis",
+        "origin": "customer",
+        "judgeable": true,
+        "containment": 0.9167,
+        "contained": true
+      }
+    ]
+  }
+}
