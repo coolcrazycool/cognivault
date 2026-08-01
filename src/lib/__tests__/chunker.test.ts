@@ -2,9 +2,13 @@ import { getEncoding } from 'js-tiktoken';
 import { describe, expect, it } from 'vitest';
 import type { ChunkOptions } from '../chunker.js';
 import {
+  capDocSummary,
   chunkMarkdown,
   chunkMarkdownWithSections,
+  DOC_SUMMARY_MAX_TOKENS,
+  DOC_SUMMARY_PREFIX,
   MAX_CHUNK_TOKENS,
+  MAX_STORED_CHUNK_TOKENS,
   MIN_CHUNK_TOKENS,
   normalizeObsidianSyntax,
   TABLE_MAX_TOKENS,
@@ -36,6 +40,42 @@ function makeTable(rowCount: number): { rows: string[]; markdown: string } {
 /** Lines of a table chunk after its context prefix, blank line, header and delimiter. */
 function dataRowsOf(chunkText: string): string[] {
   return chunkText.split('\n').slice(4);
+}
+
+/** Cyrillic filler: the corpus this chunker is measured on is Russian, not Lorem ipsum. */
+function cyrillicProse(sentences: number): string {
+  return Array.from(
+    { length: sentences },
+    (_, i) =>
+      `Правило номер ${i} описывает порядок обработки транзакции, ` +
+      'условия срабатывания модели и действия оператора при подозрении на мошенничество.',
+  ).join(' ');
+}
+
+/** A SQL listing whose every line is distinguishable from every other. */
+function sqlListing(lines: number): string[] {
+  return Array.from(
+    { length: lines },
+    (_, i) =>
+      `    SELECT event_id_${i}, resolution_${i} FROM afpc_sss_inc.tr_out_ext WHERE dt = ${i}`,
+  );
+}
+
+/**
+ * A linearized table row exactly as the Confluence converter emits one: the whole row is
+ * a single paragraph of `**Колонка:** значение.` pairs.
+ */
+function linearizedRow(id: number, fields: number, valueWords: number): string {
+  const value = (name: string): string =>
+    Array.from({ length: valueWords }, (_, i) => `${name}значение${i}`).join(' ');
+  return [
+    `**ID потока:** ${id}.`,
+    ...Array.from({ length: fields }, (_, i) => `**Характеристика ${i}:** ${value(`п${i}`)}.`),
+  ].join(' ');
+}
+
+function fenceLines(text: string): string[] {
+  return text.split('\n').filter((line) => /^\s*```/.test(line));
 }
 
 describe('normalizeObsidianSyntax', () => {
@@ -696,6 +736,259 @@ describe('chunkMarkdown - undersized tail handling', () => {
     expect(last?.text).toContain('Итого по таблице.');
     for (const chunk of chunks.filter((c) => c.contentKind === 'table_rows')) {
       expect(chunk.text).not.toContain('Итого');
+    }
+  });
+});
+
+describe('chunkMarkdown - fenced code keeps its frame', () => {
+  it('keeps the fence and the language of a code block that shares a chunk with prose', () => {
+    const body = [
+      '## Выгрузка витрины',
+      '',
+      'Запрос ниже собирает резолюции за сутки:',
+      '',
+      '```sql',
+      'SELECT event_id, resolution',
+      'FROM afpc_sss_inc.tr_out_ext',
+      "WHERE load_dt = '20260731';",
+      '```',
+      '',
+      'Результат складывается в целевую таблицу.',
+    ].join('\n');
+    const chunks = chunkMarkdown(body, { title: 'Витрина' });
+
+    expect(chunks).toHaveLength(1);
+    const text = chunks[0]?.text ?? '';
+    // Without the frame the SQL was glued into the prose around it and the dialect —
+    // the one word saying what this is — disappeared entirely.
+    expect(text).toContain('```sql\nSELECT event_id, resolution');
+    expect(fenceLines(text)).toHaveLength(2);
+    expect(text).toContain('Результат складывается в целевую таблицу.');
+  });
+
+  it('uses a longer fence when the code itself contains a triple backtick', () => {
+    const body = ['## Инструкция', '', '````md', '```', 'вложенный забор', '```', '````'].join(
+      '\n',
+    );
+    const text = chunkMarkdown(body, { title: 'Док' })[0]?.text ?? '';
+
+    expect(text).toContain('````md');
+    expect(text).toContain('```\nвложенный забор');
+  });
+});
+
+describe('chunkMarkdown - oversized code block', () => {
+  const source = sqlListing(400);
+  const body = `## Листинг\n\n\`\`\`sql\n${source.join('\n')}\n\`\`\``;
+
+  it('re-fences every fragment with the original language and numbers the parts', () => {
+    const chunks = chunkMarkdown(body, { title: 'Чеклист' });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    chunks.forEach((chunk, index) => {
+      // Every fragment is still a parseable, labelled SQL block on its own.
+      expect(chunk.text).toContain(`Код sql, часть ${index + 1} из ${chunks.length}:`);
+      expect(fenceLines(chunk.text)).toEqual(['```sql', '```']);
+      expect(countTokens(chunk.text)).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+    });
+  });
+
+  it('cuts on line boundaries only — no fragment starts mid-statement', () => {
+    const chunks = chunkMarkdown(body, { title: 'Чеклист' });
+    const known = new Set(source);
+
+    for (const chunk of chunks) {
+      const codeLines = chunk.text
+        .split('\n')
+        .filter((line) => !/^\s*```/.test(line) && !line.startsWith('Код sql,'))
+        .slice(1) // the breadcrumb
+        .filter((line) => line.trim().length > 0);
+      for (const line of codeLines) {
+        expect(known.has(line)).toBe(true);
+      }
+    }
+  });
+
+  it('keeps the part label outside the fence so the code stays syntactically valid', () => {
+    const jsonBody = [
+      '## Конфигурация',
+      '',
+      '```json',
+      '{',
+      ...Array.from({ length: 400 }, (_, i) => `  "rule_${i}": "значение правила номер ${i}",`),
+      '  "last": true',
+      '}',
+      '```',
+    ].join('\n');
+    const chunks = chunkMarkdown(jsonBody, { title: 'Эмулятор' });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      const lines = chunk.text.split('\n');
+      const opening = lines.findIndex((line) => line.startsWith('```'));
+      expect(lines[opening]).toBe('```json');
+      // The label sits above the opening fence, never inside the JSON.
+      expect(lines[opening - 1]).toMatch(/^Код json, часть \d+ из \d+:$/);
+    }
+  });
+
+  it('repairs a fence torn by the generic splitter inside a list item', () => {
+    // A code block nested in a list never reaches the code path — it is part of the
+    // list node — so the prose splitter can cut it in half. Half a fence turns the
+    // prose after it into code and the code before it into prose.
+    const item = [
+      '- Шаг проверки:',
+      '',
+      '  ```sql',
+      ...sqlListing(300).map((l) => `  ${l}`),
+      '  ```',
+    ];
+    const chunks = chunkMarkdown(`## Шаги\n\n${item.join('\n')}`, { title: 'Инструкция' });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(fenceLines(chunk.text).length % 2).toBe(0);
+      expect(countTokens(chunk.text)).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+    }
+  });
+});
+
+describe('chunkMarkdown - lead-in of an oversized block', () => {
+  it('keeps a short caption with the code block it introduces', () => {
+    const body = [
+      '## Data Quality',
+      '',
+      'Пример конфигурации:',
+      '',
+      '```json',
+      ...Array.from({ length: 300 }, (_, i) => `  "check_${i}": "проверка номер ${i}",`),
+      '```',
+    ].join('\n');
+    const chunks = chunkMarkdown(body, { title: 'Data Quality' });
+
+    const caption = chunks.filter((chunk) => chunk.text.includes('Пример конфигурации:'));
+    expect(caption).toHaveLength(1);
+    // The caption used to be flushed on its own: a 21-character chunk that matches the
+    // query the block below would have answered and answers nothing.
+    expect(caption[0]?.text).toContain('```json');
+    expect(countTokens(caption[0]?.text ?? '')).toBeGreaterThanOrEqual(MIN_CHUNK_TOKENS);
+    for (const chunk of chunks) {
+      expect(countTokens(chunk.text)).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+    }
+  });
+
+  it('keeps a caption with an oversized paragraph too', () => {
+    const body = `## Fincert-enricher\n\nconfig объединения данных из PG и HDFS\n\n${cyrillicProse(40)}`;
+    const chunks = chunkMarkdown(body, { title: 'Fincert' });
+
+    const first = chunks[0]?.text ?? '';
+    expect(first).toContain('config объединения данных из PG и HDFS');
+    expect(first).toContain('Правило номер 0');
+  });
+});
+
+describe('chunkMarkdown - linearized table rows', () => {
+  it('keeps a row that fits the budget whole, field names next to their values', () => {
+    const row = linearizedRow(4832, 6, 4);
+    const chunks = chunkMarkdown(`## Реестр потоков\n\n${cyrillicProse(20)}\n\n${row}`, {
+      title: 'Стриминговые потоки',
+    });
+
+    const carrier = chunks.filter((chunk) => chunk.text.includes('ID потока: 4832'));
+    expect(carrier).toHaveLength(1);
+    expect(carrier[0]?.text).toContain('Характеристика 5:');
+  });
+
+  it('repeats the identifying field on every fragment of a row too large for a chunk', () => {
+    const row = linearizedRow(4832, 12, 40);
+    const chunks = chunkMarkdown(`## Реестр потоков\n\n${row}`, { title: 'Стриминговые потоки' });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      // Without this the tail fragments held values whose row — the thing an exact
+      // lookup by identifier searches for — appeared nowhere in the chunk.
+      expect(chunk.text).toContain('ID потока: 4832');
+      expect(countTokens(chunk.text)).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+    }
+    // Every field still reaches some chunk, exactly once.
+    for (let field = 0; field < 12; field += 1) {
+      const holders = chunks.filter((chunk) => chunk.text.includes(`Характеристика ${field}:`));
+      expect(holders).toHaveLength(1);
+    }
+  });
+
+  it('cuts a row on field boundaries, not mid-value', () => {
+    const chunks = chunkMarkdown(`## Реестр\n\n${linearizedRow(77, 10, 40)}`, { title: 'Потоки' });
+
+    for (const chunk of chunks.slice(1)) {
+      const body = chunk.text.slice((chunk.sectionPath + '\n\n').length);
+      // Every continuation opens with the identity and then a whole field.
+      expect(body).toMatch(/^ID потока: 77\. Характеристика \d+:/);
+    }
+  });
+});
+
+describe('chunkMarkdown - scraps too small to retrieve', () => {
+  it('carries a short leading section forward into the section that follows', () => {
+    const body = [
+      '# Gallery',
+      '',
+      'Статус страницы — [АКТУАЛЬНО]',
+      '',
+      '## Поля витрины',
+      '',
+      cyrillicProse(8),
+    ].join('\n');
+    const { chunks, sections } = chunkMarkdownWithSections(body, { title: 'Gallery' });
+
+    // The lead-in has no predecessor to merge back into, so it used to flush as a stub.
+    expect(chunks).toHaveLength(1);
+    expect(sections).toHaveLength(1);
+    expect(chunks[0]?.sectionPath).toBe('Gallery > Поля витрины');
+    expect(chunks[0]?.text).toContain('Статус страницы — [АКТУАЛЬНО]');
+    expect(chunks[0]?.text).toContain('# Gallery');
+    expect(chunks[0]?.text).toContain('Правило номер 0');
+  });
+
+  it('folds a scrap forward when the chunk before it is a table it cannot join', () => {
+    // Sized so the scrap fits neither the packing budget of the paragraph below it nor a
+    // backward merge into a table chunk — the case the forward merge exists for.
+    const { markdown } = makeTable(60);
+    const filler = (n: number): string =>
+      Array.from({ length: n }, (_, i) => `слово${i}`).join(' ');
+    const body = `## Тарифы\n\n${markdown}\n\n${filler(8)}\n\n${filler(155)}`;
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    const textChunks = chunks.filter((chunk) => chunk.contentKind === 'text');
+    expect(textChunks).toHaveLength(1);
+    expect(textChunks[0]?.text).toContain('слово7');
+    expect(countTokens(textChunks[0]?.text ?? '')).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+  });
+});
+
+describe('capDocSummary', () => {
+  it('leaves an annotation that already fits untouched', () => {
+    const summary = 'Документ описывает порядок подготовки ПСИ для АРМ DS.';
+    expect(capDocSummary(summary)).toBe(summary);
+  });
+
+  it('cuts a long annotation to the allowance and marks that it was cut', () => {
+    const capped = capDocSummary(cyrillicProse(40));
+
+    expect(countTokens(capped)).toBeLessThanOrEqual(DOC_SUMMARY_MAX_TOKENS + 1);
+    expect(capped.endsWith('…')).toBe(true);
+    expect(capped.startsWith('Правило номер 0')).toBe(true);
+  });
+
+  it('keeps an annotated chunk inside the declared stored-chunk ceiling', () => {
+    // The chunker budgets the chunk; the pipeline prepends the annotation afterwards.
+    // MAX_STORED_CHUNK_TOKENS is what that sum is allowed to reach — and now does not exceed.
+    const chunks = chunkMarkdown(`## Раздел\n\n${cyrillicProse(120)}`, { title: 'Док' });
+    const annotation = capDocSummary(cyrillicProse(40));
+
+    for (const chunk of chunks) {
+      const stored = `${DOC_SUMMARY_PREFIX}${annotation}\n\n${chunk.text}`;
+      expect(countTokens(stored)).toBeLessThanOrEqual(MAX_STORED_CHUNK_TOKENS);
     }
   });
 });

@@ -196,7 +196,11 @@ describe('замер страницы', () => {
     expect(page.records[0]?.text).not.toContain('secret');
   });
 
-  it('переразмерный забор кода: разорван, а сами ``` до чанков не доходят', () => {
+  it('переразмерный забор кода разрезан, но каждый кусок остаётся огороженным', () => {
+    // Раньше тест фиксировал потерю: `nodeToText` возвращал голое содержимое,
+    // и `fencesInChunks` был нулём — код вклеивался в прозу без признака кода,
+    // а язык блока пропадал. Чанкер это чинит; линейка не менялась, меряется
+    // ровно то же самое, но теперь заборы обязаны доходить до чанков.
     const body = `# Инструкция\n\nПеред запуском:\n\n\`\`\`sql\n${sqlLines(120)}\n\`\`\`\n`;
     expect(countTokens(sqlLines(120))).toBeGreaterThan(MAX_CHUNK_TOKENS);
 
@@ -205,7 +209,10 @@ describe('замер страницы', () => {
     expect(page.metrics.codeBlocksSplit).toBe(1);
     expect(page.metrics.codeBlocksLost).toBe(0);
     expect(page.metrics.fencesInSource).toBe(2);
-    expect(page.metrics.fencesInChunks).toBe(0);
+    // По два забора на каждый кусок — иначе обрывок нечем опознать как код.
+    expect(page.metrics.fencesInChunks).toBeGreaterThanOrEqual(4);
+    expect(page.metrics.fencesInChunks % 2).toBe(0);
+    expect(page.metrics.unbalancedFenceChunks).toBe(0);
     const split = page.metrics.findings.find((f) => f.kind === 'code_split');
     expect(split?.spans).toBeGreaterThan(1);
   });
@@ -266,13 +273,19 @@ describe('замер страницы', () => {
     expect(page.metrics.linearizedRowsSplit).toBe(0);
   });
 
-  it('подпись перед переразмерным блоком остаётся отдельным чанком-огрызком', () => {
+  it('подпись перед переразмерным блоком уезжает вместе с ним, а не остаётся огрызком', () => {
+    // Тест фиксировал дефект: буфер сбрасывался перед переразмерным узлом, а
+    // дослияние работало только с хвостом, поэтому подводка вида «Пример
+    // конфигурации:» становилась отдельным чанком в 21 символ. Метрика не
+    // менялась — изменился чанкер, и подпись обязана ехать с тем, что она
+    // подписывает.
     const page = auditPage(
       'caption.md',
       `# Конфигурация\n\nПример конфигурации:\n\n\`\`\`\n${sqlLines(120)}\n\`\`\`\n`,
     );
-    expect(page.metrics.tinyChunks).toBeGreaterThanOrEqual(1);
-    expect(page.metrics.findings.some((f) => f.kind === 'tiny_chunk')).toBe(true);
+    expect(page.metrics.tinyChunks).toBe(0);
+    expect(page.metrics.findings.some((f) => f.kind === 'tiny_chunk')).toBe(false);
+    expect(page.records[0]?.text).toContain('Пример конфигурации:');
   });
 
   it('раздел длиннее section_max_chars виден в метрике', () => {

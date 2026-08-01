@@ -5,6 +5,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { docSummaries, sections } from '../../db/schema.js';
 import { buildSparseVector } from '../../lib/bm25.js';
 import { ChunkParseError } from '../../lib/chunk-errors.js';
+import { countTokens, DOC_SUMMARY_MAX_TOKENS } from '../../lib/chunker.js';
 import type { FileChangeEvent } from '../../lib/indexer.js';
 
 // ── Mock format chunkers ──
@@ -1060,6 +1061,36 @@ describe('pipeline plugin (per-user)', () => {
       const embedded = embed.mock.calls[0]?.[0] as string[];
       expect(embedded[0]).toContain('Аннотация документа: Документ про mTLS.\n\n');
       expect(pointsOf(upsert)[0]?.payload.text).toBe(embedded[0]);
+
+      await app.close();
+    });
+
+    it('caps a long annotation before it is prepended and cached', async () => {
+      // "1–2 предложения" in the prompt is a request, not a bound. The annotation is
+      // repeated at the head of EVERY chunk of the document, so an unbounded one both
+      // breaks the chunk budget silently and starts dominating each chunk's dense vector.
+      const long = Array.from(
+        { length: 60 },
+        (_, i) => `Предложение номер ${i} про содержание документа и его назначение.`,
+      ).join(' ');
+      const summarize = vi.fn().mockResolvedValue(long);
+      const { app, upsert, embed, dbInsertValues } = await buildTestApp({ summarize });
+
+      await processChanges(app, TEST_USER_ID, [MD_EVENT]);
+
+      const embedded = (embed.mock.calls[0]?.[0] as string[])[0] as string;
+      const annotation = embedded.slice(
+        'Аннотация документа: '.length,
+        embedded.indexOf('\n\n', 'Аннотация документа: '.length),
+      );
+      expect(countTokens(annotation)).toBeLessThanOrEqual(DOC_SUMMARY_MAX_TOKENS + 1);
+      expect(annotation.endsWith('…')).toBe(true);
+      expect(pointsOf(upsert)[0]?.payload.text).toContain(annotation);
+      // What is cached is what was used, so a cache hit cannot resurrect the long one.
+      const cached = dbInsertValues.mock.calls
+        .map((call) => call[0] as Record<string, unknown>)
+        .find((row) => typeof row.summary === 'string');
+      expect(cached?.summary).toBe(annotation);
 
       await app.close();
     });

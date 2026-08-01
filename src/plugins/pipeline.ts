@@ -12,7 +12,7 @@ import { BM25_VECTOR_NAME, buildSparseVector, DENSE_VECTOR_NAME } from '../lib/b
 import { chunkCanvas } from '../lib/canvas-chunker.js';
 import { isChunkParseError } from '../lib/chunk-errors.js';
 import type { MarkdownSection } from '../lib/chunker.js';
-import { chunkMarkdownWithSections, DOC_SUMMARY_PREFIX } from '../lib/chunker.js';
+import { capDocSummary, chunkMarkdownWithSections, DOC_SUMMARY_PREFIX } from '../lib/chunker.js';
 import { chunkCsv } from '../lib/csv-chunker.js';
 import { chunkExcalidraw } from '../lib/excalidraw-chunker.js';
 import { GigaChatChatClient } from '../lib/gigachat-chat.js';
@@ -260,7 +260,9 @@ async function resolveDocSummary(
   const db = fastify.getUserDbById(userId);
   const cached = db.select().from(docSummaries).where(eq(docSummaries.path, event.path)).get();
   if (cached && cached.contentHash === event.contentHash) {
-    return cached.summary;
+    // Capped on the way out, not only on the way in: rows written before the cap existed
+    // are still in the cache and would otherwise keep breaking the chunk ceiling forever.
+    return capDocSummary(cached.summary);
   }
 
   const body = chunks
@@ -278,15 +280,19 @@ async function resolveDocSummary(
     return undefined;
   }
 
+  // Cache what will actually be prepended, so the stored annotation and the indexed one
+  // are the same string and a cache hit costs no second truncation decision.
+  const capped = capDocSummary(summary);
+
   db.insert(docSummaries)
-    .values({ path: event.path, contentHash: event.contentHash, summary })
+    .values({ path: event.path, contentHash: event.contentHash, summary: capped })
     .onConflictDoUpdate({
       target: docSummaries.path,
-      set: { contentHash: event.contentHash, summary },
+      set: { contentHash: event.contentHash, summary: capped },
     })
     .run();
 
-  return summary;
+  return capped;
 }
 
 /**

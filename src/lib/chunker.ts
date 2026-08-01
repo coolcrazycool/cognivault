@@ -121,6 +121,48 @@ export function withBreadcrumb(sectionPath: string, body: string): string {
  */
 export const DOC_SUMMARY_PREFIX = 'Аннотация документа: ';
 
+/**
+ * Hard cap on the annotation itself, in tokens.
+ *
+ * The prompt asks for 1–2 sentences, which is a request, not a bound: nothing stopped a
+ * chatty model from returning a paragraph, and that paragraph is repeated at the head of
+ * EVERY chunk of the document. Past a certain length the annotation stops being context
+ * and starts being the dominant part of each chunk's dense vector — at which point all
+ * chunks of one file look alike to the dense branch, which is the opposite of the point.
+ */
+export const DOC_SUMMARY_MAX_TOKENS = 80;
+
+/**
+ * What the annotation may add to a chunk that was already cut to {@link MAX_CHUNK_TOKENS}:
+ * the prefix, the capped annotation, the blank line and the ellipsis a cut leaves behind.
+ */
+export const DOC_SUMMARY_ALLOWANCE_TOKENS =
+  countTokens(DOC_SUMMARY_PREFIX) + DOC_SUMMARY_MAX_TOKENS + countTokens('…\n\n');
+
+/**
+ * True ceiling of a STORED chunk, annotation included.
+ *
+ * The annotation is deliberately NOT taken out of the body budget. It is identical across
+ * every chunk of a document, so reserving room for it in each one would spend ~20% of
+ * every chunk's content on the same repeated string and cut ~20% more chunks out of the
+ * same corpus. The budget is a chunking-granularity knob, not an embedder limit (GigaChat
+ * truncates at 3000 cl100k tokens, six times higher), so the honest fix is to bound the
+ * overshoot and state it, not to shrink the content. What was wrong before was that the
+ * overshoot was unbounded and undeclared, not that it existed.
+ */
+export const MAX_STORED_CHUNK_TOKENS = MAX_CHUNK_TOKENS + DOC_SUMMARY_ALLOWANCE_TOKENS;
+
+/**
+ * The annotation as it may be prepended to a chunk: never longer than
+ * {@link DOC_SUMMARY_MAX_TOKENS}, cut on a word boundary and marked when it was cut.
+ */
+export function capDocSummary(summary: string): string {
+  const trimmed = summary.trim();
+  if (countTokens(trimmed) <= DOC_SUMMARY_MAX_TOKENS) return trimmed;
+  const head = splitTextByTokenBudget(trimmed, DOC_SUMMARY_MAX_TOKENS)[0] ?? '';
+  return `${head.trimEnd()}…`;
+}
+
 /** Tokens a chunk body may use once {@link withBreadcrumb} has taken its share. */
 export function breadcrumbBodyBudget(
   sectionPath: string,
@@ -193,9 +235,45 @@ function listToText(list: List): string {
   return items.join('\n');
 }
 
+/**
+ * The language a fenced block declares, reduced to the single word a reader needs.
+ * An info string may carry more (`sql {highlight=1}`); only the first word is the dialect.
+ */
+function codeLanguage(node: Code): string {
+  const info = (node.lang ?? '').trim();
+  return info.length === 0 ? '' : (info.split(/\s+/)[0] as string);
+}
+
+/**
+ * A fence long enough to wrap `value` — one backtick more than the longest run the code
+ * itself opens a line with, so a block containing ``` cannot close its own frame early.
+ */
+function fenceFor(value: string): string {
+  let longest = 2;
+  for (const line of value.split('\n')) {
+    const match = /^\s*(`{3,})/.exec(line);
+    if (match !== null) longest = Math.max(longest, (match[1] as string).length);
+  }
+  return '`'.repeat(longest + 1);
+}
+
+/**
+ * A code block rendered back as a fenced block, language included.
+ *
+ * Same argument as the table branch below: the frame IS part of the content. Returning
+ * `node.value` bare glued SQL and JSON into the surrounding prose with nothing marking
+ * where the code starts or ends, and destroyed the language label — the one word that
+ * says which dialect this is. A block that later gets split across chunks was then not
+ * even recognizable as code.
+ */
+function codeToText(node: Code): string {
+  const fence = fenceFor(node.value);
+  return `${fence}${codeLanguage(node)}\n${node.value}\n${fence}`;
+}
+
 function nodeToText(node: Node): string {
   if (isCode(node)) {
-    return node.value;
+    return codeToText(node);
   }
   if (isTable(node)) {
     // Without this the generic child-concatenation below would glue every cell of
@@ -383,31 +461,52 @@ interface ChunkPiece {
 }
 
 /**
- * Merge a sub-{@link MIN_CHUNK_TOKENS} tail into the piece before it.
+ * Fold every sub-{@link MIN_CHUNK_TOKENS} piece into a neighbour, backwards first.
  *
  * A short trailing *section* is already folded into its predecessor before any
- * splitting happens, but the split itself can still strand the final paragraph in a
- * chunk far too small to retrieve on its own. Table chunks are never merged into:
- * their prefix + header + rows contract is what makes them readable.
+ * splitting happens, but the split itself still strands scraps — a closing remark, a
+ * numbered item left over from packing — in chunks far too small to retrieve on their
+ * own: they match on their heading breadcrumb and carry no answer. Backwards is the
+ * default because a scrap almost always continues the text above it; forwards is the
+ * fallback for a scrap that opens a run (its predecessor is a table, or full). Table
+ * chunks are never merged into: their prefix + header + rows contract is what makes
+ * them readable.
  */
-function mergeUndersizedTail(pieces: ChunkPiece[], headerText: string): ChunkPiece[] {
+function mergeUndersizedPieces(pieces: ChunkPiece[], headerText: string): ChunkPiece[] {
   const merged = [...pieces];
   const prefix = `${headerText}\n\n`;
   const bodyOf = (piece: ChunkPiece): string =>
     piece.text.startsWith(prefix) ? piece.text.slice(prefix.length) : piece.text;
 
-  while (merged.length > 1) {
-    const last = merged[merged.length - 1] as ChunkPiece;
-    const previous = merged[merged.length - 2] as ChunkPiece;
-    if (last.contentKind !== 'text' || previous.contentKind !== 'text') break;
-    if (countTokens(bodyOf(last)) >= MIN_CHUNK_TOKENS) break;
+  let index = 0;
+  while (index < merged.length && merged.length > 1) {
+    const piece = merged[index] as ChunkPiece;
+    if (piece.contentKind !== 'text' || countTokens(bodyOf(piece)) >= MIN_CHUNK_TOKENS) {
+      index += 1;
+      continue;
+    }
 
-    const text = `${previous.text}\n\n${bodyOf(last)}`;
-    // Absorbing the tail must not push the chunk past the budget — the embedder would
+    const previous = index > 0 ? (merged[index - 1] as ChunkPiece) : undefined;
+    const next = index + 1 < merged.length ? (merged[index + 1] as ChunkPiece) : undefined;
+
+    // Absorbing a scrap must not push the chunk past the budget — the embedder would
     // truncate it and the very text we were trying to keep would fall out of the vector.
-    if (countTokens(text) > MAX_CHUNK_TOKENS) break;
-
-    merged.splice(merged.length - 2, 2, { text, contentKind: 'text' });
+    if (previous?.contentKind === 'text') {
+      const text = `${previous.text}\n\n${bodyOf(piece)}`;
+      if (countTokens(text) <= MAX_CHUNK_TOKENS) {
+        merged.splice(index - 1, 2, { text, contentKind: 'text' });
+        index -= 1;
+        continue;
+      }
+    }
+    if (next?.contentKind === 'text') {
+      const text = `${piece.text}\n\n${bodyOf(next)}`;
+      if (countTokens(text) <= MAX_CHUNK_TOKENS) {
+        merged.splice(index, 2, { text, contentKind: 'text' });
+        continue;
+      }
+    }
+    index += 1;
   }
 
   return merged;
@@ -489,6 +588,225 @@ export function splitTextByTokenBudget(
   );
 }
 
+// ── oversized code ──
+
+/** Label above a fragment of a split code block: `Код sql, часть 2 из 5:`. */
+function codeFragmentLabel(language: string, index: number, total: number): string {
+  const dialect = language.length === 0 ? '' : ` ${language}`;
+  return `Код${dialect}, часть ${index} из ${total}:\n`;
+}
+
+function renderCodeFragment(
+  body: string,
+  language: string,
+  fence: string,
+  index: number,
+  total: number,
+): string {
+  const label = total > 1 ? codeFragmentLabel(language, index, total) : '';
+  return `${label}${fence}${language}\n${body}\n${fence}`;
+}
+
+/** Greedily pack whole code lines up to a budget; a single over-long line is cut on words. */
+function packCodeLines(lines: string[], budget: number): string[][] {
+  const groups: string[][] = [];
+  let current: string[] = [];
+  let currentTokens = 0;
+
+  const flush = (): void => {
+    if (current.length === 0) return;
+    groups.push(current);
+    current = [];
+    currentTokens = 0;
+  };
+
+  for (const line of lines) {
+    const lineTokens = countTokens(`${line}\n`);
+    // A single line over the budget (a minified JSON payload on one line) has no line
+    // boundary left to cut on; word boundaries are the last structure it still has.
+    if (lineTokens > budget) {
+      flush();
+      for (const part of splitTextByTokenBudget(line, budget)) groups.push([part]);
+      continue;
+    }
+    if (current.length > 0 && currentTokens + lineTokens > budget) flush();
+    current.push(line);
+    currentTokens += lineTokens;
+  }
+
+  flush();
+  return groups.length > 0 ? groups : [['']];
+}
+
+/**
+ * Cut a code block that cannot fit a chunk into line-aligned fragments, each one still a
+ * fenced block in the original language.
+ *
+ * The prose splitter (paragraph → line → word) applied to code produced anonymous
+ * fragments: a 1000-line SQL statement became 126 pieces that started mid-expression, and
+ * a JSON config was cut mid-object with no fence, no language and no clue that the text
+ * was code at all. Lines are the smallest unit code has that survives being read alone,
+ * and re-fencing every fragment keeps each piece parseable on its own terms. The part
+ * label sits OUTSIDE the fence on purpose — injected into the body it would be a syntax
+ * error in every language that has no comment starting with `Код`.
+ */
+function chunkCode(node: Code, budget: number): string[] {
+  const language = codeLanguage(node);
+  const value = normalizeObsidianSyntax(node.value);
+  const fence = fenceFor(value);
+  const lines = value.split('\n');
+
+  // The label's own cost depends on how many fragments there will be, which depends on the
+  // label — so the estimate is iterated to a fixed point. `Math.max(assumed, 2)` forces a
+  // label into the very first estimate, keeping the overhead an over- not under-estimate.
+  let groups: string[][] = [lines];
+  let assumed = 1;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const overhead = countTokens(
+      renderCodeFragment('', language, fence, assumed, Math.max(assumed, 2)),
+    );
+    groups = packCodeLines(lines, Math.max(1, budget - overhead));
+    if (groups.length <= assumed) break;
+    assumed = groups.length;
+  }
+
+  return groups.map((group, index) =>
+    renderCodeFragment(group.join('\n'), language, fence, index + 1, groups.length),
+  );
+}
+
+/** A line that opens or closes a fence: indent, backticks, and an info string if opening. */
+const FENCE_LINE_RE = /^(\s*)(`{3,})(.*)$/;
+
+/** Room a repaired fence needs: a closing line here plus a reopening line in the next part. */
+const FENCE_REPAIR_TOKENS = 12;
+
+/**
+ * Close a fence a split left open and reopen it in the part that follows.
+ *
+ * The chunker cuts a top-level code block itself ({@link chunkCode}), but a fence can
+ * still reach the generic prose splitter from INSIDE another node — a code block nested in
+ * a list item. Half a fence is worse than no fence: everything after the orphaned ``` in
+ * the next chunk reads as code, and the fragment that lost its opening reads as prose.
+ */
+function rebalanceFences(parts: string[]): string[] {
+  let carry: { fence: string; info: string; indent: string } | null = null;
+
+  return parts.map((part) => {
+    const reopened = carry === null ? part : `${carry.indent}${carry.fence}${carry.info}\n${part}`;
+    let open: { fence: string; info: string; indent: string } | null = carry;
+    carry = null;
+
+    for (const line of reopened.split('\n')) {
+      const match = FENCE_LINE_RE.exec(line);
+      if (match === null) continue;
+      const [, indent = '', fence = '', info = ''] = match;
+      if (open === null) {
+        open = { fence, info: info.trim(), indent };
+      } else if (fence.length >= open.fence.length && info.trim().length === 0) {
+        open = null;
+      }
+    }
+
+    if (open === null) return reopened;
+    carry = open;
+    return `${reopened}\n${open.indent}${open.fence}`;
+  });
+}
+
+// ── linearized table rows ──
+
+/**
+ * Longest identifying prefix repeated on every fragment of a torn row. A row whose first
+ * field is itself this large identifies nothing anyway, so the cap is also a sanity bound.
+ */
+const LINEARIZED_ID_MAX_TOKENS = 48;
+
+/**
+ * The fields of a linearized table row, or null when this paragraph is not one.
+ *
+ * The Confluence converter emits a whole table row as ONE paragraph —
+ * `**ID потока:** 4832. **Наименование потока:** …` — so the only thing binding a value to
+ * its field name is that they sit in the same paragraph. Detection is done on the mdast,
+ * not on the rendered text: `nodeToText` has already dropped the `**` by then, and
+ * `Наименование потока:` is indistinguishable from ordinary prose ending in a colon.
+ */
+function linearizedRowFields(node: Paragraph): string[] | null {
+  if (node.children[0]?.type !== 'strong') return null;
+
+  const fields: string[] = [];
+  let current: string[] = [];
+  for (const child of node.children) {
+    const text = nodeToText(child);
+    if (child.type === 'strong' && /:\s*$/.test(text)) {
+      if (current.length > 0) fields.push(current.join('').trim());
+      current = [text];
+      continue;
+    }
+    current.push(text);
+  }
+  if (current.length > 0) fields.push(current.join('').trim());
+
+  return fields.length >= 2 ? fields : null;
+}
+
+/**
+ * Cut a linearized row too large for one chunk, repeating its identifying field on every
+ * fragment. Returns null when the paragraph is not a linearized row.
+ *
+ * A row torn by the prose splitter leaves the field name in one chunk and its value in the
+ * next, and every fragment but the first loses the identifier the row is about — which is
+ * exactly the lookup ("что за поток 4832") the lexical branch exists to serve. A row that
+ * fits a chunk is never touched: whole nodes are packed, never split.
+ */
+function chunkLinearizedRow(node: Paragraph, budget: number): string[] | null {
+  const fields = linearizedRowFields(node);
+  if (fields === null) return null;
+
+  const identity = splitTextByTokenBudget(fields[0] as string, LINEARIZED_ID_MAX_TOKENS)[0] ?? '';
+  const idPrefix = `${identity} `;
+  const idTokens = countTokens(idPrefix);
+
+  const groups: string[][] = [];
+  let current: string[] = [];
+  let currentTokens = 0;
+  for (const field of fields) {
+    // Every group but the first pays for the repeated identity, so its budget is smaller.
+    const groupBudget = groups.length === 0 ? budget : Math.max(1, budget - idTokens);
+    const fieldTokens = countTokens(` ${field}`);
+    if (current.length > 0 && currentTokens + fieldTokens > groupBudget) {
+      groups.push(current);
+      current = [];
+      currentTokens = 0;
+    }
+    current.push(field);
+    currentTokens += fieldTokens;
+  }
+  if (current.length > 0) groups.push(current);
+
+  return groups.flatMap((group, index) => {
+    const body = normalizeObsidianSyntax(group.join(' '));
+    const text = index === 0 ? body : `${idPrefix}${body}`;
+    if (countTokens(text) <= budget) return [text];
+    // A single field larger than a whole chunk: nothing but words left to cut on, and
+    // every resulting piece still has to say which row it belongs to.
+    const parts = splitTextByTokenBudget(body, Math.max(1, budget - idTokens));
+    return parts.map((part, partIndex) =>
+      index === 0 && partIndex === 0 ? part : `${idPrefix}${part}`,
+    );
+  });
+}
+
+/**
+ * Free-text fallback for an oversized node: paragraph/line/word splitting, with any fence
+ * the node carried inside it repaired afterwards. The budget is lowered by the cost of
+ * that repair so a mended part still fits.
+ */
+function splitOversizedText(text: string, budget: number): string[] {
+  if (!text.includes('```')) return splitTextByTokenBudget(text, budget);
+  return rebalanceFences(splitTextByTokenBudget(text, Math.max(1, budget - FENCE_REPAIR_TOKENS)));
+}
+
 // Split a list of nodes at paragraph boundaries to stay within MAX_CHUNK_TOKENS
 function splitAtParagraphBoundaries(nodes: Node[], headerText: string): ChunkPiece[] {
   const pieces: ChunkPiece[] = [];
@@ -507,6 +825,24 @@ function splitAtParagraphBoundaries(nodes: Node[], headerText: string): ChunkPie
     });
     currentNodes = [];
     currentTokens = 0;
+  };
+
+  /**
+   * The buffered text when it is too short to stand as a chunk, consuming the buffer.
+   *
+   * What is buffered directly in front of an oversized node is its lead-in — «Пример
+   * конфигурации:», «config объединения данных из PG и HDFS» — and flushing it produced a
+   * chunk whose entire body was that one caption: it matches the query that the block
+   * below would have answered, and answers nothing. A caption belongs with what it
+   * captions, so it rides on the first fragment instead.
+   */
+  const takeLeadIn = (): string | null => {
+    if (currentNodes.length === 0) return null;
+    const text = normalizeObsidianSyntax(sectionNodesToText(currentNodes));
+    if (countTokens(text) >= MIN_CHUNK_TOKENS) return null;
+    currentNodes = [];
+    currentTokens = 0;
+    return text;
   };
 
   nodes.forEach((node, index) => {
@@ -540,11 +876,29 @@ function splitAtParagraphBoundaries(nodes: Node[], headerText: string): ChunkPie
     // to be cut *inside* itself. Splitting only between nodes leaves a chunk the
     // embedder silently truncates: its tail survives in the payload but never reaches
     // the vector, so the text is stored and yet unfindable.
+    //
+    // WHICH cut depends on what the node is: code is cut on lines and re-fenced, a
+    // linearized table row on its fields with the row's identifier repeated, and only
+    // free prose falls through to paragraph/line/word splitting.
     if (nodeTokens > bodyBudget) {
+      const lead = takeLeadIn();
       flush();
-      for (const part of splitTextByTokenBudget(normalizeObsidianSyntax(nodeText), bodyBudget)) {
-        pieces.push({ text: withBreadcrumb(headerText, part), contentKind: 'text' });
-      }
+      const leadPrefix = lead === null ? '' : `${lead}\n\n`;
+      // The lead-in is charged to the whole node rather than to its first fragment alone:
+      // one budget for one node keeps every fragment the same size and the arithmetic
+      // checkable. It costs at most MIN_CHUNK_TOKENS, and only for nodes that have a
+      // caption at all.
+      const budget = Math.max(1, bodyBudget - countTokens(leadPrefix));
+      const parts = isCode(node)
+        ? chunkCode(node, budget)
+        : ((isParagraph(node) ? chunkLinearizedRow(node, budget) : null) ??
+          splitOversizedText(normalizeObsidianSyntax(nodeText), budget));
+      parts.forEach((part, partIndex) => {
+        pieces.push({
+          text: withBreadcrumb(headerText, partIndex === 0 ? `${leadPrefix}${part}` : part),
+          contentKind: 'text',
+        });
+      });
       return;
     }
 
@@ -561,7 +915,7 @@ function splitAtParagraphBoundaries(nodes: Node[], headerText: string): ChunkPie
 
   flush();
 
-  return mergeUndersizedTail(pieces, headerText);
+  return mergeUndersizedPieces(pieces, headerText);
 }
 
 /**
@@ -712,10 +1066,20 @@ function sectionsToChunks(
         });
       }
     } else {
-      // Section has enough tokens to stand on its own
-      // First flush all pending sections
+      // Section has enough tokens to stand on its own.
+      // A pending section that is still short has no predecessor to have been merged
+      // back into — it is the note's own lead-in ("Статус страницы — [АКТУАЛЬНО]"). Flushed
+      // as it stands it becomes a stub chunk, so it is carried FORWARD into this section
+      // instead: the mirror image of the backward merge above, and its heading travels
+      // with it in the body exactly the same way.
+      const carried: Node[] = [];
       for (const ps of pending) {
-        flushSection(ps);
+        const pendingText = normalizeObsidianSyntax(sectionNodesToText(ps.nodes));
+        if (countTokens(pendingText) < MIN_CHUNK_TOKENS) {
+          carried.push(...ps.nodes);
+        } else {
+          flushSection(ps);
+        }
       }
       pending.length = 0;
 
@@ -723,7 +1087,7 @@ function sectionsToChunks(
       pending.push({
         depth: section.depth,
         sectionPath,
-        nodes: standaloneNodes(section),
+        nodes: [...carried, ...standaloneNodes(section)],
       });
     }
   }
