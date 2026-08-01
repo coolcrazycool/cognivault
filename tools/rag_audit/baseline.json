@@ -1,10 +1,10 @@
 {
   "tool": "cognivault-rag-audit/audit_all",
   "format_version": 1,
-  "created_utc": "2026-08-01T14:29:44+00:00",
-  "label": "d27c997",
+  "created_utc": "2026-08-01T15:21:48+00:00",
+  "label": "ba0133b",
   "provenance": {
-    "commit": "b4c329c",
+    "commit": "ba0133b",
     "dirty": false,
     "dirty_files": [],
     "dump": {
@@ -16,13 +16,13 @@
       {
         "name": "golden.jsonl",
         "path": "tools/eval/golden.jsonl",
-        "sha256": "3c5e4d0b3b6a8574c8088bf914a3e18aa177ad8433afd48b1a7a2fe99ace35bc",
+        "sha256": "ae1b6267f326402ccbfb268b1e8f36a5c59af22bba1749aee9012a9f9a0ed239",
         "rows": 39
       },
       {
         "name": "golden.corpus.jsonl",
         "path": "tools/eval/golden.corpus.jsonl",
-        "sha256": "5787d549f777517fa7591183dabaf8446f7127e41584fe516d4480733396ef2e",
+        "sha256": "9b95a6172b11c4e503f589fad14c1f8b7650991f2d88a721fb9525ca1a8d5ca4",
         "rows": 191
       }
     ],
@@ -50,7 +50,8 @@
       },
       "post": [
         "dedupe_chunks",
-        "group_by_section"
+        "group_by_section",
+        "collapse_cross_file_duplicates"
       ],
       "group_by_section": true
     },
@@ -63,10 +64,11 @@
     "rulers": {
       "audit_convert.py": "cab4f7c5dd39b8bd47db3dd2ba94040953c131bcae493caddb68fa97bb58e023",
       "audit_chunk.ts": "f742f4ed88b6b0c84a508ddcabb88f8b0e69924fc4cba092fd8af740c6e6f27f",
-      "audit_retrieval.py": "8e98ac21b5280d270f61859d35ad7f8ec349c8aa9025114f91101a22332cdb84",
-      "audit_window.py": "6afbfb3baf09881ba2a73f590e5b7517cdd8cf889dec153fe9702786bc535c2c",
+      "audit_retrieval.py": "e19e4b8c08325dad9488ba54b88d8c43caffad7527b2f76a3f693e2762cd1cd6",
+      "audit_window.py": "a18b2a8ccfd27dfe586e05c82c00429f08806d3beeae8f4d8bfc5a480f710c96",
       "section_windows.ts": "bcf98fbdc58c8efbbf6fbb7986d08e34d9f648b919bb49e25ea729902e8a00d1",
-      "sparse_vectors.ts": "4237745216efbe61c78a9baceb38c3c85f0e9321d3afb55ffdab35b971e35123"
+      "sparse_vectors.ts": "4237745216efbe61c78a9baceb38c3c85f0e9321d3afb55ffdab35b971e35123",
+      "collapse_duplicates.ts": "1adb7ee282cfc79a6b13dd9fa30208b98b2b66a79239a3c8aa0e0861af0d8dc2"
     }
   },
   "headline": {
@@ -99,7 +101,7 @@
       "n": 28
     },
     "retrieval.mrr.customer": {
-      "value": 0.8311,
+      "value": 0.8315,
       "n": 28
     },
     "retrieval.hit1.generated": {
@@ -107,7 +109,7 @@
       "n": 160
     },
     "retrieval.mrr.generated": {
-      "value": 0.9045,
+      "value": 0.905,
       "n": 160
     },
     "window.contained.customer": {
@@ -115,12 +117,12 @@
       "n": 28
     },
     "window.contained.generated": {
-      "value": 0.9231,
-      "n": 156
+      "value": 0.9281,
+      "n": 153
     },
     "window.contained.oversized": {
-      "value": 0.8028,
-      "n": 71
+      "value": 0.8143,
+      "n": 70
     }
   },
   "tripwires": {
@@ -147,9 +149,9 @@
     "sections": 260,
     "sections_over_cap": 44,
     "chunks_in_oversized_sections": 603,
-    "window_chars_mean": 2259.7,
-    "window_chars_5_blocks": 11298,
-    "window_ceiling": 0.7875
+    "window_chars_mean": 2257.6,
+    "window_chars_5_blocks": 11288,
+    "window_ceiling": 0.8008
   },
   "thresholds": {
     "convert.word_recall": 0.9993,
@@ -160,29 +162,126 @@
     "chunk.duplicate_share": 0.0728,
     "retrieval.hit1.customer": 0.7143,
     "retrieval.hit1.generated": 0.8375,
-    "retrieval.mrr.customer": 0.7954,
-    "retrieval.mrr.generated": 0.8982,
+    "retrieval.mrr.customer": 0.7958,
+    "retrieval.mrr.generated": 0.8987,
     "window.contained.customer": 0.8929,
-    "window.contained.generated": 0.9167,
-    "window.contained.oversized": 0.7887
+    "window.contained.generated": 0.9216,
+    "window.contained.oversized": 0.8
   },
-  "comparison": {},
-  "baseline": null,
-  "changes": {},
+  "comparison": {
+    "reasons": {
+      "golden": "золотой набор другой (состав файлов или их содержимое) — метрика двигалась бы вместе с разметкой, а не с качеством",
+      "retrieval_config": "другая конфигурация: post: ['dedupe_chunks', 'group_by_section'] → ['dedupe_chunks', 'group_by_section', 'collapse_cross_file_duplicates']"
+    },
+    "blocked": {
+      "3": [
+        "золотой набор другой (состав файлов или их содержимое) — метрика двигалась бы вместе с разметкой, а не с качеством",
+        "другая конфигурация: post: ['dedupe_chunks', 'group_by_section'] → ['dedupe_chunks', 'group_by_section', 'collapse_cross_file_duplicates']"
+      ],
+      "4": [
+        "золотой набор другой (состав файлов или их содержимое) — метрика двигалась бы вместе с разметкой, а не с качеством"
+      ]
+    },
+    "warnings": [
+      "ЛИНЕЙКА СДВИНУЛАСЬ: с базового прогона изменились audit_retrieval.py, audit_window.py, collapse_duplicates.ts — часть дельты может быть изменением ЗАМЕРА, а не качества"
+    ],
+    "comparable": {
+      "1": true,
+      "2": true,
+      "3": false,
+      "4": false
+    }
+  },
+  "baseline": {
+    "created_utc": "2026-08-01T14:29:44+00:00",
+    "commit": "b4c329c",
+    "label": "d27c997"
+  },
+  "changes": {
+    "metrics": {
+      "convert.word_recall": {
+        "delta": 0.0,
+        "quantum": 0.0,
+        "verdict": "same",
+        "baseline": 0.9993,
+        "value": 0.9993
+      },
+      "convert.cell_placement": {
+        "delta": 0.0,
+        "quantum": 0.0,
+        "verdict": "same",
+        "baseline": 0.9997,
+        "value": 0.9997
+      },
+      "convert.code_exact": {
+        "delta": 0.0,
+        "quantum": 0.0,
+        "verdict": "same",
+        "baseline": 0.9655,
+        "value": 0.9655
+      },
+      "chunk.torn_code_share": {
+        "delta": 0.0,
+        "quantum": 0.0,
+        "verdict": "same",
+        "baseline": 0.1746,
+        "value": 0.1746
+      },
+      "chunk.torn_row_share": {
+        "delta": 0.0,
+        "quantum": 0.0,
+        "verdict": "same",
+        "baseline": 0.0216,
+        "value": 0.0216
+      },
+      "chunk.duplicate_share": {
+        "delta": 0.0,
+        "quantum": 0.0,
+        "verdict": "same",
+        "baseline": 0.0728,
+        "value": 0.0728
+      },
+      "retrieval.hit1.customer": {
+        "verdict": "incomparable"
+      },
+      "retrieval.hit1.generated": {
+        "verdict": "incomparable"
+      },
+      "retrieval.mrr.customer": {
+        "verdict": "incomparable"
+      },
+      "retrieval.mrr.generated": {
+        "verdict": "incomparable"
+      },
+      "window.contained.customer": {
+        "verdict": "incomparable"
+      },
+      "window.contained.generated": {
+        "verdict": "incomparable"
+      },
+      "window.contained.oversized": {
+        "verdict": "incomparable"
+      }
+    }
+  },
   "failures": [],
-  "refusals": [],
+  "refusals": [
+    "стык 3 (чанки → выдача (hybrid, попадание по файлу)): золотой набор другой (состав файлов или их содержимое) — метрика двигалась бы вместе с разметкой, а не с качеством",
+    "стык 3 (чанки → выдача (hybrid, попадание по файлу)): другая конфигурация: post: ['dedupe_chunks', 'group_by_section'] → ['dedupe_chunks', 'group_by_section', 'collapse_cross_file_duplicates']",
+    "стык 4 (выдача → окно раздела (cap 4000, центрирование)): золотой набор другой (состав файлов или их содержимое) — метрика двигалась бы вместе с разметкой, а не с качеством"
+  ],
   "warnings": [
-    "базового прогона нет — сравнивать не с чем; первый прогон записывается через --update-baseline"
+    "ЛИНЕЙКА СДВИНУЛАСЬ: с базового прогона изменились audit_retrieval.py, audit_window.py, collapse_duplicates.ts — часть дельты может быть изменением ЗАМЕРА, а не качества"
   ],
   "timing": {
-    "convert": 4.86,
-    "chunk": 6.74,
-    "sections": 4.11,
-    "retrieval": 1.09,
-    "window": 73.68,
-    "total_s": 90.48
+    "convert": 4.78,
+    "chunk": 6.62,
+    "sections": 4.04,
+    "retrieval": 2.59,
+    "window": 70.08,
+    "total_s": 88.11
   },
-  "exit_code": 0,
+  "exit_code": 2,
   "per_query": {
     "retrieval": [
       {
@@ -303,7 +402,7 @@
       {
         "id": "x24-exclusion",
         "origin": "customer",
-        "rank": 9
+        "rank": 8
       },
       {
         "id": "x25-cross_lingual",
@@ -888,7 +987,7 @@
       {
         "id": "g314-precision",
         "origin": "generated",
-        "rank": 29
+        "rank": 24
       },
       {
         "id": "g315-precision",
@@ -968,7 +1067,7 @@
       {
         "id": "g330-disambiguation",
         "origin": "generated",
-        "rank": 31
+        "rank": 28
       },
       {
         "id": "g331-exclusion",
@@ -993,7 +1092,7 @@
       {
         "id": "g335-exclusion",
         "origin": "generated",
-        "rank": 7
+        "rank": 5
       },
       {
         "id": "g336-process",
@@ -1501,7 +1600,7 @@
       {
         "id": "g124-disambiguation",
         "origin": "generated",
-        "judgeable": true,
+        "judgeable": false,
         "containment": 1.0,
         "contained": true
       },
@@ -1661,13 +1760,6 @@
       },
       {
         "id": "g209-precision",
-        "origin": "generated",
-        "judgeable": true,
-        "containment": 1.0,
-        "contained": true
-      },
-      {
-        "id": "g210-precision",
         "origin": "generated",
         "judgeable": true,
         "containment": 1.0,
@@ -2132,8 +2224,8 @@
         "id": "g340-synthesis",
         "origin": "generated",
         "judgeable": true,
-        "containment": 0.7949,
-        "contained": false
+        "containment": 0.8378,
+        "contained": true
       },
       {
         "id": "g341-comparison",
@@ -2221,13 +2313,6 @@
       },
       {
         "id": "g408-disambiguation",
-        "origin": "generated",
-        "judgeable": true,
-        "containment": 1.0,
-        "contained": true
-      },
-      {
-        "id": "g409-disambiguation",
         "origin": "generated",
         "judgeable": true,
         "containment": 1.0,
@@ -2496,7 +2581,7 @@
         "id": "x11-code",
         "origin": "customer",
         "judgeable": true,
-        "containment": 0.8364,
+        "containment": 0.8654,
         "contained": true
       },
       {
@@ -2559,7 +2644,7 @@
         "id": "x21-comparison",
         "origin": "customer",
         "judgeable": true,
-        "containment": 0.4286,
+        "containment": 0.4615,
         "contained": false
       },
       {
@@ -2573,7 +2658,7 @@
         "id": "x24-exclusion",
         "origin": "customer",
         "judgeable": true,
-        "containment": 0.3226,
+        "containment": 0.3103,
         "contained": false
       },
       {
@@ -2636,7 +2721,7 @@
         "id": "x39-synthesis",
         "origin": "customer",
         "judgeable": true,
-        "containment": 0.9167,
+        "containment": 0.9565,
         "contained": true
       }
     ]
