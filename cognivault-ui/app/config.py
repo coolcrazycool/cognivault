@@ -107,11 +107,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # `condense_enabled` — интент-маршрутизация + переписывание вопроса;
         # `grader_enabled` — батч-оценка релевантности (она же реранкер);
         # `rerank_candidates` — ширина ретрива, которую видит грейдер.
+        #
+        # Волна 3: 20 → 40. Recall на этапе поиска — потолок для всего, что дальше,
+        # а грейдер как раз и делает широкую сеть безопасной. Дорожает только этап
+        # оценки: 40 кандидатов бьются на батчи по 12 (`rag_pipeline._BATCH_SIZE`),
+        # то есть ЧЕТЫРЕ вызова грейдера вместо двух — примерно вдвое дороже, но
+        # по-прежнему одна параллельная волна по латентности. Ручка правится из UI,
+        # если нужно вернуть 20.
         "condense_enabled": True,
         "grader_enabled": True,
         "grader_threshold": 4,
         "grader_keep_top": 2,
-        "rerank_candidates": 20,
+        "rerank_candidates": 40,
     },
     # Prompt overrides. ``None`` (NOT the prompt text) is the default on purpose:
     # it means "use the built-in prompt from the code". Storing the full text as

@@ -371,10 +371,15 @@ def test_grade_disabled_by_flag(monkeypatch):
 
 
 def _install_retrieval(monkeypatch, hits: list[dict]):
-    seen: list[tuple[str, int]] = []
+    """Дублёр hybrid-поиска; перехваченный вызов — ``(query, limit, kwargs)``.
 
-    async def fake_hybrid(query, limit, cv=None):
-        seen.append((query, limit))
+    ``**kwargs`` обязателен: волна 3 зовёт поиск с ``group_by_section`` и
+    ``section_max_chars``, жёсткая сигнатура падала бы с ``TypeError``.
+    """
+    seen: list[tuple[str, int, dict]] = []
+
+    async def fake_hybrid(query, limit, cv=None, **kwargs):
+        seen.append((query, limit, kwargs))
         return {"results": hits}
 
     async def fake_content(path, cv=None):
@@ -432,7 +437,8 @@ def test_standalone_question_goes_to_search_and_final_message(monkeypatch):
 
     assert ctx.standalone_question == "как настроить SberOSC"
     assert seen[0][0] == "как настроить SberOSC"
-    assert seen[0][1] == 20, "ширина ретрива — rerank_candidates"
+    assert seen[0][1] == 40, "ширина ретрива — rerank_candidates"
+    assert seen[0][2]["group_by_section"] is True
     assert ctx.user_message["content"].endswith("Вопрос: как настроить SberOSC")
 
 
@@ -510,7 +516,7 @@ def test_expansion_runs_after_selection(monkeypatch):
     hits = [_frag(i) for i in range(1, 6)]
     fetched: list[str] = []
 
-    async def fake_hybrid(query, limit, cv=None):
+    async def fake_hybrid(query, limit, cv=None, **kwargs):
         return {"results": hits}
 
     async def fake_content(path, cv=None):
@@ -564,12 +570,13 @@ def test_kb_question_makes_exactly_two_hidden_calls(monkeypatch):
 
 
 def test_default_width_stays_two_round_trips(monkeypatch):
-    """20 кандидатов (дефолт) → грейдер бьётся на батчи, но стадии всё ещё две.
+    """40 кандидатов (дефолт волны 3) → грейдер бьётся на батчи, стадии всё ещё две.
 
     Батчи уходят одной параллельной волной, поэтому по латентности это по-прежнему
-    два последовательных обращения к модели, как требует план.
+    два последовательных обращения к модели, как требует план; дорожает только
+    стоимость этапа оценки (четыре вызова вместо двух).
     """
-    hits = [_frag(i) for i in range(1, 21)]
+    hits = [_frag(i) for i in range(1, 41)]
     _install_retrieval(monkeypatch, hits)
 
     def handler(prompt):
@@ -584,8 +591,8 @@ def test_default_width_stays_two_round_trips(monkeypatch):
     condense_calls = [p for p in calls if _is_condense(p)]
     grade_calls = [p for p in calls if not _is_condense(p)]
     assert len(condense_calls) == 1
-    # 20 кандидатов / батч 12 → два вызова грейдера, но в одной волне.
-    assert len(grade_calls) == 2
+    # 40 кандидатов / батч 12 → четыре вызова грейдера, но в одной волне.
+    assert len(grade_calls) == 4
 
 
 def test_grade_batches_run_concurrently(monkeypatch):

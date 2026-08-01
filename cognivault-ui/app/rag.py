@@ -9,15 +9,15 @@ discipline on long contexts.
 
 The default ``mode == "auto"`` path performs *smart context expansion*: intent
 routing + query condensing (:mod:`app.rag_pipeline`), hybrid retrieval, a batched
-relevance grader, group-by-file, and a per-file decision between a bare chunk, a
-section slice, or the whole document — all under a character budget derived from
-the model's context window and a hard cap on the number of blocks. The legacy
-``semantic``/``context`` sources remain for backward compatibility.
+relevance grader, group-by-file, and a per-file decision between a bare chunk, the
+section body (supplied by the backend's ``group_by_section`` search), or the whole
+document — all under a character budget derived from the model's context window
+and a hard cap on the number of blocks. The legacy ``semantic``/``context``
+sources remain for backward compatibility.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -75,7 +75,14 @@ _NO_ANSWER = "В доступных мне документах ответа н�
 
 # Auto-mode internal retrieval width (independent of any stored `limit`): the
 # grader re-ranks this many candidates down to `_MAX_CONTEXT_BLOCKS`.
-_RERANK_CANDIDATES = 20
+#
+# Wave 3 widened this 20 → 40: recall at the retrieval stage is the ceiling for
+# everything downstream, and the grader is what makes a wider net safe. The cost
+# is the grading stage, not the answer: 40 candidates are graded in batches of 12
+# (`rag_pipeline._BATCH_SIZE`), i.e. FOUR grader calls instead of two — roughly
+# double the cost of that stage, still one parallel wave of latency. The knob is
+# editable from the UI (`rag.rerank_candidates`) if an install needs 20 back.
+_RERANK_CANDIDATES = 40
 
 # Intents that skip retrieval entirely — the model answers from the history.
 _NO_RAG_INTENTS = ("smalltalk", "clarify")
@@ -147,6 +154,11 @@ def _norm_semantic(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ``chunk_index`` and ``rank`` are carried through (the backend started
     emitting them) for the query log and later re-ranking; they are deliberately
     *not* copied into ``sources``, which stays a UI-facing shape.
+
+    ``section_text`` and ``parent_id`` arrive only from a hybrid search issued
+    with ``group_by_section=True``; both default to the empty string so the
+    semantic fallback (and any older backend) normalises without a KeyError and
+    simply degrades to bare chunk text downstream.
     """
     out: list[dict[str, Any]] = []
     for r in results:
@@ -159,6 +171,8 @@ def _norm_semantic(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "score": r.get("score"),
                 "chunk_index": r.get("chunk_index"),
                 "rank": r.get("rank"),
+                "section_text": r.get("section_text") or "",
+                "parent_id": r.get("parent_id") or "",
             }
         )
     return out
@@ -200,49 +214,6 @@ def _passes_min_score(score: Any, min_score: float | None) -> bool:
 # --------------------------------------------------------------------------- #
 # Pure helpers (unit-tested)
 # --------------------------------------------------------------------------- #
-
-_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
-
-
-def _norm_heading(text: str) -> str:
-    """Case/space-insensitive heading key."""
-    return re.sub(r"\s+", " ", text).strip().casefold()
-
-
-def _slice_section(content: str, section_path: str, cap: int) -> str | None:
-    """Slice ``content`` to the section named by the tail of ``section_path``.
-
-    Splits on markdown headings (``^#{1,6}\\s+``), finds the heading whose text
-    matches the last ``>``-separated segment of ``section_path`` (case/space
-    insensitive), and returns from that heading until the next heading of the
-    SAME-or-higher level, capped at ``cap`` chars. Returns ``None`` when no
-    heading matches (renamed heading / reindex race) so the caller can fall back
-    to the raw chunk text.
-    """
-    tail = section_path.split(">")[-1].strip() if section_path else ""
-    if not tail:
-        return None
-    target = _norm_heading(tail)
-    lines = content.split("\n")
-    start: int | None = None
-    start_level = 0
-    for i, line in enumerate(lines):
-        m = _HEADING_RE.match(line)
-        if m and _norm_heading(m.group(2)) == target:
-            start = i
-            start_level = len(m.group(1))
-            break
-    if start is None:
-        return None
-    end = len(lines)
-    for j in range(start + 1, len(lines)):
-        m = _HEADING_RE.match(lines[j])
-        if m and len(m.group(1)) <= start_level:
-            end = j
-            break
-    section = "\n".join(lines[start:end]).strip()
-    return section[:cap]
-
 
 def _best_score(frags: list[dict[str, Any]]) -> float:
     scores = [
@@ -413,9 +384,22 @@ async def _build_auto(
         return RagContext(intent=intent, standalone_question=rq)
 
     # 1. Retrieve with hybrid search, graceful fallback to semantic.
+    #
+    # `group_by_section` makes the backend deduplicate hits by section and return
+    # the full section body (`section_text`, capped server-side at
+    # `section_max_chars`) alongside each chunk — the index knows the true section
+    # boundaries, which beats re-deriving them from the rendered document here.
+    # The semantic fallback returns neither field; `add_sections` degrades to the
+    # bare chunk in that case.
     try:
         try:
-            raw = await cognivault.hybrid_search(rq, limit, cv=cv)
+            raw = await cognivault.hybrid_search(
+                rq,
+                limit,
+                cv=cv,
+                group_by_section=True,
+                section_max_chars=section_max_chars,
+            )
         except Exception:  # noqa: BLE001 — hybrid missing/404 => semantic fallback
             raw = await cognivault.semantic_search(rq, limit, cv=cv)
     except Exception:  # noqa: BLE001 — any retrieval failure => graceful fallback
@@ -530,14 +514,23 @@ async def _build_auto(
         )
         return True
 
-    def add_sections(frags: list[dict[str, Any]], content: str, title: str, path: str) -> None:
+    def add_sections(frags: list[dict[str, Any]], title: str, path: str) -> None:
+        """Add one block per fragment, preferring the backend's section body.
+
+        ``section_text`` comes from the hybrid search (``group_by_section=True``)
+        and is already capped at ``section_max_chars`` upstream. When it is empty
+        — semantic fallback, an older backend, or a section whose text the index
+        does not have — the bare chunk is used instead and the block is labelled
+        ``depth="chunk"``. No ``content`` is needed here any more; the whole-file
+        branch still fetches it via :func:`cognivault.content`.
+        """
         for f in frags:
             sp = f.get("section_path") or ""
-            sliced = _slice_section(content, sp, section_max_chars)
-            if sliced is None:
-                depth, text = "chunk", (f.get("text") or "")
+            section_text = (f.get("section_text") or "").strip()
+            if section_text:
+                depth, text = "section", section_text
             else:
-                depth, text = "section", sliced
+                depth, text = "chunk", (f.get("text") or "")
             key = (path, text)
             if not text or key in seen:
                 continue
@@ -564,11 +557,11 @@ async def _build_auto(
             block_len = len(_block(_header(n + 1, title, p, ""), content))
             if blocks and used + block_len > budget:
                 # Never partially cut a whole file — downgrade to its section.
-                add_sections(frags, content, title, p)
+                add_sections(frags, title, p)
             else:
                 add(title, p, "", best, content, "file", best_grade)
         else:
-            add_sections(frags, content, title, p)
+            add_sections(frags, title, p)
 
     # Remaining files stay as bare (merged) chunks — capped by `_MAX_CONTEXT_BLOCKS`
     # as well as by the char budget, so a long tail cannot dilute the context.

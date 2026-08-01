@@ -63,8 +63,14 @@ def _parse_sse(text: str) -> list[tuple[str, dict]]:
 # --------------------------------------------------------------------------- #
 
 
-def _hit(i: int, *, section: str = "", text: str | None = None) -> dict:
-    return {
+def _hit(
+    i: int,
+    *,
+    section: str = "",
+    text: str | None = None,
+    section_text: str | None = None,
+) -> dict:
+    hit = {
         "path": f"doc{i}.md",
         "title": f"Документ {i}",
         "section_path": section,
@@ -73,6 +79,11 @@ def _hit(i: int, *, section: str = "", text: str | None = None) -> dict:
         "chunk_index": i,
         "rank": i,
     }
+    if section_text is not None:
+        # Волна 3: бэкенд отдаёт эти поля при group_by_section=True.
+        hit["section_text"] = section_text
+        hit["parent_id"] = f"doc{i}.md#section"
+    return hit
 
 
 def _install_retrieval(monkeypatch, hits: list[dict], contents: dict | None = None):
@@ -82,11 +93,15 @@ def _install_retrieval(monkeypatch, hits: list[dict], contents: dict | None = No
     грейдер — «5» каждому фрагменту (порядок поиска сохраняется, ср. tie-break
     по ранку), поэтому эти тесты продолжают проверять сборку промпта, а не
     отбор — он живёт в ``test_rag_pipeline.py``.
-    """
-    calls: list[tuple[str, int]] = []
 
-    async def fake_hybrid(query, limit, cv=None):
-        calls.append((query, limit))
+    Дублёр принимает ``**kwargs``: ``rag`` зовёт поиск с волновыми ключами
+    (``group_by_section``/``section_max_chars``), и жёсткая сигнатура падала бы
+    с ``TypeError``. Перехваченный вызов — ``(query, limit, kwargs)``.
+    """
+    calls: list[tuple[str, int, dict]] = []
+
+    async def fake_hybrid(query, limit, cv=None, **kwargs):
+        calls.append((query, limit, kwargs))
         return {"results": hits}
 
     async def fake_content(path, cv=None):
@@ -134,6 +149,20 @@ def test_norm_semantic_keeps_chunk_index_and_rank():
     assert out[0]["rank"] == 1
 
 
+def test_norm_semantic_carries_section_text_and_parent_id():
+    """Волна 3: поля group_by_section доезжают до фрагмента."""
+    out = rag._norm_semantic([_hit(1, section_text="## Раздел\n\nтело раздела")])
+    assert out[0]["section_text"] == "## Раздел\n\nтело раздела"
+    assert out[0]["parent_id"] == "doc1.md#section"
+
+
+def test_norm_semantic_defaults_section_fields_for_old_backend():
+    """Ответ без новых полей (semantic-фолбэк) нормализуется в пустые строки."""
+    out = rag._norm_semantic([_hit(1)])
+    assert out[0]["section_text"] == ""
+    assert out[0]["parent_id"] == ""
+
+
 def test_sources_do_not_leak_internal_fields(monkeypatch):
     _install_retrieval(monkeypatch, [_hit(1)])
     ctx = _build("вопрос про архитектуру сервиса", [_hit(1)])
@@ -143,14 +172,101 @@ def test_sources_do_not_leak_internal_fields(monkeypatch):
 
 
 def test_auto_mode_retrieves_rerank_candidates_wide(monkeypatch):
-    """Ширина ретрива в auto — `rerank_candidates` (волна 2: 20), не `limit`."""
+    """Ширина ретрива в auto — `rerank_candidates` (волна 3: 40), не `limit`."""
     calls = _install_retrieval(monkeypatch, [_hit(1)])
     _build("вопрос про архитектуру сервиса", [_hit(1)], limit=3)
-    assert calls[0][1] == 20
+    assert calls[0][1] == 40
 
     calls.clear()
-    _build("вопрос про архитектуру сервиса", [_hit(1)], rerank_candidates=40)
-    assert calls[0][1] == 40
+    _build("вопрос про архитектуру сервиса", [_hit(1)], rerank_candidates=12)
+    assert calls[0][1] == 12
+
+
+def test_auto_mode_asks_backend_to_group_by_section(monkeypatch):
+    """Волна 3: hybrid зовётся с group_by_section и капом на текст раздела."""
+    calls = _install_retrieval(monkeypatch, [_hit(1)])
+    _build("вопрос про архитектуру сервиса", [_hit(1)], section_max_chars=1234)
+
+    assert calls[0][2]["group_by_section"] is True
+    assert calls[0][2]["section_max_chars"] == 1234
+
+
+# --------------------------------------------------------------------------- #
+# Волна 3: текст раздела приходит с бэкенда, а не режется здесь
+# --------------------------------------------------------------------------- #
+
+# Длиннее `file_full_chars` в тестах ниже → whole-file ветка не срабатывает и
+# документ раскрывается по разделам.
+_LONG_DOC = "# Документ 1\n\n" + "полный текст документа " * 50
+
+
+def _build_section(monkeypatch, hits: list[dict]) -> rag.RagContext:
+    """Собрать контекст так, чтобы документ шёл по ветке section-expansion."""
+    _install_retrieval(monkeypatch, hits, {"doc1.md": _LONG_DOC})
+    return _build(
+        "что написано в разделе документа",
+        hits,
+        max_expanded_files=1,
+        file_full_chars=10,
+    )
+
+
+def test_section_text_from_backend_becomes_section_block(monkeypatch):
+    body = "## Раздел\n\nполное тело раздела из индекса"
+    ctx = _build_section(
+        monkeypatch, [_hit(1, section="Раздел", section_text=body)]
+    )
+
+    assert [s["depth"] for s in ctx.sources] == ["section"]
+    assert body in ctx.user_message["content"]
+    # Именно раздел, а не сырой чанк и не весь документ.
+    assert "содержимое фрагмента номер 1" not in ctx.user_message["content"]
+    assert "полный текст документа" not in ctx.user_message["content"]
+
+
+def test_empty_section_text_falls_back_to_chunk(monkeypatch):
+    ctx = _build_section(monkeypatch, [_hit(1, section="Раздел", section_text="")])
+
+    assert [s["depth"] for s in ctx.sources] == ["chunk"]
+    assert "содержимое фрагмента номер 1" in ctx.user_message["content"]
+
+
+def test_missing_section_text_falls_back_to_chunk(monkeypatch):
+    """Старый бэкенд (поля нет вовсе) — тоже чанк, а не падение."""
+    ctx = _build_section(monkeypatch, [_hit(1, section="Раздел")])
+
+    assert [s["depth"] for s in ctx.sources] == ["chunk"]
+    assert "содержимое фрагмента номер 1" in ctx.user_message["content"]
+
+
+def test_semantic_fallback_without_new_fields_still_builds(monkeypatch):
+    """Hybrid недоступен → semantic без section_text/parent_id не ломает сборку."""
+    hits = [_hit(1, section="Раздел"), _hit(2)]
+    _install_retrieval(monkeypatch, hits, {"doc1.md": _LONG_DOC})
+
+    seen: list[tuple[str, int]] = []
+
+    async def boom_hybrid(query, limit, cv=None, **kwargs):
+        raise RuntimeError("hybrid не поддерживается")
+
+    async def fake_semantic(query, limit, cv=None):
+        seen.append((query, limit))
+        return {"results": hits}
+
+    monkeypatch.setattr(rag.cognivault, "hybrid_search", boom_hybrid)
+    monkeypatch.setattr(rag.cognivault, "semantic_search", fake_semantic)
+
+    ctx = _build(
+        "что написано в разделе документа",
+        hits,
+        max_expanded_files=1,
+        file_full_chars=10,
+    )
+
+    assert seen, "semantic-фолбэк не был вызван"
+    assert [s["path"] for s in ctx.sources] == ["doc1.md", "doc2.md"]
+    assert all(s["depth"] == "chunk" for s in ctx.sources)
+    assert "содержимое фрагмента номер 1" in ctx.user_message["content"]
 
 
 # --------------------------------------------------------------------------- #

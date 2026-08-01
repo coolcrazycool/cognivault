@@ -115,19 +115,33 @@ async def semantic_search(
 
 
 async def hybrid_search(
-    query: str, limit: int, cv: dict[str, Any] | None = None
+    query: str,
+    limit: int,
+    cv: dict[str, Any] | None = None,
+    *,
+    group_by_section: bool = False,
+    section_max_chars: int | None = None,
 ) -> dict[str, Any]:
     """POST ``/api/vault/search/hybrid``.
 
     Same request/response contract as :func:`semantic_search` (raw UTF-8 body,
     Bearer auth, ``{results: [...]}`` response). Used by the auto RAG mode; the
     caller falls back to :func:`semantic_search` if this errors/404s.
+
+    ``group_by_section`` asks the backend to deduplicate hits by section and to
+    attach ``parent_id`` plus ``section_text`` (the full section body from the
+    index, truncated to ``section_max_chars``) to every result. Both keys are
+    written into the body **only when set**, so an older backend that does not
+    know them still sees exactly the historical ``{query, limit}`` payload.
     """
     base, token = _resolve_cv(cv)
     url = f"{base}/api/vault/search/hybrid"
-    body = json.dumps({"query": query, "limit": limit}, ensure_ascii=False).encode(
-        "utf-8"
-    )
+    payload: dict[str, Any] = {"query": query, "limit": limit}
+    if group_by_section:
+        payload["group_by_section"] = True
+    if section_max_chars is not None:
+        payload["section_max_chars"] = section_max_chars
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = _auth_headers(
         token, {"Content-Type": "application/json; charset=utf-8"}
     )
