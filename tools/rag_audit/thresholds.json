@@ -1,0 +1,151 @@
+{
+  "note": [
+    "ПОРОГ — ЭТО ПОЛ, А НЕ ЦЕЛЬ. Ни одно число здесь не описывает, каким качество",
+    "должно быть; каждое описывает, ниже чего оно уже уходило и больше уходить не",
+    "должно. Пройденный гейт значит «не сломали», а не «хорошо».",
+    "",
+    "Стартовые значения — измеренные 2026-08-01 на confluence-dump.zip (127 страниц)",
+    "коммитом 87e3ebd. Правило, по которому из измеренного получается порог:",
+    "",
+    "  * ДЕТЕРМИНИРОВАННАЯ метрика (стыки 1–2) — порог РАВЕН измеренному. Тот же дамп",
+    "    и тот же код дают побайтово тот же результат, шума нет, и любое отклонение",
+    "    вниз — настоящая порча.",
+    "  * ВЫБОРОЧНАЯ метрика (стыки 3–4) — порог равен измеренному МИНУС цена одного",
+    "    вопроса (1/n своего origin): 1/28 = 0.0357 для приёмочного набора, 1/160 =",
+    "    0.0063 для сгенерированного, 1/71 = 0.0141 для среза переразмерных разделов.",
+    "    Иначе дрожание одного вопроса роняло бы гейт на каждом прогоне, а гейт,",
+    "    который падает от шума, перестают читать.",
+    "",
+    "Регрессия ловится ВТОРЫМ механизмом, независимо от этих чисел: дельта к базовому",
+    "прогону сверх кванта шума проваливает гейт, даже если значение всё ещё выше пола.",
+    "Поэтому поднимать пороги вслед за каждым улучшением не нужно — их двигают, когда",
+    "улучшение решают закрепить как новый пол.",
+    "",
+    "Абсолютные значения стыков 3–4 посчитаны на multilingual-e5-base, а не на",
+    "GigaChat: это пороги ЭТОГО замера, в прод они не переносятся."
+  ],
+  "measured_on": {
+    "date": "2026-08-01",
+    "commit": "87e3ebd",
+    "dump": "confluence-dump.zip (127 страниц)",
+    "golden": "tools/eval/golden.jsonl + tools/eval/golden.corpus.jsonl (188 отвечаемых)"
+  },
+  "metrics": {
+    "convert.word_recall": {
+      "threshold": 0.9993,
+      "measured": 0.9993,
+      "kind": "deterministic",
+      "note": "пол = измеренному: конвертация детерминирована на фиксированном дампе"
+    },
+    "convert.cell_placement": {
+      "threshold": 0.9997,
+      "measured": 0.9997,
+      "kind": "deterministic",
+      "note": "5 ячеек из 15362 не встали на позицию эталона"
+    },
+    "convert.code_exact": {
+      "threshold": 0.9655,
+      "measured": 0.9655,
+      "kind": "deterministic",
+      "note": "112 из 116 код-макросов побайтово равны забору, 4 доехали инлайном"
+    },
+    "chunk.torn_code_share": {
+      "threshold": 0.1746,
+      "measured": 0.1746,
+      "kind": "deterministic",
+      "direction": "меньше лучше",
+      "note": "22 забора из 126 разъезжаются по чанкам — худшее число стыка 2"
+    },
+    "chunk.torn_row_share": {
+      "threshold": 0.0216,
+      "measured": 0.0216,
+      "kind": "deterministic",
+      "direction": "меньше лучше",
+      "note": "16 строк из 740; из них 16 не влезают в бюджет в одиночку"
+    },
+    "chunk.duplicate_share": {
+      "threshold": 0.0728,
+      "measured": 0.0728,
+      "kind": "deterministic",
+      "direction": "меньше лучше",
+      "note": "67 чанков из 920 в 30 кластерах почти-дубликатов между файлами"
+    },
+    "retrieval.hit1.customer": {
+      "threshold": 0.7143,
+      "measured": 0.75,
+      "kind": "sampled",
+      "n": 28,
+      "quantum": 0.0357,
+      "note": "измеренное минус один вопрос приёмочного набора"
+    },
+    "retrieval.hit1.generated": {
+      "threshold": 0.8375,
+      "measured": 0.8438,
+      "kind": "sampled",
+      "n": 160,
+      "quantum": 0.0063,
+      "note": "измеренное минус один вопрос сгенерированного набора"
+    },
+    "retrieval.mrr.customer": {
+      "threshold": 0.7954,
+      "measured": 0.8311,
+      "kind": "sampled",
+      "n": 28,
+      "quantum": 0.0357,
+      "note": "1/n — верхняя граница сдвига MRR от одного вопроса (найден → не найден)"
+    },
+    "retrieval.mrr.generated": {
+      "threshold": 0.8982,
+      "measured": 0.9045,
+      "kind": "sampled",
+      "n": 160,
+      "quantum": 0.0063,
+      "note": "самая чувствительная метрика стыка 3"
+    },
+    "window.contained.customer": {
+      "threshold": 0.8929,
+      "measured": 0.9286,
+      "kind": "sampled",
+      "n": 28,
+      "quantum": 0.0357,
+      "note": "доля судимых вопросов, у которых containment >= 0.8 на продовых 4000"
+    },
+    "window.contained.generated": {
+      "threshold": 0.9167,
+      "measured": 0.9231,
+      "kind": "sampled",
+      "n": 156,
+      "quantum": 0.0064,
+      "note": "знаменатель — судимые (156 из 158: у двух меньше трёх достижимых термов)"
+    },
+    "window.contained.oversized": {
+      "threshold": 0.7887,
+      "measured": 0.8028,
+      "kind": "sampled",
+      "n": 71,
+      "quantum": 0.0141,
+      "note": "единственный срез, который обрезка вообще может двигать"
+    }
+  },
+  "tripwires": {
+    "note": "нулевой допуск: не метрики качества, а сигнализация. Любое ненулевое значение проваливает гейт",
+    "keys": [
+      "convert.converter_errors",
+      "convert.links_broken",
+      "convert.tables_with_cell_mismatch",
+      "convert.gfm_ragged_out",
+      "convert.images_dropped_no_filename",
+      "convert.pages_below_50pct",
+      "chunk.over_budget",
+      "chunk.tables_split",
+      "chunk.table_rows_lost",
+      "chunk.headerless_table_chunks",
+      "chunk.code_blocks_lost",
+      "chunk.unbalanced_fence_chunks",
+      "chunk.parent_id_collisions",
+      "retrieval.unretrieved.customer",
+      "retrieval.unretrieved.generated",
+      "window.anchor_failures"
+    ]
+  }
+}

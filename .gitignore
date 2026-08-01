@@ -37,3 +37,6 @@ cognivault-ui/**/__pycache__/
 cognivault-ui/**/*.pyc
 cognivault-ui/.venv/
 cognivault-ui/venv/
+
+# RAG-аудит: каталоги прогонов и кэш эмбеддингов (артефакты, не исходники)
+.rag-audit/
