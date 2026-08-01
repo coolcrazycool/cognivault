@@ -23,8 +23,14 @@ export interface RebuildJob {
   id: string;
   status: RebuildStatus;
   phase: RebuildPhase;
-  /** Physical collection being rebuilt — the string the operator had to confirm. */
+  /** Collection being rebuilt — the string the operator had to confirm. */
   collection: string;
+  /**
+   * True when this rebuild is clearing a blocked start: `collection` is then the LEGACY
+   * collection occupying the alias name, and finishing replaces it with the physical
+   * collection plus the alias. Changes what the operator is told, not what runs.
+   */
+  resolvesBlock: boolean;
   /** BM25 scheme version the rebuilt collection is stamped with. */
   schemeVersion: number;
   usersTotal: number;
@@ -122,6 +128,13 @@ function waitForScan(indexer: IndexerEntry['indexer']): Promise<void> {
  * the accepted cost of a single-collection rebuild (the alternative is building a second
  * collection and repointing the alias, which needs the storage for two corpora); the
  * status is explicit about which phase is which so the operator is never guessing.
+ *
+ * It is also the ONLY way out of a blocked start (`qdrantAdmin.blocked`), where a legacy
+ * collection holds the alias name. Nothing special happens here for that case — the
+ * plugin already reports the legacy collection as `admin.collection`, so it is what the
+ * operator confirms and what `dropCollection()` deletes, and `createCollection()` puts
+ * the physical collection plus the alias in its place. The wording changes, the
+ * procedure does not.
  */
 export class CollectionRebuildService {
   private readonly fastify: FastifyInstance;
@@ -153,10 +166,15 @@ export class CollectionRebuildService {
       throw httpError(
         400,
         'CONFIRM_MISMATCH',
-        `Confirmation string does not match. To rebuild, send the exact physical ` +
-          `collection name "${admin.collection}" in "confirm". This DELETES the ` +
-          `collection and with it the vectors of ALL registered users (not just yours), ` +
-          `then re-indexes every user's vault; search returns nothing until that finishes.`,
+        `Confirmation string does not match. To rebuild, send the exact collection name ` +
+          `"${admin.collection}" in "confirm". This DELETES that collection and with it ` +
+          `the vectors of ALL registered users (not just yours), then re-indexes every ` +
+          `user's vault; search returns nothing until that finishes.` +
+          (admin.blocked
+            ? ` "${admin.collection}" is the LEGACY collection blocking search: deleting ` +
+              'it is irreversible and its index cannot be recovered — what survives is ' +
+              'the vault files, which everything is re-indexed from.'
+            : ''),
       );
     }
 
@@ -195,6 +213,7 @@ export class CollectionRebuildService {
       status: 'running',
       phase: 'dropping',
       collection: admin.collection,
+      resolvesBlock: admin.blocked,
       schemeVersion: admin.expectedSchemeVersion,
       usersTotal: users.length,
       usersDone: 0,
@@ -235,12 +254,13 @@ export class CollectionRebuildService {
       try {
         await admin.dropCollection();
       } catch (err: unknown) {
-        // Nothing was destroyed — the collection is still there and still serving.
+        // Nothing was destroyed — the collection is still there, and still doing exactly
+        // what it was doing before this call.
         this.fail(
           job,
           `Failed to drop collection "${job.collection}": ${errorMessage(err)}. Nothing ` +
-            'was destroyed — the collection is intact and still serving. Fix the Qdrant ' +
-            'error and retry.',
+            'was destroyed — the collection is intact. Fix the Qdrant error and retry' +
+            (job.resolvesBlock ? '; search stays blocked until this succeeds.' : '.'),
         );
         return;
       }

@@ -1,8 +1,14 @@
 import { encode } from '@toon-format/toon';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
+import { isHttpError } from '../lib/http-error.js';
 
 function mapErrorToCode(statusCode: number, error: FastifyError): string {
+  // An error built by `httpError()` names its own code and is answering a question the
+  // caller asked — it wins over every mapping below, including the 5xx default.
+  if (isHttpError(error)) {
+    return error.code;
+  }
   // Check for custom error codes set by plugins FIRST (e.g., INVALID_TOON from toon content parser)
   // This must come before the validation check because Fastify may wrap parser errors with validation metadata
   const errWithCode = error as FastifyError & { code?: string };
@@ -31,7 +37,12 @@ async function errorHandlerPlugin(fastify: FastifyInstance): Promise<void> {
   fastify.setErrorHandler((error: FastifyError, request: FastifyRequest, reply: FastifyReply) => {
     const statusCode = error.statusCode ?? 500;
     const code = mapErrorToCode(statusCode, error);
-    const message = statusCode >= 500 ? 'Internal server error' : error.message;
+    // 5xx messages are swallowed because they usually leak internals. A deliberate
+    // `httpError()` is the exception: its text is the whole point of the response — a
+    // 503 that says only "Internal server error" would send the operator hunting for a
+    // bug instead of pressing the button that fixes it.
+    const message =
+      statusCode >= 500 && !isHttpError(error) ? 'Internal server error' : error.message;
 
     fastify.log.error(error);
 

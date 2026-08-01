@@ -132,6 +132,8 @@
     // §3.7 index maintenance (reindex / collection rebuild)
     indexCollectionState: $("index-collection-state"),
     indexSchemeWarn: $("index-scheme-warn"),
+    indexBlocked: $("index-blocked"),
+    indexBlockedName: $("index-blocked-name"),
     reindexBtn: $("reindex-btn"),
     reindexProgress: $("reindex-progress"),
     reindexConsole: $("reindex-console"),
@@ -142,6 +144,8 @@
     rebuildConfirm: $("rebuild-confirm"),
     rebuildConfirmInput: $("rebuild-confirm-input"),
     rebuildCollectionName: $("rebuild-collection-name"),
+    rebuildLegacyWarn: $("rebuild-legacy-warn"),
+    rebuildLegacyName: $("rebuild-legacy-name"),
     rebuildGo: $("rebuild-go"),
     rebuildCancel: $("rebuild-cancel"),
     rebuildProgress: $("rebuild-progress"),
@@ -1489,20 +1493,37 @@
     }
     dom.indexCollectionState.textContent = parts.join(" · ");
 
+    // Заблокированный индекс: поиска нет вообще. Текст статичен в разметке —
+    // подставляем только имя коллекции, его же операторy предстоит ввести ниже.
+    const blocked = info.blocked === true;
+    if (dom.indexBlocked) dom.indexBlocked.hidden = !blocked;
+    if (dom.indexBlockedName) dom.indexBlockedName.textContent = info.collection || "";
+
     // One sentence about what a scheme mismatch MEANS — not two version numbers.
     // A null schemeVersion (collection carries no marker) is stale too, so the
     // test is "not equal to expected", not "both present and different".
-    const stale = info.expectedSchemeVersion != null
+    //
+    // Заблокированная коллекция всегда «не той схемы», но говорить про качество
+    // поиска по словам, когда поиска нет вовсе, — значит уводить в сторону:
+    // сообщение выше уже описало и проблему, и лечение.
+    const stale = !blocked
+      && info.expectedSchemeVersion != null
       && info.schemeVersion !== info.expectedSchemeVersion;
     dom.indexSchemeWarn.hidden = !stale;
     dom.indexSchemeWarn.textContent = stale
       ? "Индекс собран по устаревшей схеме: поиск по словам работает хуже обычного, пока коллекция не пересоздана."
       : "";
     if (dom.rebuildCollectionName) dom.rebuildCollectionName.textContent = info.collection || "";
+    // Отдельное предупреждение в диалоге подтверждения: удаляется единственный
+    // существующий индекс, и снимка с него нет.
+    if (dom.rebuildLegacyWarn) dom.rebuildLegacyWarn.hidden = !blocked;
+    if (dom.rebuildLegacyName) dom.rebuildLegacyName.textContent = info.collection || "";
   }
 
   function showRebuildUnavailable(message) {
     state.collection = null;
+    if (dom.indexBlocked) dom.indexBlocked.hidden = true;
+    if (dom.rebuildLegacyWarn) dom.rebuildLegacyWarn.hidden = true;
     dom.rebuildBlock.hidden = false;
     dom.rebuildControls.hidden = true;
     dom.rebuildUnavailable.hidden = false;
@@ -1525,6 +1546,9 @@
         return;
       }
       dom.indexCollectionState.textContent = "Не удалось получить состояние индекса: " + e.message;
+      // Состояние неизвестно — старая «заблокировано» на экране была бы враньём.
+      if (dom.indexBlocked) dom.indexBlocked.hidden = true;
+      if (dom.rebuildLegacyWarn) dom.rebuildLegacyWarn.hidden = true;
       dom.rebuildBlock.hidden = true;
     }
   }

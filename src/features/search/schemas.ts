@@ -78,6 +78,9 @@ export const semanticSearchSchema = {
     200: SearchResponseSchema,
     400: ErrorResponseSchema,
     500: ErrorResponseSchema,
+    // COLLECTION_BLOCKED — a legacy collection occupies the search alias name and
+    // nothing can be queried until an operator rebuilds it.
+    503: ErrorResponseSchema,
   },
 };
 
@@ -87,6 +90,9 @@ export const lexicalSearchSchema = {
     200: SearchResponseSchema,
     400: ErrorResponseSchema,
     500: ErrorResponseSchema,
+    // COLLECTION_BLOCKED — a legacy collection occupies the search alias name and
+    // nothing can be queried until an operator rebuilds it.
+    503: ErrorResponseSchema,
   },
 };
 
@@ -96,6 +102,9 @@ export const hybridSearchSchema = {
     200: SearchResponseSchema,
     400: ErrorResponseSchema,
     500: ErrorResponseSchema,
+    // COLLECTION_BLOCKED — a legacy collection occupies the search alias name and
+    // nothing can be queried until an operator rebuilds it.
+    503: ErrorResponseSchema,
   },
 };
 

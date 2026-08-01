@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { assertCollectionUsable } from '../../plugins/collection-guard.js';
 import { createAdminInterlock } from './interlock.js';
 import { CollectionRebuildService } from './rebuild-service.js';
 import type {
@@ -29,6 +30,12 @@ export async function adminRoutes(fastify: FastifyInstance): Promise<void> {
     '/reindex',
     { schema: reindexSchema },
     async (request, reply) => {
+      // Per-route, not a plugin-wide guard: a blocked collection is exactly when
+      // /collection and /collection/rebuild below matter most, so only the routes that
+      // write vectors refuse. A reindex into a collection this build cannot write to
+      // would fail file by file and report a broken job instead of the real cause.
+      assertCollectionUsable(fastify);
+
       const body = request.body;
 
       let target: string | undefined;
@@ -126,10 +133,14 @@ export async function adminRoutes(fastify: FastifyInstance): Promise<void> {
         return reply.status(202).send({
           jobId: job.id,
           status: job.status,
-          message:
-            `Rebuilding "${job.collection}": dropping it, re-creating it at BM25 scheme ` +
-            `v${job.schemeVersion} and re-indexing ${job.usersTotal} user(s). Search ` +
-            'returns nothing until this finishes.',
+          message: job.resolvesBlock
+            ? `Dropping the legacy "${job.collection}" collection, creating the current ` +
+              `one at BM25 scheme v${job.schemeVersion} with the "${fastify.qdrantAdmin.alias}" ` +
+              `alias, and re-indexing ${job.usersTotal} user(s) from their vault files. ` +
+              'Search stays blocked until this finishes; the old index is gone for good.'
+            : `Rebuilding "${job.collection}": dropping it, re-creating it at BM25 scheme ` +
+              `v${job.schemeVersion} and re-indexing ${job.usersTotal} user(s). Search ` +
+              'returns nothing until this finishes.',
         });
       } catch (err: unknown) {
         const error = err as Error & { statusCode?: number; code?: string };

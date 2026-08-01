@@ -68,6 +68,18 @@ retrieval is untouched — but startup logs an error naming both versions and th
 no longer silent. Startup is deliberately *not* failed: the re-index runs through this
 same service, so a process that refused to start would lock the operator out of the fix.
 
+The same reasoning covers a harsher case. Runtime traffic goes through the alias
+`cognivault`, and Qdrant keeps aliases and collections in one namespace — so a legacy
+`cognivault` COLLECTION (built before the alias design) makes the alias impossible to
+create, and its vectors predate the named `dense`/`bm25` schema. The service starts
+anyway, in a **blocked** state: `/health` stays 200, the admin API stays reachable,
+`cognivault_collection_blocked` goes to `1`, and search, `/context` and reindexing answer
+`503 COLLECTION_BLOCKED` rather than an empty result set that would read as "nothing
+found". Nothing is renamed or deleted automatically — the legacy collection is still the
+rollback path. `POST /api/admin/collection/rebuild` (confirm: `cognivault`) drops it,
+creates `cognivault_v2` with the alias and re-indexes every vault; that is the whole
+recovery, and it needs no shell and no database access.
+
 ## Quick Start
 
 ### With Docker (recommended)

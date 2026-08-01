@@ -99,6 +99,12 @@ async function buildTestApp(opts?: {
   summarize?: ReturnType<typeof vi.fn>;
   /** Row returned by the doc_summaries cache lookup. */
   docSummaryRow?: DocSummaryRow;
+  /**
+   * Decorate a BLOCKED `qdrantAdmin`: a legacy collection owns the alias name, so the
+   * pipeline must not write into it. Absent = no decorator at all, which is the shape
+   * every other test in this file runs against.
+   */
+  blockedCollection?: boolean;
 }): Promise<{
   app: FastifyInstance;
   readContent: ReturnType<typeof vi.fn>;
@@ -238,6 +244,18 @@ async function buildTestApp(opts?: {
         );
 
         f.decorate('metrics', metricsObj as unknown as FastifyInstance['metrics']);
+
+        if (opts?.blockedCollection) {
+          f.decorate('qdrantAdmin', {
+            alias: 'cognivault',
+            collection: 'cognivault',
+            blocked: true,
+            expectedSchemeVersion: 3,
+            describe: vi.fn(),
+            dropCollection: vi.fn(),
+            createCollection: vi.fn(),
+          } as unknown as FastifyInstance['qdrantAdmin']);
+        }
 
         f.decorate('registry', {
           getAllUsers: vi.fn().mockReturnValue([]),
@@ -615,6 +633,47 @@ describe('pipeline plugin (per-user)', () => {
       expect(embed).not.toHaveBeenCalled();
       expect(upsert).not.toHaveBeenCalled();
       expect(qdrantDelete).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
+  // ── blocked collection ──
+
+  describe('blocked collection', () => {
+    it('indexes nothing and confirms nothing while the collection is blocked', async () => {
+      const { app, upsert, embed, readContent, confirmIndexed, failIndexed } = await buildTestApp({
+        blockedCollection: true,
+      });
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'notes/a.md', type: 'created', contentHash: 'h1' },
+        { path: 'notes/b.md', type: 'updated', contentHash: 'h2' },
+      ]);
+
+      // Not a single write into a collection this build cannot write to and a rebuild is
+      // about to destroy — and no embedding bill for work that would be thrown away.
+      expect(upsert).not.toHaveBeenCalled();
+      expect(embed).not.toHaveBeenCalled();
+      expect(readContent).not.toHaveBeenCalled();
+      // Crucially not confirmed: indexed_files keeps the OLD hash, so the next poll
+      // re-detects these files and indexes them for real once the rebuild lifts the block.
+      expect(confirmIndexed).not.toHaveBeenCalled();
+      expect(failIndexed).toHaveBeenCalledWith('notes/a.md');
+      expect(failIndexed).toHaveBeenCalledWith('notes/b.md');
+
+      await app.close();
+    });
+
+    it('deletions are held back too — nothing reaches the legacy collection', async () => {
+      const { app, qdrantDelete, failIndexed } = await buildTestApp({ blockedCollection: true });
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'notes/gone.md', type: 'deleted', contentHash: '' },
+      ]);
+
+      expect(qdrantDelete).not.toHaveBeenCalled();
+      expect(failIndexed).toHaveBeenCalledWith('notes/gone.md');
 
       await app.close();
     });

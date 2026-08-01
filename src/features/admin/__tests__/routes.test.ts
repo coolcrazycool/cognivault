@@ -59,16 +59,29 @@ const mockPipelineQueue = {
 // ── Collection admin mocks ──
 
 const PHYSICAL_COLLECTION = 'cognivault_v2';
+/** The pre-alias collection that squats the alias name and blocks a start. */
+const LEGACY_COLLECTION = 'cognivault';
 const SCHEME_VERSION = 3;
 
 const mockDropCollection = vi.fn().mockResolvedValue(undefined);
 const mockCreateCollection = vi.fn().mockResolvedValue(undefined);
 const mockDescribeCollection = vi.fn();
 
+/**
+ * Mutable so a test can put the service in the blocked state. Mirrors the plugin, where
+ * `collection` and `blocked` are getters over state a rebuild moves.
+ */
+const collectionState = { blocked: false };
+
 const mockQdrantAdmin = {
   alias: 'cognivault',
-  collection: PHYSICAL_COLLECTION,
   expectedSchemeVersion: SCHEME_VERSION,
+  get blocked(): boolean {
+    return collectionState.blocked;
+  },
+  get collection(): string {
+    return collectionState.blocked ? LEGACY_COLLECTION : PHYSICAL_COLLECTION;
+  },
   describe: mockDescribeCollection,
   dropCollection: mockDropCollection,
   createCollection: mockCreateCollection,
@@ -181,6 +194,7 @@ describe('admin reindex routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsIndexingValue.value = false;
+    collectionState.blocked = false;
     mockUserQdrantDelete.mockResolvedValue(undefined);
     mockPipelineQueueOnIdle.mockResolvedValue(undefined);
     mockDropCollection.mockResolvedValue(undefined);
@@ -191,6 +205,7 @@ describe('admin reindex routes', () => {
       schemeVersion: 2,
       expectedSchemeVersion: SCHEME_VERSION,
       pointsCount: 4200,
+      blocked: false,
     });
     mockDbSelect.mockReturnValue({
       from: vi.fn().mockReturnValue({
@@ -364,6 +379,7 @@ describe('admin collection routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsIndexingValue.value = false;
+    collectionState.blocked = false;
     mockUserQdrantDelete.mockResolvedValue(undefined);
     mockPipelineQueueOnIdle.mockResolvedValue(undefined);
     mockDropCollection.mockResolvedValue(undefined);
@@ -374,6 +390,7 @@ describe('admin collection routes', () => {
       schemeVersion: 2,
       expectedSchemeVersion: SCHEME_VERSION,
       pointsCount: 4200,
+      blocked: false,
     });
   });
 
@@ -417,6 +434,7 @@ describe('admin collection routes', () => {
         schemeVersion: 2,
         expectedSchemeVersion: SCHEME_VERSION,
         pointsCount: 4200,
+        blocked: false,
       });
     });
 
@@ -427,6 +445,7 @@ describe('admin collection routes', () => {
         schemeVersion: null,
         expectedSchemeVersion: SCHEME_VERSION,
         pointsCount: null,
+        blocked: false,
       });
 
       const response = await app.inject({
@@ -631,6 +650,93 @@ describe('admin collection routes', () => {
       });
 
       expect(response.statusCode).toBe(401);
+    });
+  });
+
+  // The state this whole surface exists for: a legacy collection holds the alias name,
+  // the operator has no shell and no database access, and everything they need has to be
+  // reachable through these four routes.
+  describe('blocked collection', () => {
+    beforeEach(() => {
+      collectionState.blocked = true;
+      mockDescribeCollection.mockResolvedValue({
+        collection: LEGACY_COLLECTION,
+        alias: 'cognivault',
+        schemeVersion: null,
+        expectedSchemeVersion: SCHEME_VERSION,
+        pointsCount: 4321,
+        blocked: true,
+      });
+    });
+
+    it('GET /collection reports the LEGACY collection as the confirm string', async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/admin/collection',
+        headers: AUTH,
+      });
+
+      expect(response.statusCode).toBe(200);
+      // The UI renders this and the operator types `collection` back. In this state that
+      // is the legacy collection — the thing occupying the name and about to be dropped.
+      expect(response.json()).toMatchObject({
+        collection: LEGACY_COLLECTION,
+        blocked: true,
+        pointsCount: 4321,
+      });
+    });
+
+    it('refuses a per-user reindex with 503 COLLECTION_BLOCKED', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/admin/reindex',
+        headers: JSON_AUTH,
+        payload: { scope: 'full' },
+      });
+
+      expect(response.statusCode).toBe(503);
+      const { error } = response.json();
+      expect(error.code).toBe('COLLECTION_BLOCKED');
+      // The message survives the 5xx scrubber and names the way out.
+      expect(error.message).toContain('/api/admin/collection/rebuild');
+      expect(mockRestart).not.toHaveBeenCalled();
+    });
+
+    it('rejects a confirm carrying the physical collection name', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/admin/collection/rebuild',
+        headers: JSON_AUTH,
+        payload: { confirm: PHYSICAL_COLLECTION },
+      });
+
+      expect(response.statusCode).toBe(400);
+      const { error } = response.json();
+      expect(error.code).toBe('CONFIRM_MISMATCH');
+      expect(error.message).toContain(LEGACY_COLLECTION);
+      expect(mockDropCollection).not.toHaveBeenCalled();
+    });
+
+    it('accepts the legacy name and runs the rebuild that unblocks the service', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/admin/collection/rebuild',
+        headers: JSON_AUTH,
+        payload: { confirm: LEGACY_COLLECTION },
+      });
+
+      expect(response.statusCode).toBe(202);
+      // Worded for this state: what is destroyed, what replaces it, what it is rebuilt from.
+      expect(response.json().message).toContain('legacy');
+      expect(response.json().message).toContain('vault files');
+
+      const status = await awaitRebuild(response.json().jobId);
+      expect(status.status).toBe('completed');
+      expect(status.collection).toBe(LEGACY_COLLECTION);
+      expect(mockDropCollection).toHaveBeenCalledTimes(1);
+      expect(mockCreateCollection).toHaveBeenCalledTimes(1);
+      // …and every user was re-indexed from their vault, which is what actually survived.
+      expect(mockRestart).toHaveBeenCalledWith(true);
     });
   });
 });

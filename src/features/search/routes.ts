@@ -1,5 +1,6 @@
 import { SpanStatusCode, TraceFlags, trace } from '@opentelemetry/api';
 import type { FastifyInstance } from 'fastify';
+import { registerCollectionGuard } from '../../plugins/collection-guard.js';
 import type { SearchRequestBody } from './schemas.js';
 import { hybridSearchSchema, lexicalSearchSchema, semanticSearchSchema } from './schemas.js';
 import { SearchService } from './service.js';
@@ -7,6 +8,10 @@ import { SearchService } from './service.js';
 const tracer = trace.getTracer('cognivault-search');
 
 export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
+  // All three endpoints answer 503 COLLECTION_BLOCKED while the collection cannot be
+  // queried, instead of surfacing a raw Qdrant failure or an empty result set.
+  registerCollectionGuard(fastify);
+
   // POST /semantic — Semantic search using embedding similarity via Qdrant vector search
   fastify.post<{ Body: SearchRequestBody }>(
     '/semantic',

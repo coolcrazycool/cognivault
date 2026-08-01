@@ -97,7 +97,10 @@ tools/eval/           # RAG eval harness (golden set, gigaragas-style metrics, r
 - Use `fastify.decorate()` for shared services, access via `fastify.serviceName`
 - Auth: `onRequest` hook via Fastify plugin, not per-route middleware; public routes opt out
   with `config: { skipAuth: true }`
-- Error responses: `{ error: { code: "ERROR_CODE", message: "Human-readable" } }`
+- Error responses: `{ error: { code: "ERROR_CODE", message: "Human-readable" } }`. For an
+  error the caller is meant to READ, throw `httpError(status, code, message)`
+  (`src/lib/http-error.ts`): the error handler renders its code and message verbatim,
+  including on 5xx, where every other message is replaced by "Internal server error"
 
 ### Testing
 - Colocated: `src/**/__tests__/*.test.ts`; integration in `test/`
@@ -180,6 +183,23 @@ how it got there.
   physical collection is `cognivault_v2`. A re-index can build a new collection and repoint
   the alias atomically. Maintenance calls target the physical name. `user_id` is a keyword
   index with `is_tenant: true`.
+- **A name collision starts BLOCKED, it does not exit.** Qdrant keeps aliases and
+  collections in one namespace, so a legacy `cognivault` COLLECTION makes the alias
+  impossible to create, and its vectors predate the named `dense`/`bm25` schema. Startup
+  logs one `log.error`, sets the gauge `cognivault_collection_blocked = 1` and comes up:
+  `/health` stays 200 and the admin API — which hosts the only cure — stays reachable.
+  While `fastify.qdrantAdmin.blocked` is true, `/search/*`, `/context` and
+  `POST /api/admin/reindex` answer **503 `COLLECTION_BLOCKED`** (never an empty result
+  set, which an agent reads as "nothing found"), the pipeline refuses every batch and
+  `failIndexed`s it so the next poll retries, and `purgeUserVectors` is skipped — the
+  legacy collection is not this build's to touch. `qdrantAdmin.collection` then names the
+  LEGACY collection, so that is what `confirm` must carry and what `dropCollection()`
+  deletes; `createCollection()` puts `cognivault_v2` + the alias in its place (clearing an
+  orphaned `cognivault_v2` from a half-finished manual migration first) and lifts the
+  block in-process, without a restart. Nothing is renamed or deleted at startup — the
+  legacy collection stays the rollback path until an operator confirms. The manual
+  delete-the-collection migration in `deploy/dropapp/README.md` §3.6 is now the fallback,
+  not the route.
 - **One creation path for the collection** — `createCollectionWithSchema()` in
   `src/plugins/qdrant.ts` is the ONLY place a collection is created (schema, payload
   indexes, tenant index, BM25 scheme marker). Startup reaches it via `resolveCollection`,

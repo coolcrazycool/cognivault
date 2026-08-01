@@ -65,6 +65,8 @@ export const reindexSchema = {
     401: ErrorResponseSchema,
     409: ErrorResponseSchema,
     500: ErrorResponseSchema,
+    // COLLECTION_BLOCKED — the collection cannot be written to; rebuild it first.
+    503: ErrorResponseSchema,
   },
 };
 
@@ -98,6 +100,10 @@ export const CollectionInfoResponseSchema = Type.Object({
   pointsCount: Type.Union([Type.Integer(), Type.Null()], {
     description:
       'Indexed chunks, excluding the internal scheme marker: a freshly created collection reports 0, not 1. Null while the collection is dropped or unreadable.',
+  }),
+  blocked: Type.Boolean({
+    description:
+      'True when nothing can be searched or indexed until this collection is rebuilt: a legacy collection occupies the alias name and its vectors predate the current schema. "collection" then names THAT collection — the one a rebuild confirms and destroys — and search, /context and /reindex answer 503 COLLECTION_BLOCKED.',
   }),
 });
 
@@ -152,7 +158,7 @@ export type RebuildStatusResponse = Static<typeof RebuildStatusResponseSchema>;
 
 export const collectionInfoSchema = {
   description:
-    'Name and BM25 scheme version of the physical collection behind the search alias. Read this before a rebuild — the operator has to type "collection" back to confirm.',
+    'Name and BM25 scheme version of the physical collection behind the search alias, plus whether it is blocked. Read this before a rebuild — the operator has to type "collection" back to confirm, and that is the name of whatever currently occupies the namespace: the physical collection normally, the legacy collection when "blocked" is true.',
   response: {
     200: CollectionInfoResponseSchema,
     401: ErrorResponseSchema,

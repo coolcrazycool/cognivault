@@ -33,6 +33,12 @@ export interface QdrantCollectionInfo {
   expectedSchemeVersion: number;
   /** Points currently in the collection, or null when it cannot be read. */
   pointsCount: number | null;
+  /**
+   * True when nothing can be searched or indexed until an operator rebuilds — a legacy
+   * collection occupies the alias name. `collection` then names THAT collection, which
+   * is what a rebuild confirms and destroys.
+   */
+  blocked: boolean;
 }
 
 /**
@@ -43,10 +49,24 @@ export interface QdrantCollectionInfo {
 export interface QdrantAdmin {
   /** Alias runtime traffic goes through ({@link COLLECTION_NAME}). */
   readonly alias: string;
-  /** Physical collection the alias resolved to at startup. */
+  /**
+   * The collection a rebuild targets: normally the physical collection the alias
+   * resolved to at startup, and in the blocked state the legacy collection squatting
+   * the alias name. Either way it is the string `confirm` must carry, and it is what
+   * {@link dropCollection} deletes.
+   *
+   * NOT a constant — {@link createCollection} moves it to {@link PHYSICAL_COLLECTION}
+   * once a rebuild has resolved a blocked start. Read it at call time.
+   */
   readonly collection: string;
   /** {@link BM25_SCHEME_VERSION} of this build. */
   readonly expectedSchemeVersion: number;
+  /**
+   * True while the collection cannot serve and only an operator can resolve it. Search,
+   * `/context` and indexing refuse with 503; the admin API stays open, because the fix
+   * runs through it.
+   */
+  readonly blocked: boolean;
   describe(): Promise<QdrantCollectionInfo>;
   /** Delete the physical collection. A collection that is already gone is a success. */
   dropCollection(): Promise<void>;
@@ -548,27 +568,61 @@ async function enforceSchemeVersion(
 }
 
 /**
+ * Error code and status the blocked state answers requests with. 503 rather than 500:
+ * the request was fine and the service is healthy — one named resource is unavailable
+ * pending a named human action. Rather than 4xx for the same reason: no client can fix
+ * this by asking differently. Deliberately not 200-with-empty-results, which is the one
+ * answer that lies (an agent reads it as "the vault has nothing on that").
+ */
+export const COLLECTION_BLOCKED_CODE = 'COLLECTION_BLOCKED';
+export const COLLECTION_BLOCKED_STATUS = 503;
+
+/**
+ * What is wrong and what to do about it, in one string. Used verbatim by the startup
+ * log, by the 503 body of every blocked endpoint, and by the indexing refusal — there
+ * is exactly one description of this state and it names the way out.
+ */
+export function collectionBlockedMessage(): string {
+  return (
+    `"${COLLECTION_NAME}" exists as a COLLECTION, not as an alias, so the search alias ` +
+    'cannot be created (Qdrant keeps aliases and collections in one namespace). That ' +
+    'legacy collection predates the named ' +
+    `"${DENSE_VECTOR_NAME}"/"${BM25_VECTOR_NAME}" vector schema, so this build can ` +
+    'neither search it nor index into it. Search and indexing are therefore refused ' +
+    'until an operator resolves it; nothing is renamed or deleted automatically. Fix, ' +
+    'from the running service: settings → «Индекс и поиск» → «Пересоздать коллекцию», ' +
+    `or POST /api/admin/collection/rebuild {"confirm":"${COLLECTION_NAME}"}. That DROPS ` +
+    `the legacy "${COLLECTION_NAME}" collection — irreversible, its vectors are gone — ` +
+    `then creates "${PHYSICAL_COLLECTION}" with the current schema, attaches the ` +
+    `"${COLLECTION_NAME}" alias to it and re-indexes every user from the vault files.`
+  );
+}
+
+/**
  * Resolve the physical collection behind {@link COLLECTION_NAME}, creating it and the
- * alias on first start. Returns the physical name and whether it was just created.
+ * alias on first start.
  *
  * Cases:
  *  - alias exists → use whatever it points at. Pointing at something other than
  *    {@link PHYSICAL_COLLECTION} is a warning, never fatal: that is exactly the state
  *    of a rolled-back deployment, and it must keep serving.
- *  - alias missing, a COLLECTION already owns the name → fatal. Qdrant keeps aliases
- *    and collections in one namespace, so the alias cannot be created; only a human
- *    can decide whether the old collection is still needed.
+ *  - alias missing, a COLLECTION already owns the name → BLOCKED. The alias cannot be
+ *    created and the legacy vectors cannot be queried, but the process starts anyway:
+ *    the only cure (`POST /api/admin/collection/rebuild`) runs through this service, and
+ *    an operator with no shell and no database access — the deployment this was written
+ *    for — has no other way to reach it. Exiting here turned a resolvable state into a
+ *    CrashLoopBackOff with the fix locked inside the process that refused to start.
  *  - alias missing, name free → create {@link PHYSICAL_COLLECTION} unless it is
  *    already there (a previous half-finished start), then attach the alias.
  *
- * The old `cognivault` collection is never dropped or modified here — it is the
- * rollback path.
+ * The legacy `cognivault` collection is never dropped, renamed or modified here — it is
+ * still the rollback path, and destroying it stays an explicit, confirmed decision.
  */
 async function resolveCollection(
   client: QdrantClient,
   dimensions: number,
   log: FastifyBaseLogger,
-): Promise<{ collection: string; created: boolean }> {
+): Promise<{ collection: string; created: boolean; blocked: boolean }> {
   const { aliases } = await client.getAliases();
   const alias = aliases.find((a) => a.alias_name === COLLECTION_NAME);
 
@@ -584,20 +638,25 @@ async function resolveCollection(
           `"${PHYSICAL_COLLECTION}" and repoint the alias to pick up the hybrid schema`,
       );
     }
-    return { collection: alias.collection_name, created: false };
+    return { collection: alias.collection_name, created: false, blocked: false };
   }
 
   const { collections } = await client.getCollections();
   const names = new Set(collections.map((c) => c.name));
 
   if (names.has(COLLECTION_NAME)) {
-    throw new Error(
-      `"${COLLECTION_NAME}" exists as a COLLECTION, not as an alias, so the alias cannot ` +
-        'be created (Qdrant shares one namespace for both). The old collection is left ' +
-        'untouched on purpose — it is the rollback path. To migrate: re-index into ' +
-        `"${PHYSICAL_COLLECTION}", then rename or delete the legacy "${COLLECTION_NAME}" ` +
-        'collection manually and restart; this service will create the alias.',
+    // Once, at ERROR, with the collection named: this is the only line in the log that
+    // explains why every search is answering 503.
+    log.error(
+      {
+        collection: COLLECTION_NAME,
+        expected: PHYSICAL_COLLECTION,
+        blocked: true,
+        rebuildConfirm: COLLECTION_NAME,
+      },
+      collectionBlockedMessage(),
     );
+    return { collection: COLLECTION_NAME, created: false, blocked: true };
   }
 
   const created = !names.has(PHYSICAL_COLLECTION);
@@ -607,7 +666,7 @@ async function resolveCollection(
 
   await ensureAlias(client, PHYSICAL_COLLECTION, log);
 
-  return { collection: PHYSICAL_COLLECTION, created };
+  return { collection: PHYSICAL_COLLECTION, created, blocked: false };
 }
 
 /** Parse "1.16.3" into { major: 1, minor: 16 }; undefined when unparseable. */
@@ -815,16 +874,28 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
   await logServerVersion(client, fastify.log);
 
   // Resolve (and on first start create) the collection behind the alias. Every
-  // maintenance call below targets the PHYSICAL collection: aliases are for point
-  // traffic, and pinning admin work to the real name keeps it unambiguous while an
-  // alias is being repointed.
-  const { collection, created } = await resolveCollection(client, dimensions, fastify.log);
+  // maintenance call below targets a PHYSICAL collection, never the alias: aliases are
+  // for point traffic, and pinning admin work to a real name keeps it unambiguous while
+  // an alias is being repointed — or, in the blocked state, while there is no alias at all.
+  const {
+    collection: resolvedCollection,
+    created,
+    blocked: initiallyBlocked,
+  } = await resolveCollection(client, dimensions, fastify.log);
+
+  // Both move when a rebuild resolves a blocked start: the target becomes
+  // PHYSICAL_COLLECTION and the block lifts. Everything below reads them at call time.
+  let collection = resolvedCollection;
+  let blocked = initiallyBlocked;
 
   // A collection this build just created needs none of what follows: its schema is the
   // one this build asks for, its indexes and marker were written by
-  // createCollectionWithSchema, and it holds no legacy points to purge.
+  // createCollectionWithSchema, and it holds no legacy points to purge. A BLOCKED one
+  // must be left alone for the opposite reason — it is a foreign corpus this build has
+  // no business reading, stamping, indexing or purging points out of. It is the
+  // operator's to keep or destroy, and until they choose, untouched.
   let schemeMismatch = false;
-  if (!created) {
+  if (!created && !blocked) {
     const info = await client.getCollection(collection);
     assertUsableCollection(info, collection, dimensions, fastify.log);
     // Distinguishes "created before this check and never indexed" from "populated by an
@@ -862,7 +933,16 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
       fastify.metrics.bm25SchemeMismatch.set(mismatch ? 1 : 0);
     }
   };
+  const setBlockedGauge = (isBlocked: boolean): void => {
+    if (fastify.hasDecorator('metrics')) {
+      fastify.metrics.collectionBlocked.set(isBlocked ? 1 : 0);
+    }
+  };
   setSchemeMismatchGauge(schemeMismatch);
+  // Two gauges, two meanings. A blocked collection leaves the scheme gauge at 0 on
+  // purpose: "lexical ranking is degraded" and "nothing is searchable at all" call for
+  // different alerts and different runbook steps, and one gauge cannot say both.
+  setBlockedGauge(blocked);
 
   // Expose factory for tenant-scoped Qdrant clients — raw client stays internal.
   // Reads `holder.current` on every call, so a renewed token is picked up without
@@ -871,13 +951,22 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
     return new TenantQdrantClient(holder.current, userId);
   });
 
-  // Collection-level maintenance for the admin feature. `collection` is pinned to what
-  // the alias resolved to at startup: that is the collection actually holding the
-  // vectors, and it is the name the operator has to type to confirm a rebuild.
+  // Collection-level maintenance for the admin feature. `collection` is whatever
+  // startup resolved: the collection the alias points at, or — on a blocked start — the
+  // legacy collection squatting the alias name. Either way it is the collection actually
+  // occupying the namespace, and the name the operator has to type to confirm a rebuild.
   const qdrantAdmin: QdrantAdmin = {
     alias: COLLECTION_NAME,
-    collection,
     expectedSchemeVersion: BM25_SCHEME_VERSION,
+
+    // Getters, not values: a rebuild that resolves a blocked start moves the target from
+    // the legacy collection to PHYSICAL_COLLECTION, and every later reader must see that.
+    get collection(): string {
+      return collection;
+    },
+    get blocked(): boolean {
+      return blocked;
+    },
 
     async describe(): Promise<QdrantCollectionInfo> {
       const live = holder.current;
@@ -898,14 +987,19 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
       // would report "1 fragment" — indistinguishable at a glance from a small healthy vault,
       // and precisely the state a pod restart mid-rebuild leaves behind: scheme current, no
       // warning, nothing indexed. Count what was indexed, not what is stored.
+      //
+      // Only subtract when a marker was actually read: a collection without one (the
+      // legacy collection of a blocked start, above all) has no marker point to exclude,
+      // and shaving a point off its count would misreport what is about to be destroyed.
       const pointsCount =
-        rawCount === null ? null : recorded === null ? rawCount : Math.max(0, rawCount - 1);
+        rawCount === null ? null : recorded === undefined ? rawCount : Math.max(0, rawCount - 1);
       return {
         collection,
         alias: COLLECTION_NAME,
         schemeVersion: recorded ?? null,
         expectedSchemeVersion: BM25_SCHEME_VERSION,
         pointsCount,
+        blocked,
       };
     },
 
@@ -930,6 +1024,35 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
     },
 
     async createCollection(): Promise<void> {
+      // Blocked start: dropCollection() has just deleted the legacy collection, so the
+      // shared namespace is finally free. Build the structure this build expects —
+      // cognivault_v2 with the alias on top — instead of re-creating the legacy name,
+      // which would only reproduce the collision on the next boot.
+      if (blocked) {
+        await dropOrphanPhysicalCollection(holder.current, fastify.log);
+        await createCollectionWithSchema(
+          holder.current,
+          PHYSICAL_COLLECTION,
+          dimensions,
+          fastify.log,
+        );
+        await ensureAlias(holder.current, PHYSICAL_COLLECTION, fastify.log);
+        // Only now: the target moves and the block lifts together, after the collection
+        // and the alias both exist. A throw above leaves both untouched, so a retry of
+        // the rebuild still drops-and-creates the same way.
+        collection = PHYSICAL_COLLECTION;
+        blocked = false;
+        setBlockedGauge(false);
+        setSchemeMismatchGauge(false);
+        fastify.log.warn(
+          { collection: PHYSICAL_COLLECTION, alias: COLLECTION_NAME },
+          `Legacy "${COLLECTION_NAME}" collection replaced by "${PHYSICAL_COLLECTION}" ` +
+            'plus the alias — search and indexing are unblocked and every user is being ' +
+            're-indexed from the vault files',
+        );
+        return;
+      }
+
       await createCollectionWithSchema(holder.current, collection, dimensions, fastify.log);
       await ensureAlias(holder.current, collection, fastify.log);
       // Freshly stamped with this build's version — whatever the gauge said before, the
@@ -941,11 +1064,54 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
 
   // Expose purge function for user removal cleanup
   fastify.decorate('purgeUserVectors', async (userId: string) => {
+    // While blocked, COLLECTION_NAME resolves to the LEGACY COLLECTION, not to an alias
+    // over ours — a delete-by-filter would reach into a corpus that is not this build's
+    // to modify, for vectors it cannot contain (nothing was ever indexed into it here).
+    if (blocked) {
+      fastify.log.warn(
+        { userId, collection: COLLECTION_NAME },
+        'Skipped the vector purge for a removed user — the collection is blocked and ' +
+          'holds no vectors written by this build; the pending rebuild destroys it whole',
+      );
+      return;
+    }
     await holder.current.delete(COLLECTION_NAME, {
       wait: true,
       filter: { must: [{ key: 'user_id', match: { value: userId } }] },
     });
   });
+}
+
+/**
+ * Remove a stray {@link PHYSICAL_COLLECTION} before a blocked start is rebuilt into it.
+ *
+ * It exists exactly when someone got part-way through the old manual migration — index
+ * into `cognivault_v2`, then delete the legacy collection — and stopped after the first
+ * half. Nothing reads it (the alias never reached it; runtime traffic went to the legacy
+ * collection), and the rebuild that is running re-indexes every user from the vault
+ * files, so keeping half a corpus around only guarantees the create below fails with
+ * "already exists" and leaves the operator with neither collection.
+ */
+async function dropOrphanPhysicalCollection(
+  client: QdrantClient,
+  log: FastifyBaseLogger,
+): Promise<void> {
+  const { collections } = await client.getCollections();
+  if (!collections.some((c) => c.name === PHYSICAL_COLLECTION)) {
+    return;
+  }
+  log.warn(
+    { collection: PHYSICAL_COLLECTION },
+    `Dropping an orphaned "${PHYSICAL_COLLECTION}" left by an unfinished manual ` +
+      'migration — no alias ever pointed at it, and the rebuild re-indexes everything',
+  );
+  try {
+    await client.deleteCollection(PHYSICAL_COLLECTION);
+  } catch (err: unknown) {
+    if (!isNotFoundError(err)) {
+      throw err;
+    }
+  }
 }
 
 /**

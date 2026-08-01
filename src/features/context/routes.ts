@@ -1,5 +1,6 @@
 import { SpanStatusCode, TraceFlags, trace } from '@opentelemetry/api';
 import type { FastifyInstance } from 'fastify';
+import { registerCollectionGuard } from '../../plugins/collection-guard.js';
 import { SearchService } from '../search/service.js';
 import type { ContextRequestBody } from './schemas.js';
 import { contextSchema } from './schemas.js';
@@ -8,6 +9,10 @@ import { ContextService } from './service.js';
 const tracer = trace.getTracer('cognivault-context');
 
 export async function contextRoutes(fastify: FastifyInstance): Promise<void> {
+  // /context is retrieval too: a blocked collection makes it answer 503, not an empty
+  // pack that an agent would summarise as "the vault says nothing about this".
+  registerCollectionGuard(fastify);
+
   fastify.post<{ Body: ContextRequestBody }>(
     '/context',
     { schema: contextSchema },

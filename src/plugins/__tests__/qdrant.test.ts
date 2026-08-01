@@ -58,6 +58,16 @@ function emptyCluster(): void {
   mockGetCollections.mockResolvedValue({ collections: [] });
 }
 
+/**
+ * The blocked state: no alias, and a COLLECTION owns the name the alias needs. This is
+ * what the customer's external Platform V Vector DB looked like — an index built by a
+ * release that predates the alias design.
+ */
+function legacyCollectionCluster(): void {
+  mockGetAliases.mockResolvedValue({ aliases: [] });
+  mockGetCollections.mockResolvedValue({ collections: [{ name: ALIAS }] });
+}
+
 /** Steady state: the alias exists and points at the current physical collection. */
 function provisioned(): void {
   mockGetAliases.mockResolvedValue({
@@ -395,23 +405,137 @@ describe('qdrantPlugin', () => {
       await app.close();
     });
 
-    it('refuses to start when the alias name is taken by a COLLECTION', async () => {
-      mockGetAliases.mockResolvedValue({ aliases: [] });
-      mockGetCollections.mockResolvedValue({ collections: [{ name: ALIAS }] });
+    it('starts BLOCKED when the alias name is taken by a COLLECTION', async () => {
+      legacyCollectionCluster();
       mockCreatePayloadIndex.mockResolvedValue({});
 
       const Fastify = (await import('fastify')).default;
       const { default: qdrantPlugin } = await import('../qdrant.js');
       const app = Fastify({ logger: false });
-      // NOT awaited: awaiting `register` boots the app, and the rejection would then
-      // escape the assertion below.
-      void app.register(qdrantPlugin);
+      const errorSpy = vi.spyOn(app.log, 'error');
 
-      await expect(app.ready()).rejects.toThrow(/exists as a COLLECTION, not as an alias/);
-      // The legacy collection is the rollback path — nothing may touch it.
+      // The whole point: the process comes UP. An operator with no shell and no database
+      // access can only reach the fix (POST /api/admin/collection/rebuild) through it.
+      await app.register(qdrantPlugin);
+      await app.ready();
+
+      expect(app.qdrantAdmin.blocked).toBe(true);
+      // Loudly, once, naming the collection and the way out.
+      const blockedError = errorSpy.mock.calls.find((call) =>
+        String(call[1]).includes('exists as a COLLECTION, not as an alias'),
+      );
+      expect(blockedError).toBeDefined();
+      expect(String(blockedError?.[1])).toContain('/api/admin/collection/rebuild');
+
+      await app.close();
+    });
+
+    it('leaves the legacy collection completely untouched while blocked', async () => {
+      legacyCollectionCluster();
+      mockCreatePayloadIndex.mockResolvedValue({});
+
+      const app = await boot();
+
+      // It is still the operator's rollback path: nothing is renamed, dropped, stamped,
+      // purged or indexed until they confirm a rebuild.
       expect(mockUpdateCollectionAliases).not.toHaveBeenCalled();
       expect(mockCreateCollection).not.toHaveBeenCalled();
+      expect(mockDeleteCollection).not.toHaveBeenCalled();
       expect(mockDelete).not.toHaveBeenCalled();
+      expect(mockUpsert).not.toHaveBeenCalled();
+      expect(mockCreatePayloadIndex).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('reports the LEGACY collection as the rebuild target while blocked', async () => {
+      legacyCollectionCluster();
+      mockGetCollection.mockResolvedValue({ points_count: 4321, config: { params: {} } });
+      mockCreatePayloadIndex.mockResolvedValue({});
+
+      const app = await boot();
+
+      // `confirm` must name what is actually occupying the namespace — the legacy
+      // collection, not the physical one this build would like to have.
+      expect(app.qdrantAdmin.collection).toBe(ALIAS);
+      expect(await app.qdrantAdmin.describe()).toMatchObject({
+        collection: ALIAS,
+        blocked: true,
+        schemeVersion: null,
+        // No marker means no marker point to subtract: the count is what will be lost.
+        pointsCount: 4321,
+      });
+
+      await app.close();
+    });
+
+    it('skips the user-removal vector purge while blocked', async () => {
+      legacyCollectionCluster();
+      const app = await boot();
+
+      await app.purgeUserVectors('user-a');
+
+      // A delete-by-filter would reach into a foreign corpus for vectors this build
+      // never wrote there.
+      expect(mockDelete).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('a rebuild drops the legacy collection and creates the physical one plus the alias', async () => {
+      legacyCollectionCluster();
+      mockCreatePayloadIndex.mockResolvedValue({});
+
+      const app = await boot();
+      expect(app.qdrantAdmin.blocked).toBe(true);
+
+      // Exactly what POST /api/admin/collection/rebuild runs.
+      await app.qdrantAdmin.dropCollection();
+      expect(mockDeleteCollection).toHaveBeenCalledWith(ALIAS);
+
+      // The namespace is free now, so nothing is squatting cognivault_v2 either.
+      mockGetCollections.mockResolvedValue({ collections: [] });
+      await app.qdrantAdmin.createCollection();
+
+      expect(mockCreateCollection).toHaveBeenCalledWith(PHYSICAL, expect.anything());
+      expect(mockUpdateCollectionAliases).toHaveBeenCalledWith({
+        actions: [{ create_alias: { collection_name: PHYSICAL, alias_name: ALIAS } }],
+      });
+      // …and the block is lifted in-process: search and indexing resume without a restart.
+      expect(app.qdrantAdmin.blocked).toBe(false);
+      expect(app.qdrantAdmin.collection).toBe(PHYSICAL);
+
+      await app.close();
+    });
+
+    it('clears an orphaned physical collection before rebuilding a blocked start', async () => {
+      // Half-finished manual migration: indexed into cognivault_v2, never deleted the
+      // legacy collection. Creating over it would fail with "already exists" and leave
+      // the operator with neither.
+      mockGetAliases.mockResolvedValue({ aliases: [] });
+      mockGetCollections.mockResolvedValue({ collections: [{ name: ALIAS }, { name: PHYSICAL }] });
+      mockCreatePayloadIndex.mockResolvedValue({});
+
+      const app = await boot();
+      await app.qdrantAdmin.dropCollection();
+      await app.qdrantAdmin.createCollection();
+
+      expect(mockDeleteCollection.mock.calls.map((call) => call[0])).toEqual([ALIAS, PHYSICAL]);
+      expect(mockCreateCollection).toHaveBeenCalledWith(PHYSICAL, expect.anything());
+
+      await app.close();
+    });
+
+    it('recovers on its own after a restart once the legacy collection is gone', async () => {
+      // Whatever happened during the rebuild, the next boot sees a free namespace and
+      // provisions the normal structure — no residual "blocked" state is persisted.
+      emptyCluster();
+      mockCreatePayloadIndex.mockResolvedValue({});
+
+      const app = await boot();
+
+      expect(app.qdrantAdmin.blocked).toBe(false);
+      expect(mockCreateCollection).toHaveBeenCalledWith(PHYSICAL, expect.anything());
 
       await app.close();
     });
@@ -791,6 +915,7 @@ describe('qdrantPlugin', () => {
         expectedSchemeVersion: BM25_SCHEME_VERSION,
         // 1234 stored minus the scheme marker, which is a point but not content.
         pointsCount: 1233,
+        blocked: false,
       });
 
       await app.close();

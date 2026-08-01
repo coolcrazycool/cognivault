@@ -12,6 +12,7 @@ interface MetricsCollection {
   pipelineDuration: Histogram<'user_id'>;
   contextPacks: Counter<'user_id'>;
   bm25SchemeMismatch: Gauge<string>;
+  collectionBlocked: Gauge<string>;
   removeUserMetrics: (userId: string) => void;
   promRegistry: Registry;
 }
@@ -105,6 +106,17 @@ async function metricsPlugin(fastify: FastifyInstance): Promise<void> {
     registers: [register],
   });
 
+  // Whether the search collection is unusable and waiting on an operator. Set at startup
+  // by the qdrant plugin and cleared when a rebuild resolves it. Deliberately NOT folded
+  // into bm25SchemeMismatch: that gauge means "lexical ranking is degraded, dense search
+  // is fine", this one means "nothing is searchable and nothing is being indexed".
+  // Unlabelled for the same reason — the collection is a process-wide property.
+  const collectionBlocked = new Gauge({
+    name: 'cognivault_collection_blocked',
+    help: '1 when the Qdrant collection cannot serve and only an operator can resolve it (a legacy collection occupies the search alias name) — search and indexing refuse with 503 until POST /api/admin/collection/rebuild',
+    registers: [register],
+  });
+
   // Remove all metric label combinations for a specific user
   function removeUserMetrics(userId: string): void {
     const searchTypes = ['semantic', 'hybrid', 'lexical'];
@@ -131,6 +143,7 @@ async function metricsPlugin(fastify: FastifyInstance): Promise<void> {
     pipelineDuration,
     contextPacks,
     bm25SchemeMismatch,
+    collectionBlocked,
     removeUserMetrics,
     promRegistry: register,
   });

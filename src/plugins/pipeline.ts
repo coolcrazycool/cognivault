@@ -721,6 +721,29 @@ async function pipelinePlugin(fastify: FastifyInstance): Promise<void> {
       return;
     }
 
+    // A blocked collection is not this build's to write into: the name is held by a
+    // legacy collection whose schema rejects our vectors, and the rebuild that fixes it
+    // destroys whatever is in there anyway. Refuse the whole batch rather than upsert
+    // into something about to be dropped.
+    //
+    // failIndexed() (not confirmIndexed) leaves indexed_files holding the OLD hash, so
+    // the next poll re-detects every one of these files and indexes them for real once
+    // the rebuild lifts the block — no file is silently skipped forever. The cost is one
+    // warn per poll cycle instead of one per file, which is the right volume for a state
+    // that persists until a human acts.
+    if (fastify.hasDecorator('qdrantAdmin') && fastify.qdrantAdmin.blocked) {
+      for (const event of events) {
+        indexerEntry.indexer.failIndexed(event.path);
+      }
+      fastify.log.warn(
+        { userId, files: events.length, collection: fastify.qdrantAdmin.collection },
+        'Indexing is blocked: the collection cannot be written to until it is rebuilt ' +
+          '(POST /api/admin/collection/rebuild). These files stay unindexed and are ' +
+          'retried on the next poll',
+      );
+      return;
+    }
+
     const { queue } = indexerEntry;
 
     // Ensure gauge resets to 0 when queue drains

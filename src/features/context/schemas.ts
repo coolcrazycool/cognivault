@@ -92,6 +92,8 @@ export const contextSchema = {
     200: ContextResponseSchema,
     400: ErrorResponseSchema,
     500: ErrorResponseSchema,
+    // COLLECTION_BLOCKED — retrieval is unavailable until the collection is rebuilt.
+    503: ErrorResponseSchema,
   },
 };
 

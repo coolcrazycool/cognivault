@@ -11,6 +11,8 @@ import { ReindexService } from '../service.js';
 process.env.VAULT_PATH = '/tmp/test-vault';
 
 const COLLECTION = 'cognivault_v2';
+/** The pre-alias collection that squats the alias name and blocks a start. */
+const LEGACY_COLLECTION = 'cognivault';
 const SCHEME_VERSION = 3;
 
 /**
@@ -64,20 +66,35 @@ interface Harness {
   };
 }
 
-function buildHarness(userIds: string[] = ['user-a', 'user-b']): Harness {
+interface HarnessOptions {
+  /**
+   * Blocked start: the LEGACY collection holds the alias name, so that is what
+   * `qdrantAdmin` reports as the rebuild target — exactly as the plugin does.
+   */
+  blocked?: boolean;
+}
+
+function buildHarness(
+  userIds: string[] = ['user-a', 'user-b'],
+  options: HarnessOptions = {},
+): Harness {
+  const blocked = options.blocked ?? false;
+  const target = blocked ? LEGACY_COLLECTION : COLLECTION;
   const drop = vi.fn().mockResolvedValue(undefined);
   const create = vi.fn().mockResolvedValue(undefined);
 
   const qdrantAdmin: QdrantAdmin = {
     alias: 'cognivault',
-    collection: COLLECTION,
+    collection: target,
+    blocked,
     expectedSchemeVersion: SCHEME_VERSION,
     describe: vi.fn().mockResolvedValue({
-      collection: COLLECTION,
+      collection: target,
       alias: 'cognivault',
-      schemeVersion: 2,
+      schemeVersion: blocked ? null : 2,
       expectedSchemeVersion: SCHEME_VERSION,
       pointsCount: 10,
+      blocked,
     }),
     dropCollection: drop,
     createCollection: create,
@@ -178,7 +195,64 @@ describe('CollectionRebuildService', () => {
       expect(job.collection).toBe(COLLECTION);
       expect(job.schemeVersion).toBe(SCHEME_VERSION);
       expect(job.usersTotal).toBe(2);
+      expect(job.resolvesBlock).toBe(false);
       await settle(h.service, job.id);
+    });
+  });
+
+  // The recovery path for a start blocked by a legacy `cognivault` COLLECTION: the same
+  // procedure, aimed at a different collection, because that is the one occupying the
+  // namespace.
+  describe('blocked start', () => {
+    it('confirms the LEGACY collection, not the physical one', () => {
+      const h = buildHarness(['user-a'], { blocked: true });
+
+      // cognivault_v2 does not exist yet in this state — confirming it would be
+      // confirming the destruction of nothing.
+      expect(() => h.service.start(COLLECTION)).toThrow(/does not match/);
+      expect(() => h.service.start(COLLECTION)).toThrow(new RegExp(LEGACY_COLLECTION));
+      expect(h.admin.drop).not.toHaveBeenCalled();
+    });
+
+    it('warns that the legacy index is unrecoverable and the files are what survive', () => {
+      const h = buildHarness(['user-a'], { blocked: true });
+
+      expect(() => h.service.start('wrong')).toThrow(/irreversible/);
+      expect(() => h.service.start('wrong')).toThrow(/vault files/);
+    });
+
+    it('drops the legacy collection, re-creates and re-indexes every user', async () => {
+      const h = buildHarness(['user-a', 'user-b'], { blocked: true });
+
+      const job = h.service.start(LEGACY_COLLECTION);
+      expect(job.collection).toBe(LEGACY_COLLECTION);
+      expect(job.resolvesBlock).toBe(true);
+
+      const settled = await settle(h.service, job.id);
+
+      expect(settled.status).toBe('completed');
+      expect(settled.phase).toBe('done');
+      expect(h.admin.drop).toHaveBeenCalledTimes(1);
+      // createCollection() is where the plugin swaps in cognivault_v2 + the alias and
+      // lifts the block; from here the rebuild is the ordinary one.
+      expect(h.admin.create).toHaveBeenCalledTimes(1);
+      expect(settled.usersDone).toBe(2);
+      for (const [, entry] of h.indexers) {
+        expect(entry.indexer.restarts).toEqual([true]);
+      }
+    });
+
+    it('a failed drop leaves the block in place and says so', async () => {
+      const h = buildHarness(['user-a'], { blocked: true });
+      h.admin.drop.mockRejectedValue(new Error('permission denied'));
+
+      const job = h.service.start(LEGACY_COLLECTION);
+      const settled = await settle(h.service, job.id);
+
+      expect(settled.status).toBe('failed');
+      expect(settled.errors[0]).toContain('Nothing was destroyed');
+      expect(settled.errors[0]).toContain('search stays blocked');
+      expect(h.admin.create).not.toHaveBeenCalled();
     });
   });
 

@@ -372,6 +372,50 @@ def test_route_collection_passthrough(client, cvm):
     assert res.json()["collection"] == "cognivault_v2"
 
 
+def test_route_collection_passes_the_blocked_state_through(client, cvm):
+    """A blocked collection must reach the panel intact.
+
+    The proxy re-serialises whatever the backend sent, so the two fields the panel
+    branches on — ``blocked`` and the LEGACY collection name the operator has to
+    type back — have to survive it. Dropping ``blocked`` here would leave the UI
+    rendering a healthy-looking index while every search answers 503.
+    """
+    cvm.set(
+        "GET",
+        "/api/admin/collection",
+        200,
+        {
+            "collection": "cognivault",
+            "alias": "cognivault",
+            "schemeVersion": None,
+            "expectedSchemeVersion": 3,
+            "pointsCount": 4321,
+            "blocked": True,
+        },
+    )
+    res = client.get("/api/admin/collection")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["blocked"] is True
+    assert body["collection"] == "cognivault"
+
+
+def test_route_rebuild_forwards_the_legacy_collection_name(client, cvm):
+    """Confirming a blocked rebuild sends the legacy name, unmodified."""
+    cvm.set(
+        "POST",
+        "/api/admin/collection/rebuild",
+        202,
+        {"jobId": "reb-9", "status": "running", "message": "dropping legacy"},
+    )
+    res = client.post("/api/admin/collection/rebuild", json={"confirm": "cognivault"})
+    assert res.status_code == 200
+    sent = json.loads(
+        cvm.last("POST", "/api/admin/collection/rebuild").content.decode("utf-8")
+    )
+    assert sent == {"confirm": "cognivault"}
+
+
 def test_route_collection_404_degrades_to_501(client, cvm):
     """An older backend has no collection endpoints — say so, don't blow up."""
     res = client.get("/api/admin/collection")
