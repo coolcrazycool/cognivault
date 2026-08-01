@@ -375,6 +375,20 @@ def _history_turns(
     return turns[-_HISTORY_TURNS:]
 
 
+def has_history(messages: list[dict[str, Any]] | None, question: str) -> bool:
+    """Whether this turn has any preceding dialogue.
+
+    Exactly the predicate :func:`condense` calls ``first_turn`` (inverted), and
+    public so that :func:`app.rag._build_auto` can ask the same question BEFORE
+    condense runs. The two must agree: the meta matcher's follow-up-unsafe
+    patterns are handed over to condense on precisely the turns where condense
+    is able to take them (see :data:`app.corpus_scope._PATTERNS`), so a matcher
+    reading "first turn" while condense reads "has history" would leave the
+    anaphora resolved by nobody.
+    """
+    return bool(_history_turns(messages, question))
+
+
 def _too_substantive_for_smalltalk(question: str) -> bool:
     """Cheap veto over the model's ``smalltalk`` verdict.
 

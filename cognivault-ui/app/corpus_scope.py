@@ -7,7 +7,10 @@ Three pure pieces, no model calls anywhere in this module:
   no history there is nothing to resolve against, so ``rag_pipeline.condense``
   short-circuits and the classifier never runs on the first turn — and a
   question about the assistant is almost always the first turn. On a miss it
-  returns ``None`` and the caller does exactly what it did before.
+  returns ``None`` and the caller does exactly what it did before. It takes
+  ``has_history`` for the same reason it exists: the patterns whose object is
+  ELIDED («какие разделы?») are only unambiguous while there is nothing for the
+  ellipsis to point at — see :data:`_PATTERNS`.
 * :data:`SCOPES` / :func:`parse_scope` — the ``scope`` field the condense call
   now returns alongside ``intent``. Absent, unknown or malformed ⇒
   :data:`DEFAULT_SCOPE` (``document``), which is today's behaviour. The
@@ -137,15 +140,41 @@ _STRIP_CHARS = " \t«»\"'`“”„-—–:,()[]"
 #: topic qualifier, so «Что ты знаешь про PSI?» falls through to retrieval while
 #: «Что ты знаешь?» does not. A pattern that would need a wildcard tail is a
 #: pattern that belongs in retrieval.
-_PATTERNS: tuple[tuple[str, str], ...] = (
+#:
+#: The middle field is ``first_turn_only``. This matcher never sees the history,
+#: so every pattern has to be safe read as a BARE TURN-2 UTTERANCE, and a handful
+#: are not: their object is elided, and on turn 2 the ellipsis has an antecedent.
+#: After «Расскажи про продукт Fincert» the turn «Какие разделы?» means *его*
+#: разделы, and answering it from the tree of the whole base is a wrong answer
+#: delivered with no sources — the matcher is the only branch that bypasses the
+#: grader, so a false positive here is not a missed refinement, it is a
+#: substituted answer. Those patterns are therefore restricted to the turn where
+#: the matcher is the ONLY thing that can act: on turn ≥2 ``condense`` runs, it
+#: sees the history, and resolving exactly this anaphora is its job (the rewrite
+#: «Какие разделы в продукте Fincert?» then goes to retrieval and the grader).
+#: Restricting them costs the first-turn coverage nothing — with no history there
+#: is no antecedent and the reading is unambiguous.
+#:
+#: A pattern is ``first_turn_only`` iff its clause leaves an object slot the
+#: history can fill. A clause whose subject is «ты»/«вы» and whose object is
+#: present («о чём ты знаешь», «какие темы ты покрываешь», «какая информация у
+#: тебя есть») is NOT one: its anaphoric reading needs an explicit complement
+#: («…у тебя есть по нему?»), and a complement breaks the full-clause match on
+#: its own.
+_PATTERNS: tuple[tuple[str, bool, str], ...] = (
     # --- about the assistant ------------------------------------------------ #
-    ("assistant", r"что (?:ты |вы )?(?:вообще |ещё |еще |такого )?зна(?:ешь|ете)(?: вообще| ещё| еще)?"),
-    ("assistant", r"что (?:ты |вы )?(?:вообще |ещё |еще )?(?:умеешь|умеете|можешь|можете)(?: делать)?"),
-    ("assistant", r"кто (?:ты|вы)(?: такой| такая| такие)?"),
-    ("assistant", r"что ты за (?:ассистент|бот|модель|помощник)(?: такой| такая)?"),
-    ("assistant", r"(?:с )?чем (?:ты )?(?:можешь |умеешь )?(?:помочь|быть полезен)"),
-    ("assistant", r"(?:о чем|о чём|про что) (?:ты )?(?:знаешь|можешь рассказать)"),
-    ("assistant", r"(?:о себе|про себя)"),
+    ("assistant", False, r"что (?:ты |вы )?(?:вообще |такого )?зна(?:ешь|ете)(?: вообще)?"),
+    # «ещё» is an anaphoric particle: it presupposes something already said. On
+    # turn 1 there is nothing, so the clause is the plain «что ты знаешь». On
+    # turn 2 «Что ты ещё знаешь?» after a document answer means «ещё про него».
+    ("assistant", True, r"что (?:ты |вы )?еще зна(?:ешь|ете)(?: вообще)?"),
+    ("assistant", True, r"что (?:ты |вы )?(?:вообще |такого )?зна(?:ешь|ете) еще"),
+    ("assistant", False, r"что (?:ты |вы )?(?:вообще |ещё |еще )?(?:умеешь|умеете|можешь|можете)(?: делать)?"),
+    ("assistant", False, r"кто (?:ты|вы)(?: такой| такая| такие)?"),
+    ("assistant", False, r"что ты за (?:ассистент|бот|модель|помощник)(?: такой| такая)?"),
+    ("assistant", False, r"(?:с )?чем (?:ты )?(?:можешь |умеешь )?(?:помочь|быть полезен)"),
+    ("assistant", False, r"(?:о чем|о чём|про что) (?:ты )?(?:знаешь|можешь рассказать)"),
+    ("assistant", False, r"(?:о себе|про себя)"),
     # --- about how the assistant works -------------------------------------- #
     #
     # A question about the assistant's own behaviour — the format of its
@@ -157,97 +186,142 @@ _PATTERNS: tuple[tuple[str, str], ...] = (
     # витрина?» carries a subject and goes to retrieval.
     (
         "assistant",
+        False,
         r"(?:в каком (?:виде|формате)|как)(?: ты| вы)? "
         r"(?:отвечаешь|отвечаете|оформляешь ответ|оформляете ответ|"
         r"форматируешь ответ|форматируете ответ)",
     ),
     (
         "assistant",
+        False,
         r"(?:всегда ли )?(?:твой |ваш |мой )?ответ(?:ы)? "
         r"(?:всегда |будет |будут )?(?:в |с )?(?:markdown|разметк[еиой]|"
         r"заголовками|разметкой)(?: с заголовками| с разметкой| и заголовками)?",
     ),
     (
         "assistant",
+        False,
         r"(?:всегда ли |всегда )?(?:ты |вы )?(?:отвечаешь|отвечаете) "
         r"(?:в |с )(?:markdown|разметк[еиой]|заголовками)"
         r"(?: с заголовками| и заголовками)?",
     ),
     (
         "assistant",
+        False,
         r"(?:ты |вы )?(?:используешь|используете)(?: ли)?(?: ты| вы)? "
         r"(?:markdown|разметку)(?: в ответах| в ответе)?",
     ),
     (
         "assistant",
+        False,
         r"откуда (?:ты |вы )?бер[её](?:шь|те) (?:ответы|информацию|данные|факты)",
     ),
-    ("assistant", r"как (?:ты |вы )?(?:работаешь|работаете|устроен|устроена)"),
+    ("assistant", False, r"как (?:ты |вы )?(?:работаешь|работаете|устроен|устроена)"),
     # Self-referential by construction: the clause names «ты»/«вы», so there is
     # no subject left for retrieval to look for.
     (
         "assistant",
+        False,
         r"(?:какие|каких) (?:темы|тем|разделы|направления|вопросы) "
         r"(?:ты |вы )?(?:покрываешь|покрываете|охватываешь|охватываете|"
         r"знаешь|знаете)",
     ),
     (
         "assistant",
+        False,
         r"на какие вопросы (?:ты |вы )?(?:можешь|можете) ответить",
     ),
     (
         "assistant",
+        False,
         r"(?:какая|какие) (?:информация|документы|материалы|данные) "
         r"у (?:тебя|вас)(?: есть)?",
     ),
     # --- about the base as a whole ------------------------------------------ #
-    ("corpus", r"(?:о чем|о чём|про что) (?:эта |эта твоя |твоя )?база(?: знаний)?"),
-    ("corpus", r"что (?:это )?за база(?: знаний)?"),
-    ("corpus", r"(?:о|об|про) (?:эту |этой )?баз[еу](?: знаний)?"),
+    ("corpus", False, r"(?:о чем|о чём|про что) (?:эта |эта твоя |твоя )?база(?: знаний)?"),
+    ("corpus", False, r"что (?:это )?за база(?: знаний)?"),
+    ("corpus", False, r"(?:о|об|про) (?:эту |этой )?баз[еу](?: знаний)?"),
     (
         "corpus",
+        False,
         r"что (?:есть |лежит |хранится |содержится |находится )?"
         r"(?:у тебя )?в (?:твоей )?базе(?: знаний)?",
     ),
     (
         "corpus",
+        False,
         r"(?:какие|каких) (?:есть )?(?:разделы|разделов|темы|тем|направления)"
         r"(?: есть)?(?: у тебя)? в (?:твоей )?базе(?: знаний)?",
     ),
     (
         "corpus",
+        False,
         r"из каких разделов (?:состоит|состоит твоя) баз[аы](?: знаний)?",
     ),
     (
         "corpus",
+        False,
         r"(?:какая |какова )?структур[ауы] (?:у )?базы(?: знаний)?",
     ),
     # «Какие есть разделы?» / «Разделы базы знаний» — the same question with the
     # «в базе» dropped or the verb moved. Both are full-clause anchored: the
     # noun list is closed and nothing may follow it, so «какие есть разделы у
     # витрины fincert_feeds» is not a match.
+    #
+    # FIRST TURN ONLY, and this is the pattern that made the rule necessary.
+    # «Какие разделы?» with no «базы» in it is the base's own tree only while
+    # nothing else has been named; after «Расскажи про продукт Fincert» it is
+    # «какие разделы У НЕГО», and the measured behaviour was intent=meta, zero
+    # model calls, zero sources, the whole corpus tree — a wrong answer with
+    # nothing to check it against. On turn ≥2 the same wording reaches condense
+    # («Какие в нём разделы?» already did, and was rewritten and searched
+    # correctly), so nothing is lost by handing it over.
     (
         "corpus",
+        True,
         r"(?:какие|каких) (?:есть )?"
         r"(?:разделы|разделов|темы|тем|направления)(?: есть)?",
     ),
     (
         "corpus",
+        False,
         r"разделы базы(?: знаний)?",
     ),
+    # «О каких продуктах ты знаешь?» — «знаешь» is second person: the subject is
+    # the assistant's knowledge as a whole, and a follow-up reading would need an
+    # explicit complement («…из них?»), which breaks the full-clause match.
     (
         "corpus",
+        False,
         r"(?:о каких|про какие) (?:продуктах?|проектах?|темах?|системах?|"
-        r"направлениях?) (?:ты )?(?:знаешь|есть (?:информация|данные|материалы)"
-        r"(?: в базе(?: знаний)?)?)",
+        r"направлениях?) (?:ты )?знаешь",
     ),
     (
         "corpus",
+        False,
+        r"(?:о каких|про какие) (?:продуктах?|проектах?|темах?|системах?|"
+        r"направлениях?) есть (?:информация|данные|материалы) "
+        r"в базе(?: знаний)?",
+    ),
+    # The same clause with «в базе» dropped: «О каких продуктах есть информация?»
+    # names the noun but not WHERE, and on turn 2 the previous answer is the
+    # where. Same class as «какие разделы?», weaker only in that the wrong answer
+    # is a superset of the right one rather than a different entity.
+    (
+        "corpus",
+        True,
+        r"(?:о каких|про какие) (?:продуктах?|проектах?|темах?|системах?|"
+        r"направлениях?) есть (?:информация|данные|материалы)",
+    ),
+    (
+        "corpus",
+        False,
         r"какие (?:продукты|проекты|темы|разделы|направления) "
         r"(?:есть |описаны |представлены |лежат )?в базе(?: знаний)?",
     ),
     (
         "corpus",
+        False,
         r"сколько (?:всего )?(?:страниц|документов|файлов|материалов) "
         r"(?:всего )?в базе(?: знаний)?"
         r"(?: и как (?:они )?(?:распределены|разложены|разбиты)"
@@ -255,8 +329,9 @@ _PATTERNS: tuple[tuple[str, str], ...] = (
     ),
 )
 
-_COMPILED: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
-    (kind, re.compile(pattern)) for kind, pattern in _PATTERNS
+_COMPILED: tuple[tuple[str, bool, re.Pattern[str]], ...] = tuple(
+    (kind, first_turn_only, re.compile(pattern))
+    for kind, first_turn_only, pattern in _PATTERNS
 )
 
 
@@ -275,19 +350,38 @@ def _strip_fillers(clause: str) -> str:
         text = stripped
 
 
-def _clause_kind(clause: str) -> str | None:
-    """The family of a single clause, or ``None`` if it is not a meta clause."""
-    for kind, pattern in _COMPILED:
+def _clause_kind(clause: str, has_history: bool) -> str | None:
+    """The family of a single clause, or ``None`` if it is not a meta clause.
+
+    ``has_history`` disables the ``first_turn_only`` patterns — the ones whose
+    object is elided and would therefore be read against the previous turn (see
+    :data:`_PATTERNS`).
+    """
+    for kind, first_turn_only, pattern in _COMPILED:
+        if first_turn_only and has_history:
+            continue
         if pattern.fullmatch(clause):
             return kind
     return None
 
 
-def match_meta(question: str) -> str | None:
+def match_meta(question: str, *, has_history: bool = False) -> str | None:
     """``"assistant"`` / ``"corpus"`` for a question about the base, else ``None``.
 
     Deterministic, zero model calls, works on the very first turn — which is the
     whole point: the condense classifier is skipped when there is no history.
+
+    ``has_history`` says whether this turn has any preceding dialogue — the SAME
+    predicate ``rag_pipeline.condense`` calls ``first_turn`` (see
+    :func:`app.rag_pipeline.has_history`). It narrows the pattern list to the
+    formulations that cannot be read as a follow-up: this matcher never sees the
+    history, so a pattern with an elided object («какие разделы?») is only
+    unambiguous while there is no antecedent. The default is ``False`` — the
+    first-turn reading, i.e. the widest match — because that is the worst case
+    the standing invariants («0 hits on the 56-question control», «exactly 5 hits
+    on the 251 golden questions») must hold under. A caller that forgets the
+    argument therefore gets a measured behaviour, not an unmeasured one; the one
+    production call site (:func:`app.rag._build_auto`) passes it.
 
     A turn matches only when EVERY one of its clauses matches — a bare greeting
     («привет!») is not a clause, it is stripped. That is what keeps the
@@ -312,7 +406,7 @@ def match_meta(question: str) -> str | None:
         clause = _strip_fillers(raw.strip(_STRIP_CHARS))
         if not clause:
             continue
-        kind = _clause_kind(clause)
+        kind = _clause_kind(clause, has_history)
         if kind is None:
             return None
         kinds.append(kind)

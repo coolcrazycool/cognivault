@@ -155,6 +155,71 @@ def test_matcher_ignores_long_input():
 
 
 # --------------------------------------------------------------------------- #
+# D-A: матчер и ВТОРОЙ ход. Пробел измерения: все тесты 2а были однооборотными
+# --------------------------------------------------------------------------- #
+#
+# Матчер не видит истории и стоит шагом 0a, ДО condense, на каждом ходу. Значит
+# каждая формулировка обязана быть безопасной как голая реплика второго хода.
+# Часть формулировок таковой не была: у них опущено дополнение, и на втором ходу
+# его подставляет предыдущая реплика.
+
+#: Воспроизведение дефекта: после «Расскажи про продукт Fincert» эти реплики
+#: означают разделы/темы ПРОДУКТА, а матчер отвечал деревом всей базы — без
+#: единого источника и в обход грейдера (единственная ветка, которая его обходит).
+_FOLLOW_UP_UNSAFE = [
+    "Какие разделы?",
+    "Какие темы?",
+    "Какие есть разделы?",
+    "Какие направления?",
+    "Что ты ещё знаешь?",
+    # Существительное названо, а «где» — нет: на втором ходу «где» подставляет
+    # предыдущий ответ. Форма с якорем («…в базе знаний») не сужается.
+    "О каких продуктах есть информация?",
+]
+
+
+@pytest.mark.parametrize("question", _FOLLOW_UP_UNSAFE)
+def test_elided_question_matches_on_the_first_turn(question):
+    """На первом ходу подставлять нечего — чтение однозначно, поведение прежнее."""
+    assert corpus_scope.match_meta(question, has_history=False) is not None
+
+
+@pytest.mark.parametrize("question", _FOLLOW_UP_UNSAFE)
+def test_elided_question_is_handed_to_condense_on_a_follow_up(question):
+    """С историей — не матчер: разрешение анафоры это работа condense."""
+    assert corpus_scope.match_meta(question, has_history=True) is None
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # Якорь «база» — дополнение на месте, подставлять нечего.
+        "Какие разделы есть в базе знаний?",
+        "О чём эта база?",
+        "Из каких разделов состоит база знаний?",
+        "Перечисли разделы базы",
+        "Сколько всего страниц в базе и как они распределены по разделам?",
+        "О каких продуктах есть информация в базе знаний?",
+        # Подлежащее — «ты»: у вопроса про сам ассистент нет второго чтения,
+        # и типичный поток «привет» → «что ты умеешь?» обязан работать на 2-м ходу.
+        "Кто ты?",
+        "Что ты умеешь?",
+        "Что ты знаешь?",
+        "Какие темы ты покрываешь?",
+        "Какая информация у тебя есть?",
+        "Всегда ли ответ в Markdown с заголовками?",
+        "Откуда ты берёшь ответы?",
+    ],
+)
+def test_anchored_questions_survive_a_follow_up(question):
+    """Сужение не должно съесть якорные формулировки: они верны на любом ходу."""
+    assert corpus_scope.match_meta(question, has_history=True) is not None
+    assert corpus_scope.match_meta(question, has_history=True) == corpus_scope.match_meta(
+        question
+    )
+
+
+# --------------------------------------------------------------------------- #
 # 2б. Поле охвата
 # --------------------------------------------------------------------------- #
 
@@ -450,7 +515,11 @@ def test_hedge_still_fires_where_the_plan_says_it_should():
 
 
 def test_no_control_question_is_swallowed_by_the_meta_matcher():
-    """Ложное срабатывание 2а хуже ложной оговорки: ответ подменяется деревом."""
+    """Ложное срабатывание 2а хуже ложной оговорки: ответ подменяется деревом.
+
+    Проверяется первый ход — там список формулировок шире; с историей он только
+    сужается, так что ноль здесь мажорирует оба случая.
+    """
     matched = [
         row["id"] for row in _control_questions() if corpus_scope.match_meta(row["question"])
     ]
@@ -497,6 +566,16 @@ def test_matcher_hits_exactly_the_meta_rows_of_the_whole_golden_set():
         "g513-corpus_scope",
     }
     assert all(outcomes[rid] == "meta" for rid in hits), hits
+
+    # D-A: сужение по истории не должно стоить набору ни одной строки — все пять
+    # якорные, дополнение у них на месте. Ноль на контроле тем более сохраняется:
+    # с историей список формулировок только сужается.
+    with_history = {
+        row["id"]: corpus_scope.match_meta(row["question"], has_history=True)
+        for row in rows
+        if corpus_scope.match_meta(row["question"], has_history=True)
+    }
+    assert with_history == hits
 
 
 # --------------------------------------------------------------------------- #
@@ -584,16 +663,24 @@ def _install_retrieval(monkeypatch) -> list[str]:
     return seen
 
 
-def _build(query: str, **rcfg) -> rag.RagContext:
+def _build(query: str, messages: list[dict] | None = None, **rcfg) -> rag.RagContext:
     return asyncio.run(
         rag.build_rag_context(
             query,
             {"mode": "auto", "max_expanded_files": 0, **rcfg},
             None,
             {},
-            None,
+            messages,
         )
     )
+
+
+#: История из воспроизведения дефекта: предыдущий ход назвал предмет, и «какие
+#: разделы?» на следующем ходу означает разделы ЭТОГО предмета.
+_FINCERT_HISTORY = [
+    {"role": "user", "content": "Расскажи про продукт Fincert"},
+    {"role": "assistant", "content": "Fincert — это продукт по работе с фидами."},
+]
 
 
 def test_meta_question_is_answered_from_the_section_tree(monkeypatch):
@@ -616,6 +703,57 @@ def test_meta_question_is_answered_from_the_section_tree(monkeypatch):
     # чего нет в истории диалога, то есть запрещает и рассказ об охвате.
     assert ctx.system_message["content"] == rag.META_SYSTEM_PROMPT
     assert ctx.system_message["content"] != rag.NO_RAG_SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize("question", ["Какие разделы?", "Какие темы?"])
+def test_follow_up_about_a_document_is_not_hijacked_by_the_matcher(
+    monkeypatch, question
+):
+    """D-A целиком, на сборке контекста: тот же ход, но с историей.
+
+    Раньше: intent=meta, ноль вызовов, ноль источников, дерево всей базы — на
+    вопрос про разделы ПРОДУКТА. Теперь ход идёт обычным путём: condense видит
+    историю и переписывает вопрос, поиск и грейдер работают, ответ опирается на
+    источники.
+    """
+    seen = _install_retrieval(monkeypatch)
+    _install_listing(monkeypatch, _corpus())
+
+    ctx = _build(question, messages=[*_FINCERT_HISTORY, {"role": "user", "content": question}])
+
+    assert ctx.intent == "kb_question"
+    assert seen == ["condense", "search", "grade"]
+    assert ctx.sources and "Источники:" in ctx.user_message["content"]
+
+
+@pytest.mark.parametrize("question", ["Какие разделы?", "Какие темы?"])
+def test_the_same_question_first_turn_is_still_answered_from_the_tree(
+    monkeypatch, question
+):
+    """Обратная сторона сужения: на первом ходу поведение не изменилось."""
+    seen = _install_retrieval(monkeypatch)
+    _install_listing(monkeypatch, _corpus())
+
+    ctx = _build(question)
+
+    assert ctx.intent == "meta" and seen == [] and ctx.sources == []
+    assert "Структура базы знаний" in ctx.user_message["content"]
+
+
+def test_anchored_meta_question_still_works_as_a_follow_up(monkeypatch):
+    """«Какие разделы есть в базе знаний?» после разговора о продукте — всё ещё мета.
+
+    Сужение бьёт ровно по формулировкам с опущенным дополнением, а не по
+    вопросам про базу вообще.
+    """
+    seen = _install_retrieval(monkeypatch)
+    _install_listing(monkeypatch, _corpus())
+
+    question = "Какие разделы есть в базе знаний?"
+    ctx = _build(question, messages=[*_FINCERT_HISTORY, {"role": "user", "content": question}])
+
+    assert ctx.intent == "meta" and seen == []
+    assert ctx.system_message["content"] == rag.META_SYSTEM_PROMPT
 
 
 def test_meta_branch_falls_through_when_the_listing_is_unavailable(monkeypatch):

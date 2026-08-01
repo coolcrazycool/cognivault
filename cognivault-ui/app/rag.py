@@ -584,6 +584,38 @@ async def _head_block(
     «Источники» block has been selected and rendered under its own budget, so it
     can neither displace a retrieved fragment nor shrink one, and a turn the
     grader refused never gets here at all.
+
+    **Known, deliberately unresolved: the block arrives under an instruction that
+    forbids using it.** ``g509``–``g512`` («какие витрины ClickHouse описаны в
+    базе», «что лежит в Архиве», «какие пользовательские инструкции есть») are
+    what the tree exists to serve, and they do NOT match
+    :func:`app.corpus_scope.match_meta` (deliberately — they carry a subject), so
+    they take this ordinary path. The tree then opens the turn while
+    :data:`SYSTEM_PROMPT` says «отвечай только на основе информации из блока
+    "Источники"» and :data:`CONTEXT_REMINDER` repeats it right before the
+    question — i.e. the instruction nearest the end forbids the block at the
+    head. The tree's own caption states the permission
+    (``corpus_tree._CAPTION``: «По нему можно ответить, ЧТО есть в базе»), but it
+    is ~3 300 tokens away from the question, at the position models attend to
+    least.
+
+    Not fixed here, and the alternatives are recorded rather than left to be
+    re-derived: (1) editing :data:`SYSTEM_PROMPT`/:data:`CONTEXT_REMINDER` is
+    ruled out by the constraint that both are user-editable — a user with a saved
+    copy would never receive the change, and the shipped default would lose the
+    grounding rule that holds the whole answer path together; (2) moving the tree
+    to the tail would give it the position the reminder holds, on EVERY turn;
+    (3) a short code-owned line after the reminder, emitted only when the tree is
+    present, saying the structure block may be used to answer about the base's
+    COMPOSITION while everything factual still comes from «Источники» with
+    [Источник N] — the cheapest of the three, but it is still a licence granted
+    on every turn including the ones that are not about composition, and it
+    cannot be measured offline. Whether the model already uses the tree for
+    ``g509``–``g512`` under the current instruction is a live-stand question:
+    the answer text is the only evidence, and neither this repository's tests nor
+    ``tools/rag_audit`` can see it. So ``g509``–``g512`` ship as a live-stand
+    measurement, and the fix — if the stand shows the model refusing material it
+    was given — is (3).
     """
     if corpus_tree.enabled(rcfg):
         tree = await corpus_tree.tree_block(cv, n_sources)
@@ -730,7 +762,15 @@ async def _build_auto(
     # has no answer to a question about its CONTENT; this question is about the
     # base's shape, which no document in it was ever going to contain, and the
     # answer is built from the real tree rather than generated freely.
-    meta_kind = corpus_scope.match_meta(query)
+    #
+    # `has_history` is what keeps it from ALSO catching a follow-up. The matcher
+    # is blind to the dialogue, so the formulations whose object is elided
+    # («какие разделы?» — his? the base's?) are offered only on the turn where
+    # condense is skipped anyway; from turn 2 on they belong to condense, which
+    # can see what «разделы» refers to. See `corpus_scope._PATTERNS`.
+    meta_kind = corpus_scope.match_meta(
+        query, has_history=rag_pipeline.has_history(messages, query)
+    )
     if meta_kind:
         meta = await _build_meta(query, meta_kind, rcfg, cv, prompts)
         if meta is not None:
@@ -1111,8 +1151,10 @@ async def build_rag_context(
     :func:`app.corpus_scope.match_meta` as being about the base itself is
     answered from the rendered section tree (``intent="meta"``, no sources, no
     model calls before generation). It falls through to the normal path when the
-    vault listing is unavailable — and, by construction, for anything the narrow
-    pattern list does not match. In that last case
+    vault listing is unavailable, for anything the narrow pattern list does not
+    match, and — for the formulations whose object is elided — as soon as there
+    is a history for that ellipsis to point at, since a follow-up is condense's
+    to resolve. In that last case
     ``notice`` explains a retrieval failure, ``answer_override`` carries the
     canned refusal when the grader graded every candidate and rejected them all
     (the rank insurance does not override a total refusal — an invented answer
