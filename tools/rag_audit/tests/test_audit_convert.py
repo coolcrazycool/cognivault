@@ -261,10 +261,14 @@ def test_extract_fences_handles_backticks_inside_payload():
     assert blocks[0]["payload"] == "SELECT `col`"
 
 
-def test_code_in_table_cell_is_reported_as_inlined_not_lost():
+def test_code_in_table_cell_survives_byte_exact():
+    # Раньше код внутри ячейки втягивался в неё простым текстом (status
+    # "inlined") и терял ограждение вместе с языком — на корпусе так пропадала
+    # половина JSON-блоков. Теперь таблица с блочным кодом раскладывается
+    # построчно, а код выводится настоящим огороженным блоком.
     storage = f"<table><tbody><tr><td>Запрос</td><td>{CODE_MACRO}</td></tr></tbody></table>"
     metrics, _body = _convert(storage)
-    assert metrics["code"]["results"][0]["status"] == "inlined"
+    assert metrics["code"]["results"][0]["status"] == "exact"
 
 
 # --- списки -----------------------------------------------------------------

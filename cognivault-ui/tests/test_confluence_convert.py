@@ -328,6 +328,225 @@ def test_table_cell_pipe_escaped():
 
 
 # ---------------------------------------------------------------------------
+# tables: regressions found by measuring the converter on a real corpus
+# ---------------------------------------------------------------------------
+
+
+def test_wide_table_is_linearized_whole_not_truncated_first():
+    """Обрезка не должна опережать решение о линеаризации.
+
+    Широкая таблица (>8 колонок) с тяжёлым rowspan раскрывалась в сетку,
+    которую обрезали по лимиту GFM, и линеаризация получала уже обрубок:
+    на реальной странице так терялось 178 из 262 строк.
+    """
+    head = "".join(f"<th>Поле{i}</th>" for i in range(12))
+    rows = "".join(
+        '<tr><td rowspan="2">повторяющееся значение ячейки очень длинное {0}</td>'.format(i)
+        + "".join(
+            f"<td>значение {i} колонки {j} с достаточно длинным текстом</td>"
+            for j in range(11)
+        )
+        + "</tr>"
+        for i in range(300)
+    )
+    md = _md(f"<table><tbody><tr>{head}</tr>{rows}</tbody></table>")
+
+    assert "Таблица обрезана" not in md
+    # И первая, и последняя строка на месте.
+    assert "**Поле0:** повторяющееся значение ячейки очень длинное 0" in md
+    assert "значение 299 колонки 10 с достаточно длинным текстом" in md
+
+
+def test_linearized_table_still_has_a_last_resort_cap(caplog):
+    """Потолок линеаризации остался страховкой от катастрофического rowspan."""
+    huge = "объединённая ячейка " * 200
+    rows = f'<tr><td rowspan="400">{huge}</td><td>строка номер 0</td></tr>' + "".join(
+        f"<tr><td>строка номер {i}</td></tr>" for i in range(1, 400)
+    )
+    with caplog.at_level(logging.WARNING, logger="cognivault.confluence.convert"):
+        md = _md(f"<table><tbody><tr><th>A</th><th>B</th></tr>{rows}</tbody></table>")
+
+    assert "Таблица обрезана" in md
+    assert "пропущено строк" in md
+    assert "truncated" in caplog.text
+    assert len(md) < convert._MAX_LINEARIZED_TABLE_CHARS * 1.5
+
+
+def test_single_row_table_is_rendered_as_data_not_header():
+    """Однострочная таблица — данные, а не шапка (иначе исчезает целиком)."""
+    schema = (
+        "root<br />|-- source: string (nullable = true) (имя канала cards/uko/afcc)"
+        "<br />|-- client_transaction_id: string (nullable = true)"
+        "<br />|-- event_dt: integer (nullable = true) (формат yyyyMMdd)"
+        "<br />|-- processed_time: long (nullable = true) (техническое поле загрузки)"
+    )
+    md = _md(f"<table><tbody><tr><td><p>{schema}</p></td></tr></tbody></table>")
+    assert "nullable" in md
+    assert "client_transaction_id" in md
+
+    # Короткая пара «ключ — значение» тоже выходит содержимым, а не обглодком.
+    md2 = _md(
+        "<table><tbody><tr>"
+        "<th>Статус страницы</th><th>Актуально</th>"
+        "</tr></tbody></table>"
+    )
+    assert "Статус страницы — Актуально" in md2
+    assert "| --- |" not in md2
+
+
+def test_full_width_row_above_header_becomes_caption():
+    """Строка-название над шапкой — подпись; строки не переставляются."""
+    md = _md(
+        "<table><tbody>"
+        '<tr><td colspan="3">models_monitoring_distr.simple_metrics</td></tr>'
+        "<tr><th>Атрибут</th><th>Тип</th><th>Значение</th></tr>"
+        "<tr><td>depth</td><td>bigint</td><td>Глубина расчёта метрик</td></tr>"
+        "</tbody></table>"
+    )
+    assert "**Таблица: models_monitoring_distr.simple_metrics**" in md
+    # Название не размножено colspan'ом по колонкам тела.
+    assert (
+        "| models_monitoring_distr.simple_metrics "
+        "| models_monitoring_distr.simple_metrics |"
+    ) not in md
+    lines = [line for line in md.splitlines() if line.startswith("|")]
+    assert lines[0] == "| Атрибут | Тип | Значение |"
+    assert lines[2] == "| depth | bigint | Глубина расчёта метрик |"
+
+
+def test_colspan_over_one_header_collapses_to_single_column():
+    """colspan по колонкам ОДНОГО заголовка — уровень вложенности, не данные."""
+    md = _md(
+        "<table><tbody>"
+        '<tr><th colspan="2">Атрибут</th><th>Значение</th></tr>'
+        '<tr><td colspan="2">core</td><td>Данные для обогащения</td></tr>'
+        '<tr><td rowspan="2"><br /></td><td>partitionColumn</td>'
+        "<td>Колонка партиционирования</td></tr>"
+        "<tr><td>alias</td><td>Наименование таблицы</td></tr>"
+        "</tbody></table>"
+    )
+    assert "| Атрибут | Значение |" in md
+    assert "| Атрибут | Атрибут |" not in md
+    assert "| core | Данные для обогащения |" in md
+    # Вложенность сохранена меткой уровня.
+    assert "| — partitionColumn | Колонка партиционирования |" in md
+    assert md.count("partitionColumn") == 1
+    # Сетка осталась прямоугольной.
+    widths = {line.count("|") for line in md.splitlines() if line.startswith("|")}
+    assert widths == {3}
+
+
+def test_colspan_duplicate_kept_once_when_columns_are_real():
+    """Если колонки диапазона несут разные значения, они остаются."""
+    md = _md(
+        "<table><tbody>"
+        '<tr><th colspan="2">Атрибут</th><th>Тип</th></tr>'
+        '<tr><td colspan="2">config_id</td><td>String</td></tr>'
+        "<tr><td>config</td><td>rules</td><td>Array</td></tr>"
+        "</tbody></table>"
+    )
+    assert "| Атрибут | Атрибут | Тип |" in md
+    # Колонки на месте, но размноженное colspan'ом значение не повторяется.
+    assert "| config_id |  | String |" in md
+    assert "| config | rules | Array |" in md
+
+
+def test_heading_inside_cell_does_not_weld_words():
+    """`expand` внутри ячейки становится h3 — без разделителя слова слипались."""
+    md = _md(
+        "<table><tbody>"
+        "<tr><th>Шаг</th><th>Описание</th></tr>"
+        "<tr><td>1</td><td>Нужно отправить его реквизиты"
+        '<ac:structured-macro ac:name="expand">'
+        '<ac:parameter ac:name="title">Пример реквизитов</ac:parameter>'
+        "<ac:rich-text-body><p>CN=CI06076835-IFT-armds, OU=00</p>"
+        "</ac:rich-text-body></ac:structured-macro>"
+        "</td></tr>"
+        "</tbody></table>"
+    )
+    assert "реквизитовCN" not in md
+    assert "Пример реквизитов<br>CN=CI06076835-IFT-armds" in md
+
+
+def test_emoticon_alone_in_cell_becomes_word():
+    """Эмотикон — единственное содержимое ячейки: это значение строки."""
+    md = _md(
+        "<table><tbody>"
+        "<tr><th>Поле</th><th>Обязательное</th><th>Комментарий</th></tr>"
+        '<tr><td>Название</td><td><ac:emoticon ac:name="plus" /></td>'
+        "<td>Указать название потока</td></tr>"
+        '<tr><td>Описание</td><td><ac:emoticon ac:name="cross" /></td>'
+        "<td>Необязательно</td></tr>"
+        "</tbody></table>"
+    )
+    assert "| Название | да | Указать название потока |" in md
+    assert "| Описание | нет | Необязательно |" in md
+
+
+def test_decorative_emoticon_next_to_text_still_dropped():
+    md = _md('<p>Готово <ac:emoticon ac:name="plus" /> к работе</p>')
+    assert "да" not in md
+    assert "Готово" in md
+
+
+def test_code_macro_in_cell_keeps_its_fence():
+    """Забор в GFM-ячейку не влезает, поэтому таблица с кодом линеаризуется."""
+    code = '{\n\t"config_id": "12345",\n\t"rules": []\n}'
+    md = _md(
+        "<table><tbody>"
+        "<tr><th>Атрибут</th><th>Пример ответа</th></tr>"
+        "<tr><td>config</td><td>"
+        '<ac:structured-macro ac:name="code">'
+        '<ac:parameter ac:name="language">json</ac:parameter>'
+        f"<ac:plain-text-body><![CDATA[{code}]]></ac:plain-text-body>"
+        "</ac:structured-macro></td></tr>"
+        "</tbody></table>"
+    )
+    assert "```json\n" + code + "\n```" in md
+    assert "| --- |" not in md
+    assert "**Атрибут:** config" in md
+
+
+def test_code_repeated_by_rowspan_is_fenced_once():
+    """rowspan размножает ячейку с кодом — забор выводится один раз."""
+    code = '{\n\t"rules": [\n\t\t{"id": "010d87fc"}\n\t]\n}'
+    rows = "".join(
+        f"<tr><td>атрибут{i}</td><td>Описание атрибута номер {i}</td></tr>"
+        for i in range(1, 4)
+    )
+    md = _md(
+        "<table><tbody>"
+        "<tr><th>Атрибут</th><th>Значение</th><th>Пример ответа</th></tr>"
+        '<tr><td>атрибут0</td><td>Описание нулевого атрибута</td><td rowspan="4">'
+        '<ac:structured-macro ac:name="code">'
+        '<ac:parameter ac:name="language">json</ac:parameter>'
+        f"<ac:plain-text-body><![CDATA[{code}]]></ac:plain-text-body>"
+        "</ac:structured-macro></td></tr>"
+        f"{rows}</tbody></table>"
+    )
+    assert md.count("```json") == 1
+    assert '"010d87fc"' in md
+    assert md.count("(см. выше)") == 3
+    # Ни один сентинел плейсхолдера не дожил до вывода.
+    assert convert._PH_OPEN not in md and convert._PH_CLOSE not in md
+
+
+def test_short_code_in_cell_stays_inline_and_keeps_gfm():
+    md = _md(
+        "<table><tbody>"
+        "<tr><th>Команда</th><th>Что делает</th></tr>"
+        "<tr><td>"
+        '<ac:structured-macro ac:name="code">'
+        '<ac:parameter ac:name="language">bash</ac:parameter>'
+        "<ac:plain-text-body><![CDATA[kinit -kt ./t.keytab]]></ac:plain-text-body>"
+        "</ac:structured-macro></td><td>Получает билет</td></tr>"
+        "</tbody></table>"
+    )
+    assert "| `kinit -kt ./t.keytab` | Получает билет |" in md
+    assert "```" not in md
+
+
+# ---------------------------------------------------------------------------
 # headings
 # ---------------------------------------------------------------------------
 

@@ -78,10 +78,39 @@ _MAX_TABLE_CHARS = (_MAX_TABLE_TOKENS - _TABLE_CHUNKER_OVERHEAD_TOKENS) * _TABLE
 # modest Confluence grid up into megabytes of Markdown -- the root cause of the
 # past 413s on indexing).  Beyond this the table is truncated with an explicit
 # in-text notice.
+#
+# Потолка ДВА, потому что у веток разная цена строки.  GFM-сетка платит за
+# каждую строку полной шириной таблицы: широкая объединённая сетка на сотню
+# строк нечитаема и бесполезна, её действительно надо ограничивать жёстко.
+# Линеаризация же — обычная проза по строке на запись, её размер идёт за
+# реальным содержимым, и выброшенная строка там — чистая потеря смысла без
+# всякой выгоды для рендера.  Поэтому решение «сетка или линеаризация»
+# принимается ДО обрезки (см. `_emit_table`), а для линеаризации потолок
+# заметно выше: он остаётся страховкой от катастрофического размножения
+# (rowspan на сотни строк), а не рабочим ограничением.
 _MAX_EXPANDED_TABLE_TOKENS = 20_000
 _MAX_EXPANDED_TABLE_CHARS = _MAX_EXPANDED_TABLE_TOKENS * _CHARS_PER_TOKEN
+_MAX_LINEARIZED_TABLE_TOKENS = 100_000
+_MAX_LINEARIZED_TABLE_CHARS = _MAX_LINEARIZED_TABLE_TOKENS * _CHARS_PER_TOKEN
 _WIDE_TABLE_COLS = 8
 _WIDE_CELL_CHARS = 200
+
+# Отступ для схлопнутой иерархической колонки (см. `_collapse_span_columns`):
+# colspan по одинаковым заголовкам кодировал уровень вложенности, и без метки
+# уровень терялся бы вместе с дублирующими колонками.
+_HIERARCHY_INDENT = "— "
+
+# Эмотикон, оставшийся единственным содержимым ячейки, несёт ЗНАЧЕНИЕ строки
+# («да»/«нет»), поэтому у него должен быть текстовый эквивалент.
+_EMOTICON_WORDS = {
+    "plus": "да",
+    "tick": "да",
+    "check": "да",
+    "thumbs-up": "да",
+    "cross": "нет",
+    "minus": "нет",
+    "thumbs-down": "нет",
+}
 
 _FILENAME_MAX = 100
 
@@ -515,8 +544,23 @@ def _handle_unknown_macro(macro: Tag, ctx: _Context) -> None:
 
 
 def _transform_images(soup: BeautifulSoup, ctx: _Context) -> None:
+    # Эмотикон обычно декоративен и удаляется.  Но если он ЕДИНСТВЕННОЕ
+    # содержимое ячейки таблицы, он и есть значение строки: «плюс» в колонке
+    # признака читается как «да».  Пустая ячейка после удаления переворачивает
+    # смысл строки на противоположный, поэтому такой эмотикон заменяется
+    # словом.  Ячейку видно только здесь: к моменту разбора таблиц эмотиконов
+    # в супе уже нет.
     for emo in soup.find_all("ac:emoticon"):
-        emo.decompose()
+        cell = emo.find_parent(["td", "th"])
+        sole = (
+            cell is not None
+            and not cell.get_text(strip=True)
+            and cell.find(["ac:image", "img"]) is None
+        )
+        if sole:
+            emo.replace_with(NavigableString(_emoticon_text(emo)))
+        else:
+            emo.decompose()
     for image in soup.find_all("ac:image"):
         alt = image.get("ac:alt") or image.get("ac:title") or ""
         att = image.find("ri:attachment")
@@ -538,6 +582,12 @@ def _transform_images(soup: BeautifulSoup, ctx: _Context) -> None:
             image.replace_with(img)
         else:
             image.decompose()
+
+
+def _emoticon_text(emo: Tag) -> str:
+    """Словесный эквивалент эмотикона: «да» / «нет», иначе — его имя."""
+    name = (emo.get("ac:name") or "").strip().lower()
+    return _EMOTICON_WORDS.get(name, name)
 
 
 def _transform_links(soup: BeautifulSoup, ctx: _Context) -> None:
@@ -619,6 +669,7 @@ def _transform_tables(soup: BeautifulSoup, ctx: _Context) -> None:
 
 def _flatten_nested_table(table: Tag, ctx: _Context) -> None:
     header, body_rows, _caption = _grid_to_rows(table, ctx)
+    header, body_rows = _collapse_span_columns(header, body_rows)
     cells: list[str] = []
     for row in [header, *body_rows]:
         cells.extend(c for c in row if c)
@@ -628,17 +679,28 @@ def _flatten_nested_table(table: Tag, ctx: _Context) -> None:
 
 def _emit_table(table: Tag, ctx: _Context) -> None:
     header, body_rows, caption = _grid_to_rows(table, ctx)
-    body_rows, dropped = _cap_expanded_rows(header, body_rows)
+    header, body_rows, caption = _promote_caption_row(header, body_rows, caption)
+    header, body_rows = _collapse_span_columns(header, body_rows)
+
+    # Ветка рендера выбирается ДО обрезки.  Обратный порядок отрезал строки у
+    # таблицы, которую всё равно предстояло линеаризовать: обрезка могла унести
+    # как раз ту длинную ячейку, из-за которой таблица считалась широкой, и
+    # строки терялись без всякой пользы для результата.
+    wide = _is_wide(header, body_rows)
+    budget = _MAX_LINEARIZED_TABLE_CHARS if wide else _MAX_EXPANDED_TABLE_CHARS
+    body_rows, dropped = _cap_expanded_rows(header, body_rows, budget)
     if dropped:
         logger.warning(
             "confluence page %s: table truncated -- expanded size over %d tokens, "
             "kept %d of %d body rows",
             ctx.page_id,
-            _MAX_EXPANDED_TABLE_TOKENS,
+            budget // _CHARS_PER_TOKEN,
             len(body_rows),
             len(body_rows) + dropped,
         )
-    md = _render_table(header, body_rows, caption, dropped)
+    md = _render_table(
+        header, body_rows, caption, dropped, ctx.placeholders, wide=wide, budget=budget
+    )
     key = ctx.add_placeholder("table", md)
     ph = _new_tag(table, "p")
     ph.string = key
@@ -654,34 +716,32 @@ def _grid_to_rows(
 
     trs = _direct_rows(table)
 
-    # Parse each source row into (content_cell, colspan, rowspan, is_header).
-    parsed: list[list[tuple[Tag, int, int, bool]]] = []
-    header_index = None
-    for idx, tr in enumerate(trs):
+    # Parse each source row into (content_cell, colspan, rowspan).
+    parsed: list[list[tuple[Tag, int, int]]] = []
+    for tr in trs:
         cells = [c for c in tr.find_all(["td", "th"], recursive=False)]
         if not cells:
             continue
-        row = []
-        all_th = True
-        for cell in cells:
-            colspan = _int_attr(cell, "colspan", 1)
-            rowspan = _int_attr(cell, "rowspan", 1)
-            is_th = cell.name == "th"
-            all_th = all_th and is_th
-            row.append((cell, colspan, rowspan, is_th))
-        parsed.append(row)
-        if all_th and header_index is None:
-            header_index = len(parsed) - 1
+        parsed.append(
+            [
+                (cell, _int_attr(cell, "colspan", 1), _int_attr(cell, "rowspan", 1))
+                for cell in cells
+            ]
+        )
 
     if not parsed:
         return [], [], caption
 
     grid = _expand_spans(parsed, ctx)
 
-    if header_index is None:
-        header_index = 0
-    header = grid[header_index]
-    body = [r for i, r in enumerate(grid) if i != header_index]
+    # Шапка — ВСЕГДА первая строка сетки.  Раньше шапкой объявлялась первая
+    # строка целиком из `<th>`, где бы она ни стояла, и её поднимали наверх —
+    # это переставляло строки местами.  На реальных страницах над `<th>` часто
+    # стоит строка-название таблицы (`<td colspan=N>`), и она уезжала в тело,
+    # где colspan размножал её по всем колонкам.  Порядок строк не меняется;
+    # строка-название разбирается отдельно, как подпись (`_promote_caption_row`).
+    header = grid[0]
+    body = grid[1:]
 
     # Normalize width across the whole grid.
     width = max((len(r) for r in grid), default=0)
@@ -712,7 +772,7 @@ def _int_attr(cell: Tag, name: str, default: int) -> int:
 
 
 def _expand_spans(
-    parsed: list[list[tuple[Tag, int, int, bool]]], ctx: _Context
+    parsed: list[list[tuple[Tag, int, int]]], ctx: _Context
 ) -> list[list[str]]:
     """Duplicate rowspan/colspan values so every emitted row is self-contained.
 
@@ -738,7 +798,7 @@ def _expand_spans(
                 col += 1
                 continue
             if ci < len(row_cells):
-                cell, colspan, rowspan, _is_th = row_cells[ci]
+                cell, colspan, rowspan = row_cells[ci]
                 ci += 1
                 text = _cell_text(cell, ctx)
                 for _ in range(colspan):
@@ -759,6 +819,124 @@ def _expand_spans(
         grid.append(out)
 
     return grid
+
+
+# ---- grid post-processing (representation, not content) ---------------------
+#
+# Обе функции ниже правят ПРЕДСТАВЛЕНИЕ сетки перед рендером и намеренно НЕ
+# живут в `_grid_to_rows`: раскрытие span'ов должно оставаться дословным
+# (позиция в позицию с исходной таблицей), иначе его нечем проверять.
+
+
+def _promote_caption_row(
+    header: list[str], body: list[list[str]], caption: str
+) -> tuple[list[str], list[list[str]], str]:
+    """Полноширинная строка с одним значением над шапкой — это подпись таблицы.
+
+    Такая строка (`<td colspan=N>` с названием витрины) не данные: в сетке
+    colspan размножает её по всем колонкам, и вместо названия получается
+    `| имя | имя | имя |`.  Название уходит в подпись `**Таблица: …**`,
+    а шапкой становится следующая строка — порядок строк при этом не меняется.
+    """
+    if len(header) < 2 or not body:
+        return header, body, caption
+    value = header[0]
+    if not value.strip() or any(cell != value for cell in header):
+        return header, body, caption
+    # Если следующая строка такая же полноширинная, это не «подпись + шапка»,
+    # а таблица из объединённых строк — трогать её нечего.
+    if len(set(body[0])) <= 1:
+        return header, body, caption
+    return body[0], body[1:], caption or value
+
+
+def _collapse_span_columns(
+    header: list[str], body: list[list[str]]
+) -> tuple[list[str], list[list[str]]]:
+    """Убирает колонки-двойники, порождённые colspan внутри ОДНОГО заголовка.
+
+    Конфлюэнсовский приём: колонки «Атрибут / Атрибут / Атрибут» — это один
+    столбец с уровнями вложенности, а уровень закодирован тем, с какой колонки
+    начинается значение.  Дословное раскрытие арифметически верно и
+    семантически разрушительно: уровень пропадает, а термины утраиваются и
+    втрое перевешивают BM25.
+
+    Два случая, и различать их обязательно:
+
+    * колонки диапазона нигде не несут разных значений — значит они и не
+      колонки: диапазон схлопывается в одну колонку, уровень вложенности
+      сохраняется меткой `_HIERARCHY_INDENT`;
+    * колонки настоящие (в разных строках стоят разные значения — `config`,
+      `rules`, `struct`), но отдельные строки размазаны по ним через colspan.
+      Тогда колонки остаются, а размноженное значение гасится во всех
+      позициях диапазона кроме первой.
+
+    Сетка в обоих случаях остаётся прямоугольной: колонки убираются из всех
+    строк разом.
+    """
+    width = len(header)
+    if width < 2:
+        return header, body
+
+    segments: list[tuple[int, int]] = []
+    dedupe: list[tuple[int, int]] = []
+    start = 0
+    while start < width:
+        end = start
+        while end + 1 < width and header[end + 1] == header[start]:
+            end += 1
+        if end > start and header[start].strip():
+            if _run_is_duplicated(body, start, end):
+                segments.append((start, end))
+                start = end + 1
+                continue
+            dedupe.append((start, end))
+        segments.extend((c, c) for c in range(start, end + 1))
+        start = end + 1
+
+    body = [_dedupe_runs(row, dedupe) for row in body] if dedupe else body
+    if all(a == b for a, b in segments):
+        return header, body
+
+    new_header = [header[a] for a, _b in segments]
+    new_body = [[_collapse_run(row, a, b) for a, b in segments] for row in body]
+    return new_header, new_body
+
+
+def _run_is_duplicated(body: list[list[str]], start: int, end: int) -> bool:
+    for row in body:
+        values = {row[c] for c in range(start, end + 1) if c < len(row) and row[c]}
+        if len(values) > 1:
+            return False
+    return True
+
+
+def _dedupe_runs(row: list[str], runs: list[tuple[int, int]]) -> list[str]:
+    """Гасит повторы значения внутри диапазона, оставляя первое вхождение."""
+    out = list(row)
+    for start, end in runs:
+        values = {out[c] for c in range(start, end + 1) if c < len(out) and out[c]}
+        if len(values) != 1:
+            continue
+        seen = False
+        for col in range(start, min(end + 1, len(out))):
+            if not out[col]:
+                continue
+            if seen:
+                out[col] = ""
+            seen = True
+    return out
+
+
+def _collapse_run(row: list[str], start: int, end: int) -> str:
+    """Единственное значение диапазона с меткой уровня вложенности."""
+    if start == end:
+        return row[start] if start < len(row) else ""
+    for depth, col in enumerate(range(start, end + 1)):
+        value = row[col] if col < len(row) else ""
+        if value:
+            return _HIERARCHY_INDENT * depth + value
+    return ""
 
 
 # ---- table cell rendering --------------------------------------------------
@@ -805,7 +983,11 @@ def _inline_render(node: Tag, ctx: _Context) -> str:
             out.append("<br>")
         elif name == "img":
             out.append(f"![{child.get('alt', '')}]({child.get('src', '')})")
-        elif name in ("p", "div", "li"):
+        elif name in ("p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6"):
+            # Заголовок внутри ячейки — тоже блок: без разделителя его текст
+            # слипался со следующим ("…реквизитовCN=CI06…"), и склеенное слово
+            # переставало находиться лексическим поиском.  Заголовки попадают
+            # в ячейки не из storage, а из макроса `expand` (см. `_handle_expand`).
             inner = _inline_render(child, ctx).strip()
             if inner:
                 out.append(inner + "<br>")
@@ -817,7 +999,16 @@ def _inline_render(node: Tag, ctx: _Context) -> str:
 
 
 def _restore_inline_placeholders(text: str, placeholders: dict) -> str:
-    """Inline-restore code/literal placeholders that landed inside a table cell."""
+    """Inline-restore code/literal placeholders that landed inside a table cell.
+
+    Многострочный код НЕ восстанавливается здесь: раньше он схлопывался в одну
+    строку внутри бэктиков, и содержимое молча портилось (переносы — часть
+    смысла у json/scala/sql).  Плейсхолдер остаётся в тексте ячейки, делает
+    таблицу «широкой» (`_is_wide`) и потому линеаризуемой, а линеаризованная
+    строка — обычный абзац, куда забор укладывается дословно.  Однострочный код
+    ложится в бэктики как раньше: терять там нечего, а тащить из-за него
+    таблицу в линеаризацию незачем.
+    """
 
     def repl(match: re.Match) -> str:
         entry = placeholders.get(match.group(0))
@@ -826,6 +1017,8 @@ def _restore_inline_placeholders(text: str, placeholders: dict) -> str:
         kind, payload = entry
         if kind == "code":
             _lang, code = payload
+            if "\n" in code.strip():
+                return match.group(0)
             return "`" + re.sub(r"\s+", " ", code).strip() + "`"
         if kind == "literal":
             return str(payload)
@@ -836,21 +1029,75 @@ def _restore_inline_placeholders(text: str, placeholders: dict) -> str:
     return _PH_RE.sub(repl, text)
 
 
+def _inline_code_cell(text: str, placeholders: dict) -> str:
+    """Аварийная посадка блочного кода в одну строку (GFM-ячейка забора не держит).
+
+    Работает страховкой: по `_is_wide` таблица с блочным кодом уходит в
+    линеаризацию, но ни один плейсхолдер не имеет права дожить до вывода —
+    восстановление таблиц однопроходное и вложенный ключ остался бы в тексте.
+    """
+
+    def repl(match: re.Match) -> str:
+        entry = placeholders.get(match.group(0))
+        if not entry:
+            return ""
+        kind, payload = entry
+        if kind == "code":
+            _lang, code = payload
+            return ("`" + re.sub(r"\s+", " ", code).strip() + "`").replace("|", r"\|")
+        return str(payload) if kind in ("literal", "table") else ""
+
+    return _PH_RE.sub(repl, text)
+
+
+def _split_code_blocks(
+    text: str, placeholders: dict, seen: set[str] | None = None
+) -> tuple[str, list[str]]:
+    """Вынимает из текста ячейки блочный код, возвращая (текст, готовые заборы).
+
+    ``seen`` — уже выведенные в этой таблице ключи.  Ячейка с ``rowspan`` на всю
+    таблицу размножается по каждой строке, и без этого один и тот же пример
+    JSON выводился бы полтора десятка раз подряд: в индексе это не смысл, а
+    вес.  Повтор заменяется короткой отсылкой, дословный текст остаётся выше.
+    """
+    blocks: list[str] = []
+
+    def repl(match: re.Match) -> str:
+        key = match.group(0)
+        entry = placeholders.get(key)
+        if not entry or entry[0] != "code":
+            return _inline_code_cell(key, placeholders)
+        if seen is not None and key in seen:
+            return " (см. выше) "
+        if seen is not None:
+            seen.add(key)
+        lang, code = entry[1]
+        fence = "```" + lang if lang else "```"
+        blocks.append(f"{fence}\n{code}\n```")
+        return " "
+
+    stripped = _PH_RE.sub(repl, text)
+    return re.sub(r"\s{2,}", " ", stripped).strip(), blocks
+
+
 # ---- table Markdown emission ----------------------------------------------
 
 
 def _cap_expanded_rows(
-    header: list[str], body: list[list[str]]
+    header: list[str], body: list[list[str]], budget_chars: int
 ) -> tuple[list[list[str]], int]:
-    """Cap one fully expanded table at :data:`_MAX_EXPANDED_TABLE_CHARS`.
+    """Cap one fully expanded table at ``budget_chars``.
 
     ``rowspan``/``colspan`` expansion duplicates cell text, so a merged-cell
     grid can explode into megabytes of Markdown -- exactly what produced the
     413s during indexing.  Rows are kept until the running size would exceed
     the cap; the first row is always kept so a single huge row still yields a
     table.  Returns ``(kept_rows, dropped_row_count)``.
+
+    Бюджет приходит снаружи и зависит от выбранной ветки рендера (см.
+    `_emit_table`): это последний рубеж, а не рабочее ограничение.
     """
-    budget = _MAX_EXPANDED_TABLE_CHARS - sum(len(c) + 3 for c in header)
+    budget = budget_chars - sum(len(c) + 3 for c in header)
     kept: list[list[str]] = []
     used = 0
     for i, row in enumerate(body):
@@ -862,28 +1109,59 @@ def _cap_expanded_rows(
     return kept, 0
 
 
-def _truncation_notice(dropped: int) -> str:
+def _truncation_notice(dropped: int, budget_chars: int) -> str:
     return (
         f"*[Таблица обрезана: пропущено строк — {dropped}. "
-        f"Развёрнутый размер превысил лимит {_MAX_EXPANDED_TABLE_TOKENS} токенов.]*"
+        f"Развёрнутый размер превысил лимит "
+        f"{budget_chars // _CHARS_PER_TOKEN} токенов.]*"
     )
 
 
 def _render_table(
-    header: list[str], body: list[list[str]], caption: str, dropped: int = 0
+    header: list[str],
+    body: list[list[str]],
+    caption: str,
+    dropped: int,
+    placeholders: dict,
+    wide: bool,
+    budget: int,
+) -> str:
+    rendered = _render_table_body(header, body, caption, placeholders, wide)
+    rendered = _with_notice(rendered, dropped, budget)
+    # Ни один плейсхолдер не должен пережить рендер таблицы: сама таблица тоже
+    # плейсхолдер, а восстановление в Stage C однопроходное и вложенный ключ
+    # утёк бы в вывод сырым.
+    return _inline_code_cell(rendered, placeholders)
+
+
+def _render_table_body(
+    header: list[str],
+    body: list[list[str]],
+    caption: str,
+    placeholders: dict,
+    wide: bool,
 ) -> str:
     if not header and not body:
-        return _truncation_notice(dropped) if dropped else ""
+        return ""
 
-    if _is_wide(header, body):
-        rendered = _linearize_table(header, body, caption)
-        return _with_notice(rendered, dropped)
+    # Таблица из одной строки — это ДАННЫЕ, а не шапка.  Раньше единственная
+    # строка объявлялась шапкой с пустым телом: в лучшем случае получался
+    # обглодок «шапка + разделитель», в худшем (широкая ячейка) линеаризация
+    # обходила пустое тело и таблица исчезала целиком.
+    if not body:
+        return _render_single_row(header, caption, placeholders)
+
+    if wide:
+        return _linearize_table(header, body, caption, placeholders)
+
+    header = [_inline_code_cell(c, placeholders) for c in header]
+    body = [[_inline_code_cell(c, placeholders) for c in row] for row in body]
 
     full = _gfm_table(header, body)
     if len(full) <= _MAX_TABLE_CHARS:
         if caption:
-            return _with_notice(f"**Таблица: {caption}**\n\n{full}", dropped)
-        return _with_notice(full, dropped)
+            return f"**Таблица: {caption}**\n\n{full}"
+        return full
 
     # Split into complete sub-tables, each repeating the header row.
     chunks = _split_body(header, body)
@@ -895,13 +1173,32 @@ def _render_table(
         else:
             label = f"**Таблица (часть {k} из {total})**"
         parts.append(f"{label}\n\n{_gfm_table(header, chunk)}")
-    return _with_notice("\n\n".join(parts), dropped)
+    return "\n\n".join(parts)
 
 
-def _with_notice(rendered: str, dropped: int) -> str:
+def _render_single_row(cells: list[str], caption: str, placeholders: dict) -> str:
+    """Однострочная таблица -> строка текста (+ заборы кода, если он там был)."""
+    parts: list[str] = []
+    blocks: list[str] = []
+    for cell in cells:
+        text, extracted = _split_code_blocks(cell, placeholders)
+        blocks.extend(extracted)
+        if text:
+            parts.append(text)
+    paras: list[str] = []
+    if caption:
+        paras.append(f"**Таблица: {caption}**")
+    if parts:
+        paras.append(" — ".join(parts))
+    paras.extend(blocks)
+    return "\n\n".join(paras)
+
+
+def _with_notice(rendered: str, dropped: int, budget: int) -> str:
     if not dropped:
         return rendered
-    return f"{rendered}\n\n{_truncation_notice(dropped)}"
+    notice = _truncation_notice(dropped, budget)
+    return f"{rendered}\n\n{notice}" if rendered else notice
 
 
 def _is_wide(header: list[str], body: list[list[str]]) -> bool:
@@ -910,6 +1207,11 @@ def _is_wide(header: list[str], body: list[list[str]]) -> bool:
     for row in [header, *body]:
         for cell in row:
             if len(cell) > _WIDE_CELL_CHARS:
+                return True
+            # Уцелевший плейсхолдер в ячейке бывает только блочным кодом (всё
+            # остальное `_cell_text` уже восстановил).  Забор в GFM-ячейку не
+            # помещается, значит таблицу надо линеаризовать.
+            if _PH_RE.search(cell):
                 return True
     return False
 
@@ -943,17 +1245,26 @@ def _split_body(header: list[str], body: list[list[str]]) -> list[list[list[str]
     return chunks or [[]]
 
 
-def _linearize_table(header: list[str], body: list[list[str]], caption: str) -> str:
+def _linearize_table(
+    header: list[str], body: list[list[str]], caption: str, placeholders: dict
+) -> str:
     paras: list[str] = []
     if caption:
         paras.append(f"**Таблица: {caption}**")
-    rows = body if body else []
-    for row in rows:
-        parts = []
-        for i, head in enumerate(header):
+    heads = [_inline_code_cell(h, placeholders) for h in header]
+    seen: set[str] = set()
+    for row in body:
+        parts: list[str] = []
+        blocks: list[str] = []
+        for i, head in enumerate(heads):
             value = row[i] if i < len(row) else ""
+            value, extracted = _split_code_blocks(value, placeholders, seen)
+            blocks.extend(extracted)
             parts.append(f"**{head}:** {value}")
         paras.append(". ".join(parts) + ".")
+        # Забор идёт отдельным абзацем сразу за своей строкой: внутри
+        # предложения он бы сломал и разметку, и дословность кода.
+        paras.extend(blocks)
     return "\n\n".join(paras)
 
 
