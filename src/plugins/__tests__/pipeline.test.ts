@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { sections } from '../../db/schema.js';
 import { ChunkParseError } from '../../lib/chunk-errors.js';
 import type { FileChangeEvent } from '../../lib/indexer.js';
 
@@ -93,6 +94,11 @@ async function buildTestApp(opts?: {
   qdrantDelete: ReturnType<typeof vi.fn>;
   setPayload: ReturnType<typeof vi.fn>;
   dbUpdate: ReturnType<typeof vi.fn>;
+  dbSet: ReturnType<typeof vi.fn>;
+  dbDelete: ReturnType<typeof vi.fn>;
+  dbInsert: ReturnType<typeof vi.fn>;
+  dbInsertValues: ReturnType<typeof vi.fn>;
+  dbTransaction: ReturnType<typeof vi.fn>;
   confirmIndexed: ReturnType<typeof vi.fn>;
   failIndexed: ReturnType<typeof vi.fn>;
   fileFailed: FileFailedRecord[];
@@ -113,11 +119,32 @@ async function buildTestApp(opts?: {
   const qdrantDelete = opts?.qdrantDelete ?? vi.fn().mockResolvedValue({});
   const setPayload = opts?.setPayload ?? vi.fn().mockResolvedValue({});
 
-  // Build the db.update chain mock
+  // Build the db.update chain mock. The table argument is recorded on dbUpdate itself,
+  // so tests can tell an indexed_files update from a sections update.
   const dbRun = vi.fn();
   const dbWhere = vi.fn().mockReturnValue({ run: dbRun, all: vi.fn().mockReturnValue([]) });
   const dbSet = vi.fn().mockReturnValue({ where: dbWhere });
   const dbUpdate = vi.fn().mockReturnValue({ set: dbSet });
+
+  // db.delete(table).where(...).run() — used to drop a path's sections
+  const dbDeleteRun = vi.fn();
+  const dbDeleteWhere = vi.fn().mockReturnValue({ run: dbDeleteRun });
+  const dbDelete = vi.fn().mockReturnValue({ where: dbDeleteWhere });
+
+  // db.insert(table).values(rows).run() — used to write a path's sections
+  const dbInsertRun = vi.fn();
+  const dbInsertValues = vi.fn().mockReturnValue({ run: dbInsertRun });
+  const dbInsert = vi.fn().mockReturnValue({ values: dbInsertValues });
+
+  // db.transaction(cb) runs the callback synchronously against the same chains, which
+  // is what better-sqlite3 does — so ordering assertions stay meaningful.
+  const dbTransaction = vi.fn().mockImplementation((cb: (tx: unknown) => unknown) =>
+    cb({
+      delete: dbDelete,
+      insert: dbInsert,
+      update: dbUpdate,
+    }),
+  );
 
   // Build db.select chain mock for processImage
   const dbSelectAll = vi.fn().mockReturnValue([]);
@@ -162,6 +189,9 @@ async function buildTestApp(opts?: {
           vi.fn().mockReturnValue({
             update: dbUpdate,
             select: dbSelect,
+            delete: dbDelete,
+            insert: dbInsert,
+            transaction: dbTransaction,
           }) as unknown as FastifyInstance['getUserDbById'],
         );
 
@@ -240,6 +270,11 @@ async function buildTestApp(opts?: {
     qdrantDelete,
     setPayload,
     dbUpdate,
+    dbSet,
+    dbDelete,
+    dbInsert,
+    dbInsertValues,
+    dbTransaction,
     confirmIndexed,
     failIndexed,
     fileFailed,
@@ -702,6 +737,148 @@ describe('pipeline plugin (per-user)', () => {
       expect(embed).not.toHaveBeenCalled();
       expect(upsert).not.toHaveBeenCalled();
       expect(qdrantDelete).toHaveBeenCalled();
+
+      await app.close();
+    });
+  });
+
+  // ── parent sections (small-to-big retrieval) ──
+
+  describe('parent sections', () => {
+    const NOTE: FileChangeEvent = {
+      path: 'notes/my-note.md',
+      type: 'created',
+      contentHash: 'abc123',
+    };
+
+    it('stamps parent_id and named dense/bm25 vectors on every point', async () => {
+      const { app, upsert } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [NOTE]);
+
+      type Point = {
+        vector: Record<string, unknown>;
+        payload: Record<string, unknown>;
+      };
+      const call = upsert.mock.calls[0] as [{ points: Point[] }] | undefined;
+      const point = call?.[0].points[0];
+      expect(point).toBeDefined();
+      expect(point?.vector).toHaveProperty('dense');
+      expect(point?.vector).toHaveProperty('bm25');
+      expect(point?.payload.parent_id).toEqual(expect.any(String));
+
+      await app.close();
+    });
+
+    it("replaces the path's section rows inside a single transaction", async () => {
+      const { app, dbTransaction, dbDelete, dbInsert, dbInsertValues } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [NOTE]);
+
+      expect(dbTransaction).toHaveBeenCalledTimes(1);
+      expect(dbDelete).toHaveBeenCalledWith(sections);
+      expect(dbInsert).toHaveBeenCalledWith(sections);
+
+      const rows = dbInsertValues.mock.calls[0]?.[0] as Array<Record<string, unknown>>;
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) {
+        expect(row.path).toBe(NOTE.path);
+        expect(row.parentId).toEqual(expect.any(String));
+        expect(row.sectionPath).toEqual(expect.any(String));
+        expect(row.text).toEqual(expect.any(String));
+        expect(row.contentHash).toEqual(expect.any(String));
+        expect(row.updatedAt).toEqual(expect.any(String));
+      }
+
+      // Every chunk's parent must have a row.
+      const parentIds = new Set(rows.map((r) => r.parentId));
+      expect(parentIds.size).toBe(rows.length);
+
+      await app.close();
+    });
+
+    it('writes sections only after confirmIndexed (the row must exist first)', async () => {
+      const { app, confirmIndexed, dbTransaction } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [NOTE]);
+
+      const confirmOrder = confirmIndexed.mock.invocationCallOrder[0] as number;
+      const txOrder = dbTransaction.mock.invocationCallOrder[0] as number;
+      expect(confirmOrder).toBeLessThan(txOrder);
+
+      await app.close();
+    });
+
+    it('does not touch sections when the embedder throws', async () => {
+      const { app, dbTransaction, dbInsert, failIndexed } = await buildTestApp({
+        embed: vi.fn().mockRejectedValue(new Error('embedder exploded')),
+      });
+
+      await processChanges(app, TEST_USER_ID, [NOTE]);
+
+      expect(failIndexed).toHaveBeenCalled();
+      expect(dbTransaction).not.toHaveBeenCalled();
+      expect(dbInsert).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('clears sections for a file that no longer produces chunks', async () => {
+      const { app, dbTransaction, dbDelete, dbInsert } = await buildTestApp({
+        readContent: vi.fn().mockResolvedValue({ content: '---\ntags: [ai]\n---\n' }),
+      });
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'notes/empty.md', type: 'updated', contentHash: 'abc123' },
+      ]);
+
+      expect(dbTransaction).toHaveBeenCalledTimes(1);
+      expect(dbDelete).toHaveBeenCalledWith(sections);
+      expect(dbInsert).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('drops the sections of a deleted file', async () => {
+      const { app, dbDelete } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'notes/to-delete.md', type: 'deleted', contentHash: 'abc123' },
+      ]);
+
+      expect(dbDelete).toHaveBeenCalledWith(sections);
+
+      await app.close();
+    });
+
+    it('leaves sections alone when a deleted file is an image', async () => {
+      const { app, dbDelete } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'attachments/diagram.png', type: 'deleted', contentHash: 'imghash' },
+      ]);
+
+      expect(dbDelete).not.toHaveBeenCalled();
+
+      await app.close();
+    });
+
+    it('repoints sections to the new path on a move, without re-embedding', async () => {
+      const { app, dbUpdate, dbSet, embed, dbInsert } = await buildTestApp();
+
+      await processChanges(app, TEST_USER_ID, [
+        {
+          path: 'notes/new-location.md',
+          type: 'moved',
+          contentHash: 'abc123',
+          oldPath: 'notes/old-location.md',
+        },
+      ]);
+
+      expect(embed).not.toHaveBeenCalled();
+      expect(dbInsert).not.toHaveBeenCalled();
+      expect(dbUpdate).toHaveBeenCalledWith(sections);
+      expect(dbSet).toHaveBeenCalledWith({ path: 'notes/new-location.md' });
 
       await app.close();
     });

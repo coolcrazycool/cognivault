@@ -1,4 +1,4 @@
-import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
 export const indexedFiles = sqliteTable(
   'indexed_files',
@@ -17,3 +17,32 @@ export const indexedFiles = sqliteTable(
 
 export type IndexedFile = typeof indexedFiles.$inferSelect;
 export type NewIndexedFile = typeof indexedFiles.$inferInsert;
+
+/**
+ * Whole sections ("parent documents") a note was cut into, keyed by the chunk payload's
+ * `parent_id`. Small-to-big retrieval matches a chunk in Qdrant and expands it to the
+ * full section text stored here.
+ *
+ * The primary key is composite `(path, parent_id)` on purpose: `parent_id` is derived
+ * from the section's ordinal + section path only, never the file path, so two different
+ * notes can legitimately produce the same `parent_id`. Excluding the path is what keeps
+ * a rename a cheap `UPDATE sections SET path` instead of a re-embed.
+ */
+export const sections = sqliteTable(
+  'sections',
+  {
+    path: text('path').notNull(),
+    parentId: text('parent_id').notNull(),
+    sectionPath: text('section_path').notNull(),
+    text: text('text').notNull(),
+    contentHash: text('content_hash').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.path, table.parentId] }),
+    index('sections_path_idx').on(table.path),
+  ],
+);
+
+export type Section = typeof sections.$inferSelect;
+export type NewSection = typeof sections.$inferInsert;

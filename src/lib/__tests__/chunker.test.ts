@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ChunkOptions } from '../chunker.js';
 import {
   chunkMarkdown,
+  chunkMarkdownWithSections,
   MAX_CHUNK_TOKENS,
   MIN_CHUNK_TOKENS,
   normalizeObsidianSyntax,
@@ -304,6 +305,105 @@ describe('chunkMarkdown - chunkIndex ordering', () => {
     expect(chunks.length).toBeGreaterThanOrEqual(1);
     chunks.forEach((chunk, idx) => {
       expect(chunk.chunkIndex).toBe(idx);
+    });
+  });
+});
+
+describe('chunkMarkdown - parentId (small-to-big parents)', () => {
+  it('gives two different H1 sections different parentIds despite an identical sectionPath', () => {
+    // H1 headings are transparent, so both sections carry the bare note title as their
+    // sectionPath. Hashing only the path would collapse them into one parent — the
+    // section ordinal is what keeps them apart.
+    const alpha = generateLongParagraph(110);
+    const beta = generateLongParagraph(110);
+    const body = `# Alpha\n\n${alpha}\n\n# Beta\n\n${beta}`;
+    const opts: ChunkOptions = { title: 'Two Tops', path: 'notes/two-tops.md' };
+    const chunks = chunkMarkdown(body, opts);
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]?.sectionPath).toBe('Two Tops');
+    expect(chunks[1]?.sectionPath).toBe('Two Tops');
+    expect(chunks[0]?.parentId).not.toBe(chunks[1]?.parentId);
+  });
+
+  it('gives every chunk of one split section the same parentId', () => {
+    const paragraphs = [
+      generateLongParagraph(200),
+      generateLongParagraph(200),
+      generateLongParagraph(200),
+    ].join('\n\n');
+    const body = `## Long Section\n\n${paragraphs}`;
+    const opts: ChunkOptions = { title: 'Split Note' };
+    const chunks = chunkMarkdown(body, opts);
+
+    expect(chunks.length).toBeGreaterThan(1);
+    const parentIds = new Set(chunks.map((c) => c.parentId));
+    expect(parentIds.size).toBe(1);
+  });
+
+  it('keeps parentId stable when the file is moved to another folder', () => {
+    const body = `## A\n\n${generateLongParagraph(110)}\n\n## B\n\n${generateLongParagraph(110)}`;
+    const before = chunkMarkdown(body, { title: 'Stable', path: 'inbox/stable.md' });
+    const after = chunkMarkdown(body, { title: 'Stable', path: 'archive/2026/stable.md' });
+
+    expect(before.map((c) => c.parentId)).toEqual(after.map((c) => c.parentId));
+  });
+
+  it('produces a sha1-shaped parentId', () => {
+    const chunks = chunkMarkdown('Intro paragraph without headings.', { title: 'Simple' });
+    expect(chunks[0]?.parentId).toMatch(/^[0-9a-f]{40}$/);
+  });
+});
+
+describe('chunkMarkdownWithSections', () => {
+  it('returns one section per parent, with every chunk pointing at an existing parent', () => {
+    const body = `# Alpha\n\n${generateLongParagraph(110)}\n\n## Beta\n\n${generateLongParagraph(110)}`;
+    const { chunks, sections } = chunkMarkdownWithSections(body, { title: 'Doc' });
+
+    expect(sections).toHaveLength(2);
+    const parentIds = new Set(sections.map((s) => s.parentId));
+    expect(parentIds.size).toBe(2);
+    for (const chunk of chunks) {
+      expect(parentIds.has(chunk.parentId)).toBe(true);
+    }
+  });
+
+  it('keeps the whole section text on the parent even when the chunks are split', () => {
+    // Distinct markers: the filler words are identical, so only these tell the
+    // beginning of the section apart from its end.
+    const filler = generateLongParagraph(200);
+    const body = `## Long\n\nalphamarker ${filler}\n\n${filler}\n\nomegamarker ${filler}`;
+    const { chunks, sections } = chunkMarkdownWithSections(body, { title: 'Whole' });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(sections).toHaveLength(1);
+
+    const parent = sections[0];
+    expect(parent?.sectionPath).toBe('Whole > Long');
+    expect(parent?.text).toMatch(/^Whole > Long\n\n/);
+    // The parent spans content that no single chunk contains.
+    expect(parent?.text).toContain('alphamarker');
+    expect(parent?.text).toContain('omegamarker');
+    expect(
+      chunks.some((c) => c.text.includes('alphamarker') && c.text.includes('omegamarker')),
+    ).toBe(false);
+  });
+
+  it('emits a single parent when a short section is merged into its predecessor', () => {
+    const body = `## Big\n\n${generateLongParagraph(110)}\n\n## Tiny\n\nshort tail.`;
+    const { chunks, sections } = chunkMarkdownWithSections(body, { title: 'Merged' });
+
+    // The short section has no parent of its own — it lives inside the previous one.
+    expect(sections).toHaveLength(1);
+    expect(sections[0]?.sectionPath).toBe('Merged > Big');
+    expect(sections[0]?.text).toContain('short tail.');
+    expect(new Set(chunks.map((c) => c.parentId)).size).toBe(1);
+  });
+
+  it('returns empty chunks and sections for an empty body', () => {
+    expect(chunkMarkdownWithSections('   \n\n ', { title: 'Empty' })).toEqual({
+      chunks: [],
+      sections: [],
     });
   });
 });

@@ -4,8 +4,8 @@ import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDatabase } from '../client.js';
-import type { IndexedFile, NewIndexedFile } from '../schema.js';
-import { indexedFiles } from '../schema.js';
+import type { IndexedFile, NewIndexedFile, NewSection } from '../schema.js';
+import { indexedFiles, sections } from '../schema.js';
 
 describe('Drizzle schema and DB client', () => {
   let db: ReturnType<typeof createDatabase>['db'];
@@ -159,6 +159,119 @@ describe('Drizzle schema and DB client', () => {
         .where(eq(indexedFiles.path, '/notes/hello.md'))
         .get();
       expect(row).toBeDefined();
+    });
+  });
+
+  describe('sections table (parent documents)', () => {
+    const makeSection = (overrides: Partial<NewSection> = {}): NewSection => ({
+      path: '/notes/parents.md',
+      parentId: 'a'.repeat(40),
+      sectionPath: 'Parents > Intro',
+      text: 'Parents > Intro\n\nFull section body.',
+      contentHash: 'sectionhash1',
+      updatedAt: '2024-01-01T00:00:00.000Z',
+      ...overrides,
+    });
+
+    it('creates the sections table', () => {
+      const result = sqlite
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sections'")
+        .get();
+      expect(result).toBeDefined();
+    });
+
+    it('creates sections_path_idx index', () => {
+      const result = sqlite
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='sections_path_idx'")
+        .get();
+      expect(result).toBeDefined();
+    });
+
+    it('has path, parent_id, section_path, text, content_hash, updated_at columns', () => {
+      const cols = sqlite.prepare('PRAGMA table_info(sections)').all() as Array<{
+        name: string;
+        notnull: number;
+        pk: number;
+      }>;
+      const colNames = cols.map((c) => c.name);
+      for (const name of [
+        'path',
+        'parent_id',
+        'section_path',
+        'text',
+        'content_hash',
+        'updated_at',
+      ]) {
+        expect(colNames, `missing column ${name}`).toContain(name);
+      }
+    });
+
+    it('uses a composite primary key of (path, parent_id)', () => {
+      const cols = sqlite.prepare('PRAGMA table_info(sections)').all() as Array<{
+        name: string;
+        pk: number;
+      }>;
+      const pkCols = cols.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk);
+      expect(pkCols.map((c) => c.name)).toEqual(['path', 'parent_id']);
+    });
+
+    it('accepts the same parent_id under two different paths', () => {
+      // parent_id is derived without the file path, so a collision across notes is
+      // expected and must not be rejected.
+      const shared = 'b'.repeat(40);
+      db.insert(sections)
+        .values(makeSection({ path: '/notes/one.md', parentId: shared }))
+        .run();
+      db.insert(sections)
+        .values(makeSection({ path: '/notes/two.md', parentId: shared }))
+        .run();
+
+      const rows = db.select().from(sections).where(eq(sections.parentId, shared)).all();
+      expect(rows.map((r) => r.path).sort()).toEqual(['/notes/one.md', '/notes/two.md']);
+    });
+
+    it('rejects a duplicate (path, parent_id) pair', () => {
+      const row = makeSection({ path: '/notes/dupe.md', parentId: 'c'.repeat(40) });
+      db.insert(sections).values(row).run();
+      expect(() => db.insert(sections).values(row).run()).toThrow();
+    });
+
+    it('deletes every section of a path in one statement', () => {
+      db.insert(sections)
+        .values([
+          makeSection({ path: '/notes/purge.md', parentId: 'd'.repeat(40) }),
+          makeSection({ path: '/notes/purge.md', parentId: 'e'.repeat(40) }),
+        ])
+        .run();
+      expect(
+        db.select().from(sections).where(eq(sections.path, '/notes/purge.md')).all(),
+      ).toHaveLength(2);
+
+      db.delete(sections).where(eq(sections.path, '/notes/purge.md')).run();
+      expect(db.select().from(sections).where(eq(sections.path, '/notes/purge.md')).all()).toEqual(
+        [],
+      );
+    });
+
+    it('repoints every section of a moved file with one UPDATE', () => {
+      db.insert(sections)
+        .values([
+          makeSection({ path: '/inbox/moved.md', parentId: 'f'.repeat(40) }),
+          makeSection({ path: '/inbox/moved.md', parentId: '0'.repeat(40) }),
+        ])
+        .run();
+
+      db.update(sections)
+        .set({ path: '/archive/moved.md' })
+        .where(eq(sections.path, '/inbox/moved.md'))
+        .run();
+
+      expect(db.select().from(sections).where(eq(sections.path, '/inbox/moved.md')).all()).toEqual(
+        [],
+      );
+      expect(
+        db.select().from(sections).where(eq(sections.path, '/archive/moved.md')).all(),
+      ).toHaveLength(2);
     });
   });
 });

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { getEncoding } from 'js-tiktoken';
 import type { Code, Heading, Node, Paragraph, Parent, Root, Table } from 'mdast';
 import remarkGfm from 'remark-gfm';
@@ -14,10 +15,35 @@ export interface MarkdownChunk {
   text: string;
   sectionPath: string;
   chunkIndex: number;
+  /** Identifies the parent section this chunk was cut from (see {@link parentId}). */
+  parentId: string;
+}
+
+/**
+ * A whole section as it existed before it was split into chunks — the "parent document"
+ * that small-to-big retrieval expands a matched chunk into.
+ */
+export interface MarkdownSection {
+  parentId: string;
+  sectionPath: string;
+  /** Full section text, formatted like a chunk: `sectionPath\n\n<body>`. */
+  text: string;
+}
+
+export interface MarkdownChunkResult {
+  chunks: MarkdownChunk[];
+  sections: MarkdownSection[];
 }
 
 export interface ChunkOptions {
   title: string;
+  /**
+   * Vault-relative path of the note. Optional and deliberately NOT part of `parentId`:
+   * keeping the file location out of the hash is what lets a rename stay a cheap
+   * payload/`UPDATE` operation instead of a re-embed. Accepted only so call sites can
+   * pass the note's full identity in one object.
+   */
+  path?: string;
 }
 
 const processor = unified().use(remarkParse).use(remarkGfm);
@@ -177,11 +203,32 @@ function splitAtParagraphBoundaries(nodes: Node[], headerText: string): string[]
   return chunks;
 }
 
+/**
+ * Stable identity of a parent section.
+ *
+ * The ordinal is the position of the section among the parents this file actually
+ * produced (post-merge), NOT the position of its heading in the source. `sectionPath`
+ * alone cannot identify a parent: H1 headings are transparent, so every top-level
+ * section of a note shares the bare note title as its path and two unrelated H1
+ * sections would collapse into one parent. The file path is intentionally excluded —
+ * see {@link ChunkOptions.path}.
+ */
+function sectionParentId(ordinal: number, sectionPath: string): string {
+  return createHash('sha1').update(`${ordinal}\0${sectionPath}`).digest('hex');
+}
+
 function sectionsToChunks(
   sections: Section[],
   title: string,
-): Array<{ sectionPath: string; text: string }> {
-  const result: Array<{ sectionPath: string; text: string }> = [];
+): {
+  chunks: Array<{ sectionPath: string; text: string; parentId: string }>;
+  sections: MarkdownSection[];
+} {
+  const result: Array<{ sectionPath: string; text: string; parentId: string }> = [];
+  const parents: MarkdownSection[] = [];
+  // Incremented only when a parent is actually emitted, so the ordinal tracks the
+  // merged sections that exist rather than the headings that were parsed.
+  let ordinal = 0;
 
   // Process sections: merge short ones into adjacent content, split long ones
   // Strategy: maintain a pending accumulator per "logical parent"
@@ -202,15 +249,26 @@ function sectionsToChunks(
     const text = normalizeObsidianSyntax(sectionNodesToText(ps.nodes));
     const tokenCount = countTokens(text);
 
+    // This is the only point where the section exists as one whole string, so the
+    // parent record is captured here, before any token-budget splitting.
+    const parentId = sectionParentId(ordinal, ps.sectionPath);
+    ordinal += 1;
+    parents.push({
+      parentId,
+      sectionPath: ps.sectionPath,
+      text: `${header}\n\n${text}`,
+    });
+
     if (tokenCount > MAX_CHUNK_TOKENS) {
       const splitTexts = splitAtParagraphBoundaries(ps.nodes, header);
       for (const t of splitTexts) {
-        result.push({ sectionPath: ps.sectionPath, text: t });
+        result.push({ sectionPath: ps.sectionPath, text: t, parentId });
       }
     } else {
       result.push({
         sectionPath: ps.sectionPath,
         text: `${header}\n\n${text}`,
+        parentId,
       });
     }
   };
@@ -257,15 +315,19 @@ function sectionsToChunks(
     flushSection(ps);
   }
 
-  return result;
+  return { chunks: result, sections: parents };
 }
 
-export function chunkMarkdown(body: string, opts: ChunkOptions): MarkdownChunk[] {
+/**
+ * Chunk a markdown body and also return the parent sections the chunks came from.
+ * `chunkMarkdown` is the thin, chunks-only view of the same work.
+ */
+export function chunkMarkdownWithSections(body: string, opts: ChunkOptions): MarkdownChunkResult {
   const { title } = opts;
 
-  // Return empty array for empty/whitespace body
+  // Return empty result for empty/whitespace body
   if (!body || body.trim().length === 0) {
-    return [];
+    return { chunks: [], sections: [] };
   }
 
   // Parse markdown into AST
@@ -319,16 +381,24 @@ export function chunkMarkdown(body: string, opts: ChunkOptions): MarkdownChunk[]
 
   // If no sections produced any content, return empty
   if (sections.length === 0) {
-    return [];
+    return { chunks: [], sections: [] };
   }
 
   // Convert sections to text chunks (with merge/split logic)
-  const textChunks = sectionsToChunks(sections, title);
+  const converted = sectionsToChunks(sections, title);
 
   // Assign sequential chunkIndex
-  return textChunks.map((item, idx) => ({
-    text: item.text,
-    sectionPath: item.sectionPath,
-    chunkIndex: idx,
-  }));
+  return {
+    chunks: converted.chunks.map((item, idx) => ({
+      text: item.text,
+      sectionPath: item.sectionPath,
+      chunkIndex: idx,
+      parentId: item.parentId,
+    })),
+    sections: converted.sections,
+  };
+}
+
+export function chunkMarkdown(body: string, opts: ChunkOptions): MarkdownChunk[] {
+  return chunkMarkdownWithSections(body, opts).chunks;
 }

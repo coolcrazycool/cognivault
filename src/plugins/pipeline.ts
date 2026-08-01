@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { eq } from 'drizzle-orm';
@@ -6,10 +7,12 @@ import fp from 'fastify-plugin';
 import matter from 'gray-matter';
 import { v5 as uuidv5 } from 'uuid';
 import { config } from '../config.js';
-import { indexedFiles } from '../db/schema.js';
+import { indexedFiles, type NewSection, sections } from '../db/schema.js';
+import { BM25_VECTOR_NAME, buildSparseVector, DENSE_VECTOR_NAME } from '../lib/bm25.js';
 import { chunkCanvas } from '../lib/canvas-chunker.js';
 import { isChunkParseError } from '../lib/chunk-errors.js';
-import { chunkMarkdown } from '../lib/chunker.js';
+import type { MarkdownSection } from '../lib/chunker.js';
+import { chunkMarkdownWithSections } from '../lib/chunker.js';
 import { chunkCsv } from '../lib/csv-chunker.js';
 import { chunkExcalidraw } from '../lib/excalidraw-chunker.js';
 import { extractImageBacklinks, IMAGE_EXTENSIONS } from '../lib/image-tracker.js';
@@ -30,6 +33,8 @@ interface Chunk {
   text: string;
   sectionPath: string;
   chunkIndex: number;
+  /** Only markdown is section-aware; other formats have no parent document. */
+  parentId?: string;
 }
 
 /** Payload keys every non-markdown format shares (markdown fills them from frontmatter). */
@@ -73,6 +78,40 @@ function omit(obj: Record<string, unknown>, keys: string[]): Record<string, unkn
 }
 
 /**
+ * Replace the file's parent-section rows in a single transaction: the old rows go and
+ * the current ones land together, so a reader never sees a half-written note.
+ *
+ * Always call this AFTER confirmIndexed — on a 'created' event the indexed_files row
+ * does not exist until then, and sections must not outlive a file the index disowns.
+ * Passing an empty list is the "this file has no sections any more" case.
+ */
+function writeSections(
+  fastify: FastifyInstance,
+  userId: string,
+  filePath: string,
+  sectionRecords: MarkdownSection[],
+): void {
+  const db = fastify.getUserDbById(userId);
+  const updatedAt = new Date().toISOString();
+
+  const rows: NewSection[] = sectionRecords.map((section) => ({
+    path: filePath,
+    parentId: section.parentId,
+    sectionPath: section.sectionPath,
+    text: section.text,
+    contentHash: createHash('sha1').update(section.text).digest('hex'),
+    updatedAt,
+  }));
+
+  db.transaction((tx) => {
+    tx.delete(sections).where(eq(sections.path, filePath)).run();
+    if (rows.length > 0) {
+      tx.insert(sections).values(rows).run();
+    }
+  });
+}
+
+/**
  * Embed chunks and upsert to tenant Qdrant, then clean up stale vectors.
  */
 async function embedAndUpsert(
@@ -81,6 +120,7 @@ async function embedAndUpsert(
   event: FileChangeEvent,
   chunks: Chunk[],
   extraPayload: Record<string, unknown>,
+  sectionRecords: MarkdownSection[],
 ): Promise<void> {
   const tenantQdrant = fastify.createTenantQdrant(userId);
 
@@ -98,6 +138,8 @@ async function embedAndUpsert(
     });
     fastify.metrics.staleVectorCleanups.inc({ user_id: userId });
     confirmIndexed(fastify, userId, event.path);
+    // No chunks means no parents either — drop whatever the previous version left.
+    writeSections(fastify, userId, event.path, []);
     return;
   }
 
@@ -111,12 +153,17 @@ async function embedAndUpsert(
 
   const points = chunks.map((chunk, i) => ({
     id: chunkId(userId, event.path, i),
-    vector: embeddings[i] as number[],
+    // Named vectors: dense embedding for semantic recall, BM25 sparse vector for lexical.
+    vector: {
+      [DENSE_VECTOR_NAME]: embeddings[i] as number[],
+      [BM25_VECTOR_NAME]: buildSparseVector(chunk.text),
+    },
     payload: {
       path: event.path,
       title,
       chunk_index: i,
       section_path: chunk.sectionPath,
+      parent_id: chunk.parentId ?? null,
       content_hash: event.contentHash,
       text: chunk.text,
       ...extraPayload,
@@ -146,6 +193,10 @@ async function embedAndUpsert(
     .set({ embeddingModelVersion: config.EMBEDDING_MODEL })
     .where(eq(indexedFiles.path, event.path))
     .run();
+
+  // Parent sections last: if anything above threw, the file is retried on the next poll
+  // and sections stay consistent with the vectors that are actually in Qdrant.
+  writeSections(fastify, userId, event.path, sectionRecords);
 }
 
 /**
@@ -157,7 +208,11 @@ async function extractMarkdown(
   userId: string,
   event: FileChangeEvent,
   vault: VaultManager,
-): Promise<{ chunks: Chunk[]; extraPayload: Record<string, unknown> }> {
+): Promise<{
+  chunks: Chunk[];
+  extraPayload: Record<string, unknown>;
+  sections: MarkdownSection[];
+}> {
   const { content: rawContent } = await vault.readContent(event.path);
 
   let parsed: matter.GrayMatterFile<string>;
@@ -172,11 +227,15 @@ async function extractMarkdown(
   }
 
   const title = path.basename(event.path, '.md');
-  const chunks = chunkMarkdown(parsed.content, { title });
+  const { chunks, sections: markdownSections } = chunkMarkdownWithSections(parsed.content, {
+    title,
+    path: event.path,
+  });
   const frontmatterData = parsed.data as Record<string, unknown>;
 
   return {
     chunks,
+    sections: markdownSections,
     extraPayload: {
       tags: Array.isArray(frontmatterData.tags)
         ? frontmatterData.tags
@@ -251,12 +310,16 @@ async function processCreatedOrUpdated(
     // Text formats: extract chunks -> embed -> upsert
     let chunks: Chunk[];
     let extraPayload = defaultExtraPayload();
+    // Only markdown produces parent sections; other formats leave this empty, which
+    // still clears any stale rows for the path.
+    let sectionRecords: MarkdownSection[] = [];
 
     switch (ext) {
       case '.md': {
         const extracted = await extractMarkdown(fastify, userId, event, vault);
         chunks = extracted.chunks;
         extraPayload = extracted.extraPayload;
+        sectionRecords = extracted.sections;
         break;
       }
 
@@ -293,7 +356,7 @@ async function processCreatedOrUpdated(
         return;
     }
 
-    await embedAndUpsert(fastify, userId, event, chunks, extraPayload);
+    await embedAndUpsert(fastify, userId, event, chunks, extraPayload, sectionRecords);
   } finally {
     end();
   }
@@ -316,6 +379,11 @@ async function processDeleted(
       must: [{ key: 'path', match: { value: event.path } }],
     },
   });
+
+  // Vectors are gone, so the parent sections they expand into must go too — otherwise
+  // the table grows forever with rows nothing can ever reference.
+  const db = fastify.getUserDbById(userId);
+  db.delete(sections).where(eq(sections.path, event.path)).run();
 }
 
 async function processMoved(
@@ -353,6 +421,11 @@ async function processMoved(
 
   // Carries the indexed_files row from oldPath to event.path in one transaction.
   confirmIndexed(fastify, userId, event.path);
+
+  // parent_id deliberately excludes the file path, so a move only has to repoint the
+  // rows — no re-chunking, no re-embedding, and existing chunk payloads stay valid.
+  const db = fastify.getUserDbById(userId);
+  db.update(sections).set({ path: event.path }).where(eq(sections.path, oldPath)).run();
 }
 
 async function pipelinePlugin(fastify: FastifyInstance): Promise<void> {
