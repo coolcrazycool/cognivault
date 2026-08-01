@@ -192,6 +192,37 @@ const MOCK_LONG_SECTION_ROWS = [
   },
 ];
 
+/**
+ * Body shared verbatim by sibling registry pages. Long enough to clear the distinct-word
+ * floor below which an overlap says nothing (a three-word stub is "100% identical" to any
+ * other three-word stub).
+ */
+const SHARED_REGISTRY_BODY =
+  'Таблица с парсингом данных из топика Kafka. Информация о потоке: источник данных, ' +
+  'наименование потока, таблица получения, поле партиционирования, частота запуска ' +
+  'потока, минимальное количество записей, попадающих в батч для записи. Ссылка на ' +
+  'конфигурацию потока приведена выше, доступ выдаётся по заявке.';
+
+/** One fused point with a body of its own; everything else is fixture noise. */
+function pointWith(id: string, score: number, path: string, text: string, chunkIndex = 0) {
+  return {
+    id,
+    score,
+    payload: {
+      text,
+      path,
+      title: path,
+      section_path: 'registry > body',
+      chunk_index: chunkIndex,
+      parent_id: `parent-${id}`,
+      tags: [],
+      project: null,
+      status: null,
+      type: null,
+    },
+  };
+}
+
 /** `count` fused points, two chunks per section — the shape that used to starve the caller. */
 function pairedSectionPool(count: number) {
   return Array.from({ length: count }, (_, i) => ({
@@ -1404,6 +1435,124 @@ describe('search routes', () => {
           expect(result.section_text).toBe('');
         }
       });
+    });
+  });
+
+  describe('cross-file near-duplicates', () => {
+    /** Same body on two sibling pages, differing only in the channel and the table name. */
+    function siblingPages() {
+      return {
+        points: [
+          pointWith(
+            'jur',
+            0.033,
+            'notes/jur.md',
+            `${SHARED_REGISTRY_BODY} Канал ЮЛ, таблица tr_out_jur_ext.`,
+          ),
+          pointWith(
+            'dbo',
+            0.02,
+            'notes/dbo.md',
+            `${SHARED_REGISTRY_BODY} Канал ДБО, таблица tr_out_ext.`,
+          ),
+        ],
+      };
+    }
+
+    async function search(query: string) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
+        payload: { query },
+      });
+      expect(response.statusCode).toBe(200);
+      return response.json();
+    }
+
+    it('keeps the best-ranked copy of a body that repeats across files', async () => {
+      mockQdrantQuery.mockResolvedValueOnce(siblingPages());
+
+      const body = await search('поле партиционирования потока');
+
+      expect(body.results.map((r: { path: string }) => r.path)).toEqual(['notes/jur.md']);
+      expect(body.total).toBe(1);
+    });
+
+    it('keeps a copy that carries a word of the query the survivor is missing', async () => {
+      mockQdrantQuery.mockResolvedValueOnce(siblingPages());
+
+      // The lower-ranked page is the only one that mentions the table being asked about --
+      // collapsing it would answer about a different channel.
+      const body = await search('по какому полю партиционируется tr_out_ext');
+
+      expect(body.results.map((r: { path: string }) => r.path)).toEqual([
+        'notes/jur.md',
+        'notes/dbo.md',
+      ]);
+    });
+
+    it('never collapses two chunks of the SAME file, however identical they read', async () => {
+      mockQdrantQuery.mockResolvedValueOnce({
+        points: [
+          pointWith('same-0', 0.033, 'notes/one.md', SHARED_REGISTRY_BODY, 0),
+          pointWith('same-1', 0.02, 'notes/one.md', SHARED_REGISTRY_BODY, 1),
+        ],
+      });
+
+      const body = await search('поток');
+
+      // Several chunks of one file are intended: the UI counts the hits to decide whether to
+      // expand the whole file.
+      expect(body.results).toHaveLength(2);
+      expect(body.results.map((r: { chunk_index: number }) => r.chunk_index)).toEqual([0, 1]);
+    });
+
+    it('compares bodies without the doc annotation (it is per-file by construction)', async () => {
+      // `INDEX_DOC_SUMMARY` prepends a summary of the FILE to every one of its chunks. Two
+      // copies of one body therefore arrive with two different annotations; counting those
+      // words would make the threshold depend on whether the feature is switched on.
+      const annotated = (summary: string, text: string) =>
+        `Аннотация документа: ${summary}\n\n${text}`;
+      mockQdrantQuery.mockResolvedValueOnce({
+        points: [
+          pointWith(
+            'jur',
+            0.033,
+            'notes/jur.md',
+            annotated(
+              'реестр потоков канала ЮЛ и его настройки.',
+              `${SHARED_REGISTRY_BODY} Канал ЮЛ, таблица tr_out_jur_ext.`,
+            ),
+          ),
+          pointWith(
+            'dbo',
+            0.02,
+            'notes/dbo.md',
+            annotated(
+              'совсем другая по словам аннотация про канал ДБО.',
+              `${SHARED_REGISTRY_BODY} Канал ДБО, таблица tr_out_ext.`,
+            ),
+          ),
+        ],
+      });
+
+      const body = await search('поле партиционирования потока');
+
+      expect(body.results.map((r: { path: string }) => r.path)).toEqual(['notes/jur.md']);
+    });
+
+    it('leaves short bodies alone — an overlap of a few words proves nothing', async () => {
+      mockQdrantQuery.mockResolvedValueOnce({
+        points: [
+          pointWith('stub-a', 0.033, 'notes/a.md', 'Батчевые потоки'),
+          pointWith('stub-b', 0.02, 'notes/b.md', 'Батчевые потоки'),
+        ],
+      });
+
+      const body = await search('батчевые потоки');
+
+      expect(body.results).toHaveLength(2);
     });
   });
 

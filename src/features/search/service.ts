@@ -76,10 +76,11 @@ const FUSION_CANDIDATE_FLOOR = 40;
  * Over-fetch of the OUTER (fused) limit — a different level from FUSION_OVERSAMPLE above.
  * That one deepens each PREFETCH BRANCH so RRF has enough to fuse; this one deepens what
  * RRF itself hands back, because everything after it only ever removes points: duplicate
- * (path, chunk_index) pairs, sibling chunks collapsed by `group_by_section`, and the folder
- * post-filter. Asking Qdrant for exactly `limit` therefore delivers fewer than `limit`
- * results to the caller (measured: ~32-35 of 40 at 1.23 chunks per section). We ask for
- * more, then cut to `limit` once every filter has run.
+ * (path, chunk_index) pairs, sibling chunks collapsed by `group_by_section`, bodies repeated
+ * across files (`collapseCrossFileDuplicates`), and the folder post-filter. Asking Qdrant for
+ * exactly `limit` therefore delivers fewer than `limit` results to the caller (measured:
+ * ~32-35 of 40 at 1.23 chunks per section). We ask for more, then cut to `limit` once every
+ * filter has run.
  */
 const POST_FILTER_OVERFETCH = 2;
 
@@ -91,6 +92,27 @@ const POST_FILTER_OVERFETCH_CAP = 200;
 
 /** Cap on the section text returned with a grouped result, when the caller sets none. */
 const DEFAULT_SECTION_MAX_CHARS = 4000;
+
+/**
+ * Word overlap (Jaccard over the distinct words of the two bodies) above which two chunks of
+ * DIFFERENT files count as copies of one another. Measured on the Confluence corpus: at 0.8
+ * every cross-file duplicate pair disappears from the top 5 (0.42 pairs per query -> 0.01)
+ * while no labelled document loses its rank; loosening it further only trades safety for a
+ * few more freed slots. Same value the corpus-level duplicate census uses, so "duplicate"
+ * means one thing in the audit and in the search path.
+ */
+const NEAR_DUPLICATE_JACCARD = 0.8;
+
+/**
+ * Below this many distinct words a body is too short for the overlap to mean anything — two
+ * three-word stubs are "100% identical" without being copies of each other. Real chunks carry
+ * tens to hundreds of distinct words, so the floor only excludes fragments no similarity
+ * measure could judge.
+ */
+const NEAR_DUPLICATE_MIN_TERMS = 20;
+
+/** Words of a body, lowercased and deduplicated; single characters carry no signal. */
+const WORD_PATTERN = /[0-9A-Za-zА-Яа-яЁё_]+/g;
 
 /**
  * Head of a chunk body used to relocate it in its section when the two are no longer
@@ -222,6 +244,11 @@ export class SearchService {
       points = this.dedupeSections(points);
     }
 
+    // Sibling wiki pages carry copy-pasted bodies: they are different `path`s, so neither
+    // dedup above touches them, and one query can spend several of its candidate slots -- and
+    // several of the five context blocks the chat pipeline assembles -- on the same text.
+    points = this.collapseCrossFileDuplicates(points, query);
+
     // Every removal above has happened by now, so this is the first point at which cutting
     // to `limit` yields `limit` results instead of "whatever survived".
     points = points.slice(0, limit);
@@ -280,6 +307,77 @@ export class SearchService {
       kept.push(point);
     }
     return kept;
+  }
+
+  /**
+   * Keeps the best-ranked copy of a body that repeats across DIFFERENT files.
+   *
+   * This is not the dedup by `path` that `dedupeChunks` deliberately avoids: several chunks
+   * of ONE file are intended (the UI uses the hit count to decide whether to expand the whole
+   * file), and two chunks of the same file are never compared here at all. What is collapsed
+   * is one text living on several pages -- a registry section copied between sibling pages, a
+   * SQL block pasted onto three of them.
+   *
+   * The catch is that those sibling pages are near-identical precisely because they differ in
+   * one entity: «...канала ДБО (afpc_sss_inc.tr_out_ext)» against «...канала ЮЛ
+   * (afcc_sss_inc.tr_out_jur_ext)». Collapsing them blindly answers a question about one
+   * channel with the page about another -- measured, and it cost a labelled document its
+   * place in the results. Hence the guard: a copy that carries a word of the QUERY the
+   * survivor does not have is not a duplicate for this query, however similar the rest reads.
+   */
+  private collapseCrossFileDuplicates(points: ScoredPoint[], query: string): ScoredPoint[] {
+    const queryTerms = this.distinctWords(query);
+    const kept: { point: ScoredPoint; terms: Set<string> }[] = [];
+    for (const point of points) {
+      // The doc annotation is stripped (empty section path = strip that and nothing else):
+      // it is a per-FILE summary repeated on every chunk of its file, so leaving it in would
+      // make the threshold mean one thing with `INDEX_DOC_SUMMARY` on and another with it off.
+      const terms = this.distinctWords(this.chunkBody(point.payload?.text ?? '', ''));
+      const path = point.payload?.path ?? '';
+      const duplicate =
+        terms.size >= NEAR_DUPLICATE_MIN_TERMS &&
+        kept.some((other) => {
+          if ((other.point.payload?.path ?? '') === path) return false;
+          if (other.terms.size < NEAR_DUPLICATE_MIN_TERMS) return false;
+          if (this.jaccard(terms, other.terms) < NEAR_DUPLICATE_JACCARD) return false;
+          return !this.answersWithOwnWord(queryTerms, terms, other.terms);
+        });
+      if (duplicate) continue;
+      kept.push({ point, terms });
+    }
+    return kept.map((entry) => entry.point);
+  }
+
+  /** Lowercased words of a text, deduplicated; single characters are dropped. */
+  private distinctWords(text: string): Set<string> {
+    const words = new Set<string>();
+    for (const match of text.toLowerCase().matchAll(WORD_PATTERN)) {
+      if (match[0].length > 1) words.add(match[0]);
+    }
+    return words;
+  }
+
+  /** |A ∩ B| / |A ∪ B| over two word sets; the smaller set drives the intersection. */
+  private jaccard(a: Set<string>, b: Set<string>): number {
+    const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+    let shared = 0;
+    for (const word of small) {
+      if (large.has(word)) shared++;
+    }
+    if (shared === 0) return 0;
+    return shared / (a.size + b.size - shared);
+  }
+
+  /** True when `candidate` matches a query word that `survivor` misses. */
+  private answersWithOwnWord(
+    queryTerms: Set<string>,
+    candidate: Set<string>,
+    survivor: Set<string>,
+  ): boolean {
+    for (const term of queryTerms) {
+      if (candidate.has(term) && !survivor.has(term)) return true;
+    }
+    return false;
   }
 
   /**
