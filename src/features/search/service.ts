@@ -607,9 +607,9 @@ export class SearchService {
    * Rescales a result set against its own top hit: rank 1 becomes 1.0, everything else keeps
    * its proportion, order is untouched.
    *
-   * Fusion and BM25 scores are not similarities. Qdrant's RRF sums 1/(k + rank) with a k it
-   * chooses itself — the API exposes only `"rrf" | "dbsf"`, no constant — and BM25 sums
-   * unbounded term weights. Neither has a fixed scale to compare against, so passing them
+   * Fusion and BM25 scores are not similarities. Qdrant's RRF sums 1/(k + rank) with a k this
+   * caller does not set (the parameterised `{rrf: {k, weights}}` form exists in the client but
+   * was measured and rejected — see CLAUDE.md), and BM25 sums unbounded term weights. Neither has a fixed scale to compare against, so passing them
    * through raw breaks every consumer that thresholds a score: `/api/vault/context` with its
    * `min_score` was exactly the Wave 0 regression. The schema also caps `score` at 1, so
    * unbounded BM25 sums would fail response validation outright.

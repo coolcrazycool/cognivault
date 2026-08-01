@@ -55,10 +55,15 @@ tools/eval/           # RAG eval harness (golden set, gigaragas-style metrics, r
 - **`hybrid`** = ONE `client.query`: `prefetch` [dense, bm25] + `query: {fusion: 'rrf'}`.
   Candidate depth per branch is `max(2 × limit, 40)`. `lexical` = sparse only,
   `semantic` = dense only.
+- Fusion is sent as the unparameterised `{fusion: 'rrf'}`. The client also accepts
+  `{rrf: {k, weights}}` (parameterised RRF, weights per prefetch branch) — **measured and
+  rejected**: no global weight and no query-conditioned rule beat equal weights on both the
+  customer and the generated question set at once. Server support needs checking against the
+  deployed pin (v1.16.3) before anyone tries again.
 - **Scores from `hybrid`/`lexical` are rescaled against the top hit** (rank 1 → 1.0).
-  Raw RRF sums have no fixed scale (the API exposes `"rrf" | "dbsf"` and no constant) and
-  raw BM25 sums are unbounded — neither survives a fixed threshold like `/context`'s
-  `min_score`, and the response schema caps `score` at 1.
+  Raw RRF sums have no scale the caller controls and raw BM25 sums are unbounded —
+  neither survives a fixed threshold like `/context`'s `min_score`, and the response
+  schema caps `score` at 1.
   `semantic` alone returns an absolute (clamped cosine) score.
   **Therefore rank 1 always leaves as 1.0 and no downstream threshold can reject a result
   set — refusal is the grader's job, not a score cutoff.** Measured: top-hit score
