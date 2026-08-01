@@ -147,6 +147,92 @@ const MOCK_SECTION_ROWS = [
 ];
 
 /**
+ * A section far longer than the truncation budget, made of numbered paragraphs so that a
+ * chunk taken from its middle or its tail can be pinned down in the assertions.
+ */
+const paragraph = (i: number): string =>
+  `Параграф ${i}: строка-наполнитель достаточной длины для окна.`;
+const LONG_SECTION_TEXT = Array.from({ length: 40 }, (_, i) => paragraph(i)).join('\n\n');
+const MIDDLE_CHUNK_TEXT = paragraph(20);
+const TAIL_CHUNK_TEXT = paragraph(39);
+const SECTION_WINDOW_CHARS = 400;
+
+/** A single grouped hit whose chunk text is `chunkText`, pointing at the long section. */
+function longSectionResult(chunkText: string) {
+  return {
+    points: [
+      {
+        id: 'uuid-long',
+        score: 0.033,
+        payload: {
+          text: chunkText,
+          path: 'notes/long.md',
+          title: 'long',
+          section_path: 'long > body',
+          chunk_index: 7,
+          parent_id: 'parent-LONG',
+          tags: [],
+          project: null,
+          status: null,
+          type: null,
+        },
+      },
+    ],
+  };
+}
+
+const MOCK_LONG_SECTION_ROWS = [
+  {
+    path: 'notes/long.md',
+    parentId: 'parent-LONG',
+    sectionPath: 'long > body',
+    text: LONG_SECTION_TEXT,
+    contentHash: 'hash-long',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  },
+];
+
+/** `count` fused points, two chunks per section — the shape that used to starve the caller. */
+function pairedSectionPool(count: number) {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `uuid-pool-${i}`,
+    score: 0.03 - i * 0.0001,
+    payload: {
+      text: `pool chunk ${i}`,
+      path: `notes/pool-${Math.floor(i / 2)}.md`,
+      title: `pool ${Math.floor(i / 2)}`,
+      section_path: 'pool > body',
+      chunk_index: i % 2,
+      parent_id: `parent-pool-${Math.floor(i / 2)}`,
+      tags: [],
+      project: null,
+      status: null,
+      type: null,
+    },
+  }));
+}
+
+/** `count` fused points, every other one outside the folder the caller will ask for. */
+function alternatingFolderPool(count: number) {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `uuid-folder-${i}`,
+    score: 0.03 - i * 0.0001,
+    payload: {
+      text: `folder chunk ${i}`,
+      path: `${i % 2 === 0 ? 'Projects' : 'Archive'}/note-${i}.md`,
+      title: `note ${i}`,
+      section_path: 'note > body',
+      chunk_index: 0,
+      parent_id: `parent-folder-${i}`,
+      tags: [],
+      project: null,
+      status: null,
+      type: null,
+    },
+  }));
+}
+
+/**
  * Two DIFFERENT notes whose sections collide on `parent_id`. That is legitimate, not a
  * bug: the id is derived from the section's ordinal + section path only, never the file
  * path, so the first section of any note hashes to the same value. Grouping and section
@@ -675,8 +761,8 @@ describe('search routes', () => {
 
       const call = mockQdrantQuery.mock.calls[0]?.[0];
       expect(call.query).toEqual({ fusion: 'rrf' });
-      // Outer limit is the requested one; oversampling happens inside the branches
-      expect(call.limit).toBe(10);
+      // Outer limit is over-fetched 2x — dedup and the folder filter run after it
+      expect(call.limit).toBe(20);
       expect(call.with_payload).toBe(true);
 
       const branches = call.prefetch as Array<{
@@ -696,7 +782,7 @@ describe('search routes', () => {
       expect(sparseVector.values).toHaveLength(sparseVector.indices.length);
     });
 
-    it('oversamples both branches before fusion (2x, floor of 40)', async () => {
+    it('oversamples both branches on top of the over-fetched outer limit (floor of 40)', async () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/search/hybrid',
@@ -705,8 +791,8 @@ describe('search routes', () => {
       });
 
       const smallCall = mockQdrantQuery.mock.calls[0]?.[0];
-      expect(smallCall.limit).toBe(5);
-      // 5 * 2 = 10 is below the floor, so both branches take 40
+      expect(smallCall.limit).toBe(10);
+      // 10 * 2 = 20 is below the floor, so both branches take 40
       expect((smallCall.prefetch as Array<{ limit: number }>).map((b) => b.limit)).toEqual([
         40, 40,
       ]);
@@ -719,8 +805,11 @@ describe('search routes', () => {
       });
 
       const bigCall = mockQdrantQuery.mock.calls[1]?.[0];
+      // Outer over-fetch 100, and each branch is twice that — RRF cannot return more
+      // points than its branches handed it.
+      expect(bigCall.limit).toBe(100);
       expect((bigCall.prefetch as Array<{ limit: number }>).map((b) => b.limit)).toEqual([
-        100, 100,
+        200, 200,
       ]);
     });
 
@@ -1120,6 +1209,126 @@ describe('search routes', () => {
         expect(beta.section_text).toBe(BETA_SECTION_TEXT);
       });
 
+      describe('section_text window', () => {
+        /** Injects the long-section fixture and returns the single result's section_text. */
+        async function sectionTextFor(chunkText: string): Promise<string> {
+          mockQdrantQuery.mockResolvedValueOnce(longSectionResult(chunkText));
+          mockSectionRows.mockReturnValueOnce(MOCK_LONG_SECTION_ROWS);
+
+          const response = await app.inject({
+            method: 'POST',
+            url: '/api/vault/search/hybrid',
+            headers: {
+              authorization: 'Bearer cv-test-search-key',
+              'content-type': 'application/json',
+            },
+            payload: {
+              query: 'long',
+              group_by_section: true,
+              section_max_chars: SECTION_WINDOW_CHARS,
+            },
+          });
+
+          expect(response.statusCode).toBe(200);
+          return response.json().results[0].section_text as string;
+        }
+
+        it('keeps a chunk from the middle of the section whole, with context around it', async () => {
+          // The premise: a prefix cut would have missed this chunk completely
+          expect(LONG_SECTION_TEXT.slice(0, SECTION_WINDOW_CHARS)).not.toContain(MIDDLE_CHUNK_TEXT);
+
+          const sectionText = await sectionTextFor(MIDDLE_CHUNK_TEXT);
+
+          expect(sectionText).toContain(MIDDLE_CHUNK_TEXT);
+          // ...and the window really is a window: neighbours on BOTH sides came along
+          expect(sectionText).toContain(paragraph(19));
+          expect(sectionText).toContain(paragraph(21));
+          expect(sectionText.startsWith('Параграф')).toBe(true);
+        });
+
+        it('keeps a chunk from the very end of the section whole', async () => {
+          const sectionText = await sectionTextFor(TAIL_CHUNK_TEXT);
+
+          expect(sectionText).toContain(TAIL_CHUNK_TEXT);
+          // Nothing follows the last paragraph, so the window closes on the section end
+          expect(sectionText.endsWith(TAIL_CHUNK_TEXT)).toBe(true);
+          expect(sectionText).toContain(paragraph(38));
+        });
+
+        // The payload text is NOT the section body verbatim: the indexer puts the breadcrumb
+        // on every chunk (the section carries it once) and, with INDEX_DOC_SUMMARY on, a
+        // document annotation on top. Anchoring on the raw payload matched only chunk 0 and
+        // dropped every other chunk back to the prefix cut this window replaces.
+        it('anchors through the breadcrumb the indexer prepends to every chunk', async () => {
+          const sectionText = await sectionTextFor(`long > body\n\n${MIDDLE_CHUNK_TEXT}`);
+
+          expect(sectionText).toContain(MIDDLE_CHUNK_TEXT);
+          expect(sectionText).not.toBe(LONG_SECTION_TEXT.slice(0, SECTION_WINDOW_CHARS));
+        });
+
+        it('anchors through the doc-summary prefix as well', async () => {
+          const sectionText = await sectionTextFor(
+            `Аннотация документа: о чём документ.\n\nlong > body\n\n${TAIL_CHUNK_TEXT}`,
+          );
+
+          expect(sectionText).toContain(TAIL_CHUNK_TEXT);
+          expect(sectionText.endsWith(TAIL_CHUNK_TEXT)).toBe(true);
+        });
+
+        it('relocates a chunk whose stored copy drifted past its opening', async () => {
+          // A table summary appended by the indexer, or a small edit to the note: the exact
+          // match fails, the head of the body still pins the window to the right place.
+          const sectionText = await sectionTextFor(
+            `${MIDDLE_CHUNK_TEXT}\n\nСводка таблицы, которой в разделе нет.`,
+          );
+
+          expect(sectionText).toContain(MIDDLE_CHUNK_TEXT);
+          expect(sectionText).not.toBe(LONG_SECTION_TEXT.slice(0, SECTION_WINDOW_CHARS));
+        });
+
+        it('falls back to a prefix when the chunk is not found in the section', async () => {
+          // Index drift: the note was rewritten after this point was written
+          const sectionText = await sectionTextFor('этого текста в разделе больше нет');
+
+          expect(sectionText).toBe(LONG_SECTION_TEXT.slice(0, SECTION_WINDOW_CHARS));
+        });
+
+        it('never exceeds section_max_chars, wherever the chunk sits', async () => {
+          for (const chunkText of [
+            MIDDLE_CHUNK_TEXT,
+            TAIL_CHUNK_TEXT,
+            paragraph(0),
+            'этого текста в разделе больше нет',
+          ]) {
+            const sectionText = await sectionTextFor(chunkText);
+            expect(sectionText.length).toBeLessThanOrEqual(SECTION_WINDOW_CHARS);
+            expect(sectionText.length).toBeGreaterThan(0);
+          }
+        });
+
+        it('returns the whole section when it already fits the budget', async () => {
+          mockQdrantQuery.mockResolvedValueOnce(MOCK_SECTION_RESULT);
+          mockSectionRows.mockReturnValueOnce(MOCK_SECTION_ROWS);
+
+          const response = await app.inject({
+            method: 'POST',
+            url: '/api/vault/search/hybrid',
+            headers: {
+              authorization: 'Bearer cv-test-search-key',
+              'content-type': 'application/json',
+            },
+            // The chunk texts of this fixture are not substrings of its section text, so a
+            // window that fired here would silently truncate a section that fits.
+            payload: { query: 'multi', group_by_section: true },
+          });
+
+          const grouped = response
+            .json()
+            .results.find((r: { path: string }) => r.path === 'notes/multi.md');
+          expect(grouped.section_text).toBe(SECTION_TEXT);
+        });
+      });
+
       it('leaves section_text empty when the section row is missing', async () => {
         mockQdrantQuery.mockResolvedValueOnce(MOCK_SECTION_RESULT);
         mockSectionRows.mockReturnValueOnce([]);
@@ -1140,6 +1349,72 @@ describe('search routes', () => {
           expect(result.section_text).toBe('');
         }
       });
+    });
+  });
+
+  describe('over-fetch of the fused limit', () => {
+    /** Qdrant honours the limit it is given — that is what makes the over-fetch observable. */
+    function respectRequestedLimit(pool: ReturnType<typeof pairedSectionPool>): void {
+      mockQdrantQuery.mockImplementationOnce((params: { limit: number }) =>
+        Promise.resolve({ points: pool.slice(0, params.limit) }),
+      );
+    }
+
+    it('still returns a full page of results after sections are collapsed', async () => {
+      respectRequestedLimit(pairedSectionPool(200));
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'pool', limit: 40, group_by_section: true },
+      });
+
+      expect(response.statusCode).toBe(200);
+      // Qdrant was asked for twice the requested page...
+      expect(mockQdrantQuery.mock.calls[0]?.[0].limit).toBe(80);
+      const body = response.json();
+      // ...so collapsing 80 points of 2 chunks each still fills all 40 slots. Cutting first
+      // would have handed the grader 20.
+      expect(body.results).toHaveLength(40);
+      expect(body.total).toBe(40);
+      expect(body.results.map((r: { rank: number }) => r.rank)).toEqual(
+        Array.from({ length: 40 }, (_, i) => i + 1),
+      );
+    });
+
+    it('cuts to the requested limit only after the folder post-filter', async () => {
+      respectRequestedLimit(alternatingFolderPool(200));
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'pool', limit: 40, filters: { folder: 'Projects/' } },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.results).toHaveLength(40);
+      for (const result of body.results) {
+        expect(result.path).toMatch(/^Projects\//);
+      }
+    });
+
+    it('never returns more than the requested limit', async () => {
+      respectRequestedLimit(pairedSectionPool(200));
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
+        // No grouping, no folder filter: nothing is dropped, so the over-fetched surplus
+        // has to be cut off at the end instead of leaking to the caller.
+        payload: { query: 'pool', limit: 10 },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().results).toHaveLength(10);
     });
   });
 

@@ -460,7 +460,7 @@ describe('context routes', () => {
       );
     });
 
-    it('calls hybrid search with limit=50', async () => {
+    it('calls hybrid search with limit=50 (over-fetched to 100 on the wire)', async () => {
       await app.inject({
         method: 'POST',
         url: '/api/vault/context',
@@ -471,13 +471,18 @@ describe('context routes', () => {
         payload: { query: 'test' },
       });
 
-      // One fused call: outer limit 50, each prefetch branch oversampled to 2x
+      // One fused call. The route asks hybrid() for 50; the outer limit on the wire is
+      // over-fetched to 100 so dedup does not eat into the pack, and each prefetch branch
+      // is oversampled 2x on top of that.
       const call = mockQdrantQuery.mock.calls[0]?.[0];
-      expect(call.limit).toBe(50);
+      expect(call.limit).toBe(100);
       expect(call.query).toEqual({ fusion: 'rrf' });
       expect(
         (call.prefetch as Array<{ using: string; limit: number }>).map((b) => b.using),
       ).toEqual(['dense', 'bm25']);
+      expect(
+        (call.prefetch as Array<{ using: string; limit: number }>).map((b) => b.limit),
+      ).toEqual([200, 200]);
       expect(mockQdrantSearch).not.toHaveBeenCalled();
       expect(mockQdrantScroll).not.toHaveBeenCalled();
     });

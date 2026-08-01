@@ -4,6 +4,7 @@ import type * as schema from '../../db/schema.js';
 import { sections } from '../../db/schema.js';
 import type { SparseVector } from '../../lib/bm25.js';
 import { BM25_VECTOR_NAME, buildSparseVector, DENSE_VECTOR_NAME } from '../../lib/bm25.js';
+import { DOC_SUMMARY_PREFIX } from '../../lib/chunker.js';
 import type { EmbeddingProvider } from '../../lib/embedding.js';
 import type { TenantQdrantClient } from '../../lib/tenant-qdrant-client.js';
 import type { SearchFilters, SearchResult } from './schemas.js';
@@ -70,8 +71,39 @@ const DENSE_QUANTIZATION_PARAMS = {
 const FUSION_OVERSAMPLE = 2;
 const FUSION_CANDIDATE_FLOOR = 40;
 
+/**
+ * Over-fetch of the OUTER (fused) limit — a different level from FUSION_OVERSAMPLE above.
+ * That one deepens each PREFETCH BRANCH so RRF has enough to fuse; this one deepens what
+ * RRF itself hands back, because everything after it only ever removes points: duplicate
+ * (path, chunk_index) pairs, sibling chunks collapsed by `group_by_section`, and the folder
+ * post-filter. Asking Qdrant for exactly `limit` therefore delivers fewer than `limit`
+ * results to the caller (measured: ~32-35 of 40 at 1.23 chunks per section). We ask for
+ * more, then cut to `limit` once every filter has run.
+ */
+const POST_FILTER_OVERFETCH = 2;
+
+/**
+ * Ceiling on that over-fetch. The cost here is payload transfer, not ranking, and the API
+ * caps `limit` at 50, so this only guards internal callers that pass something larger.
+ */
+const POST_FILTER_OVERFETCH_CAP = 200;
+
 /** Cap on the section text returned with a grouped result, when the caller sets none. */
 const DEFAULT_SECTION_MAX_CHARS = 4000;
+
+/**
+ * Head of a chunk body used to relocate it in its section when the two are no longer
+ * byte-identical. Long enough that it cannot collide with a neighbouring paragraph, short
+ * enough to survive an edit anywhere past the chunk's opening.
+ */
+const ANCHOR_PROBE_CHARS = 120;
+
+/**
+ * Below this the probe is too short to identify a position, so the chunk's opening line is
+ * kept only when it is at least this long; a shorter one (a heading, a list marker) falls
+ * back to the fixed-width head instead.
+ */
+const ANCHOR_MIN_PROBE_CHARS = 24;
 
 /** Options for the hybrid endpoint's small-to-big (parent document) expansion. */
 export interface HybridOptions {
@@ -148,7 +180,11 @@ export class SearchService {
     // side goes through the SAME builder as the indexer, or the terms would not line up.
     const denseVector = await this.embedder.embedQuery(query);
     const sparseVector = buildSparseVector(query);
-    const candidateLimit = Math.max(limit * FUSION_OVERSAMPLE, FUSION_CANDIDATE_FLOOR);
+    // How many fused points we ask for; the caller still gets exactly `limit` (see below).
+    const fetchLimit = Math.min(limit * POST_FILTER_OVERFETCH, POST_FILTER_OVERFETCH_CAP);
+    // Branch depth is oversampled on top of the over-fetched outer limit: RRF can never
+    // return more than its branches saw, so the branches must stay the deeper of the two.
+    const candidateLimit = Math.max(fetchLimit * FUSION_OVERSAMPLE, FUSION_CANDIDATE_FLOOR);
 
     const prefetch: PrefetchBranch[] = [
       {
@@ -169,7 +205,7 @@ export class SearchService {
     const result = await this.qdrant.query({
       prefetch,
       query: { fusion: 'rrf' },
-      limit,
+      limit: fetchLimit,
       with_payload: true,
       filter: this.buildFilter(filters) as { must?: unknown[] },
     });
@@ -181,11 +217,20 @@ export class SearchService {
     // relies on multiple hits per file for smart expansion), so we never dedupe by path.
     points = this.dedupeChunks(points);
 
-    let sectionTexts: Map<string, string> | undefined;
     if (options.groupBySection === true) {
       points = this.dedupeSections(points);
-      sectionTexts = this.loadSectionTexts(points, options.sectionMaxChars);
     }
+
+    // Every removal above has happened by now, so this is the first point at which cutting
+    // to `limit` yields `limit` results instead of "whatever survived".
+    points = points.slice(0, limit);
+
+    // Section texts are loaded only for the points that actually ship — one SQLite round
+    // trip either way, but no window is computed for a point that was just cut.
+    const sectionTexts =
+      options.groupBySection === true
+        ? this.loadSectionTexts(points, options.sectionMaxChars)
+        : undefined;
 
     return this.finalize(points, sectionTexts);
   }
@@ -269,9 +314,146 @@ export class SearchService {
     // the composite key below is what pins each row back to the right note.
     const rows = this.db.select().from(sections).where(inArray(sections.parentId, parentIds)).all();
     for (const row of rows) {
-      texts.set(`${row.path} ${row.parentId}`, row.text.slice(0, limit));
+      texts.set(`${row.path} ${row.parentId}`, row.text);
     }
-    return texts;
+
+    // Truncation is per POINT, not per row: the window is centred on the chunk that was
+    // actually retrieved, so the passage the ranker matched is always inside what ships.
+    // (`texts` above holds the raw, untruncated row text — it is never returned as is.)
+    const windows = new Map<string, string>();
+    for (const point of points) {
+      const key = this.sectionKey(point);
+      if (key === undefined || windows.has(key)) continue;
+      const full = texts.get(key);
+      if (full === undefined) continue;
+      const chunkText = typeof point.payload?.text === 'string' ? point.payload.text : '';
+      const sectionPath =
+        typeof point.payload?.section_path === 'string' ? point.payload.section_path : '';
+      windows.set(key, this.sectionWindow(full, chunkText, sectionPath, limit));
+    }
+    return windows;
+  }
+
+  /**
+   * Cuts at most `limit` characters out of a section so that the retrieved chunk is inside
+   * them, with as much surrounding context as the budget allows.
+   *
+   * A plain `slice(0, limit)` prefix is what this replaces. Measured on the corpus: 4.4% of
+   * sections are longer than a 4000-char cut, they hold 17.3% of all chunks, and for 6.6% of
+   * ALL chunks the retrieved text fell outside that prefix entirely — the caller was handed
+   * a passage that demonstrably does not contain what matched.
+   *
+   * Falls back to the prefix when the chunk cannot be located in the section (index drift —
+   * the note was rewritten after the point was indexed): an arbitrary window would be no
+   * better than the prefix, and the prefix at least starts where the section does.
+   */
+  private sectionWindow(
+    sectionText: string,
+    chunkText: string,
+    sectionPath: string,
+    limit: number,
+  ): string {
+    if (sectionText.length <= limit) return sectionText;
+
+    // The stored payload text is NOT a substring of the section row: the indexer prepends
+    // the breadcrumb to every chunk (the section repeats it only once, at its head) and,
+    // with INDEX_DOC_SUMMARY on, a document annotation on top of that. Anchoring on the raw
+    // payload therefore missed on every chunk but the first and silently degraded the whole
+    // window back to `slice(0, limit)`. Anchor on the body instead.
+    const body = this.chunkBody(chunkText, sectionPath);
+    const anchor = this.locateChunk(sectionText, body);
+    if (anchor === -1) return sectionText.slice(0, limit);
+
+    // A probe match (see `locateChunk`) can point at a body that runs past the section end;
+    // clamping keeps `anchorEnd` a real offset so the snaps below stay inside the string.
+    const anchorEnd = Math.min(anchor + body.length, sectionText.length);
+    const chunkLength = anchorEnd - anchor;
+
+    // The chunk alone does not fit. Nothing can keep it whole, so start where it starts:
+    // the beginning of the match still beats the beginning of the section.
+    if (chunkLength >= limit) return sectionText.slice(anchor, anchor + limit);
+
+    // Spend the spare budget on both sides of the chunk, then pin the window inside the
+    // section — near either edge the clamp shifts the window rather than shortening it.
+    const padding = limit - chunkLength;
+    const centred = Math.max(0, anchor - Math.floor(padding / 2));
+    let start = Math.max(0, Math.min(sectionText.length, centred + limit) - limit);
+
+    // Snap to paragraph/line/word boundaries so the window neither opens nor closes
+    // mid-word. Both snaps are constrained to stay clear of [anchor, anchorEnd]:
+    // readability never costs a single character of the chunk itself.
+    start = this.snapStart(sectionText, start, anchor);
+    // The start snap only ever moves forward, so re-deriving the end reclaims that budget.
+    const end = this.snapEnd(sectionText, Math.min(sectionText.length, start + limit), anchorEnd);
+
+    return sectionText.slice(start, end);
+  }
+
+  /**
+   * The retrieved chunk stripped of the two prefixes the indexer adds to the payload text
+   * but not to the section row: the optional document annotation (`INDEX_DOC_SUMMARY`) and
+   * the breadcrumb every chunk carries as its first line. What is left is the chunk body as
+   * it appears inside the section.
+   */
+  private chunkBody(chunkText: string, sectionPath: string): string {
+    let body = chunkText;
+    if (body.startsWith(DOC_SUMMARY_PREFIX)) {
+      const gap = body.indexOf('\n\n');
+      if (gap !== -1) body = body.slice(gap + 2);
+    }
+    const crumb = `${sectionPath}\n\n`;
+    if (sectionPath.length > 0 && body.startsWith(crumb)) {
+      body = body.slice(crumb.length);
+    }
+    return body;
+  }
+
+  /**
+   * Offset of `body` inside `sectionText`, or `-1`.
+   *
+   * The exact match is tried first. It can still fail on a chunk the indexer post-processed
+   * further (a table summary is appended to the run's head chunk) or after a small edit to
+   * the note, so the head of the body is used as a probe: locating the chunk approximately
+   * is worth far more than falling back to the section prefix. The probe stops at the first
+   * line break, since whatever diverged usually did so further down.
+   */
+  private locateChunk(sectionText: string, body: string): number {
+    if (body.length === 0) return -1;
+    const exact = sectionText.indexOf(body);
+    if (exact !== -1) return exact;
+
+    const head = body.slice(0, ANCHOR_PROBE_CHARS);
+    const lineEnd = head.indexOf('\n');
+    const probe = lineEnd >= ANCHOR_MIN_PROBE_CHARS ? head.slice(0, lineEnd) : head;
+    return sectionText.indexOf(probe);
+  }
+
+  /** Moves `start` forward onto the nearest boundary that still sits at or before `anchor`. */
+  private snapStart(text: string, start: number, anchor: number): number {
+    if (start === 0) return 0;
+    for (const [separator, width] of [
+      ['\n\n', 2],
+      ['\n', 1],
+      [' ', 1],
+    ] as const) {
+      // indexOf, not lastIndexOf: the EARLIEST boundary after `start` keeps the most
+      // leading context. The nearest one before the chunk would shrink the window to it.
+      const at = text.indexOf(separator, start);
+      const boundary = at + width;
+      if (at !== -1 && boundary <= anchor) return boundary;
+    }
+    return start;
+  }
+
+  /** Moves `end` back onto the nearest boundary that still sits at or after `anchorEnd`. */
+  private snapEnd(text: string, end: number, anchorEnd: number): number {
+    if (end >= text.length) return text.length;
+    for (const separator of ['\n\n', '\n', ' ']) {
+      // lastIndexOf searches backwards from `end`, so the hit can never overrun the window.
+      const at = text.lastIndexOf(separator, end);
+      if (at >= anchorEnd) return at;
+    }
+    return end;
   }
 
   /** Rescales scores, attaches section texts and assigns 1-based ranks. */
