@@ -35,7 +35,7 @@ export const ContextSourceSchema = Type.Object({
     minimum: 0,
     maximum: 1,
     description:
-      'Best score among the note\'s matched chunks, relative to the result set\'s top hit ' +
+      "Best score among the note's matched chunks, relative to the result set's top hit " +
       '(top hit = 1.0). A rank-preserving rescale of the hybrid fusion score — not an ' +
       'absolute similarity; do not compare across queries.',
   }),

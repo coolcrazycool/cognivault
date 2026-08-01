@@ -288,6 +288,44 @@ curl "http://localhost:3030/api/admin/reindex/status?jobId=<job-id>" \
 Returns `202` with a `jobId`, or `409` while a full reindex is already running. A job that
 saw failures ends as `completed_with_errors` and lists the offending files.
 
+#### Collection rebuild
+
+`POST /api/admin/reindex` re-embeds **one** user's vault into the existing collection. It
+cannot change anything the collection itself records — above all the BM25 scheme marker,
+which the service refuses to re-stamp on a populated collection whose provenance it cannot
+prove. Making that marker true requires re-creating the collection, which is what this is.
+
+```bash
+# What you are about to destroy — read this first; nothing is pre-filled anywhere
+curl http://localhost:3030/api/admin/collection \
+  -H "Authorization: Bearer $API_KEY"
+# → {"collection":"cognivault_v2","alias":"cognivault","schemeVersion":2,
+#    "expectedSchemeVersion":3,"pointsCount":41230}
+
+# DESTRUCTIVE: drops that collection — EVERY user's vectors, not just yours — recreates it
+# with the current schema and scheme marker, then re-indexes every registered vault.
+curl -X POST http://localhost:3030/api/admin/collection/rebuild \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"confirm": "cognivault_v2"}'
+
+curl "http://localhost:3030/api/admin/collection/rebuild/status?jobId=<job-id>" \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+`confirm` must equal the physical collection name exactly (`400 CONFIRM_MISMATCH`
+otherwise — the alias `cognivault` is not accepted). `409 REBUILD_IN_PROGRESS` while
+another rebuild or any per-user reindex is running; a per-user reindex started during a
+rebuild gets `409 REINDEX_IN_PROGRESS`.
+
+**Search returns nothing from the moment the collection is dropped until indexing
+finishes.** The status `phase` says where the job is: `dropping` (collection intact,
+nothing lost yet) → `creating` (collection GONE) → `indexing` (collection back, filling
+up, search partial) → `done`. A user whose reindex fails is recorded in `errors` and the
+job continues with the next one; a failure to re-create the collection ends the job as
+`failed` with a `FATAL:` error string, and retrying the endpoint or restarting the service
+re-creates it.
+
 ### Health & metrics
 
 ```bash
@@ -469,7 +507,7 @@ src/
     search/                 #   /api/vault/search/{semantic,hybrid,lexical}
     context/                #   /api/vault/context
     vault/                  #   /api/vault/* file CRUD + upload
-    admin/                  #   /api/admin/reindex[/status]
+    admin/                  #   /api/admin/reindex[/status], /api/admin/collection[/rebuild]
   lib/
     bm25.ts                 # sparse vectors: tokenizer, Russian stemmer, FNV-1a, BM25 tf
     chunker.ts              # markdown/heading/table chunking, parent sections
