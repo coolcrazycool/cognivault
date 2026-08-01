@@ -87,19 +87,36 @@ const MOCK_SCROLL_RESULT = {
   ],
 };
 
+/**
+ * What /context actually receives now: one fused Query API response whose scores are raw
+ * RRF sums (~1/(2 + rank)). Every one of them is far below the min_score default of 0.3 —
+ * the pack must still come out non-empty, because SearchService rescales the batch against
+ * its top hit before the ContextService threshold ever sees it.
+ */
+const MOCK_FUSED_RESULT = {
+  points: [
+    { ...MOCK_SCORED_POINTS[0], score: 0.0333 },
+    { ...MOCK_SCORED_POINTS[1], score: 0.025 },
+    { ...MOCK_SCORED_POINTS[2], score: 0.02 },
+    { ...MOCK_SCORED_POINTS[3], score: 0.0167 },
+  ],
+};
+
 const MOCK_EMBEDDING = [Array.from({ length: 10 }, (_, i) => (i + 1) * 0.1)];
 
 // ── Mock Qdrant and embedder ──
 
 const mockQdrantSearch = vi.fn().mockResolvedValue(MOCK_SCORED_POINTS);
 const mockQdrantScroll = vi.fn().mockResolvedValue(MOCK_SCROLL_RESULT);
+const mockQdrantQuery = vi.fn().mockResolvedValue(MOCK_FUSED_RESULT);
 const mockEmbed = vi.fn().mockResolvedValue(MOCK_EMBEDDING);
-// /context runs hybrid → semantic, which embeds the query via embedQuery.
+// /context runs hybrid, whose dense branch embeds the query via embedQuery.
 const mockEmbedQuery = vi.fn().mockResolvedValue(MOCK_EMBEDDING[0]);
 
 const mockTenantQdrant = {
   search: mockQdrantSearch,
   scroll: mockQdrantScroll,
+  query: mockQdrantQuery,
   upsert: vi.fn(),
   delete: vi.fn(),
   setPayload: vi.fn(),
@@ -199,11 +216,13 @@ describe('context routes', () => {
   beforeEach(() => {
     mockQdrantSearch.mockClear();
     mockQdrantScroll.mockClear();
+    mockQdrantQuery.mockClear();
     mockEmbed.mockClear();
     mockEmbedQuery.mockClear();
     // Reset to default return values
     mockQdrantSearch.mockResolvedValue(MOCK_SCORED_POINTS);
     mockQdrantScroll.mockResolvedValue(MOCK_SCROLL_RESULT);
+    mockQdrantQuery.mockResolvedValue(MOCK_FUSED_RESULT);
     mockEmbed.mockResolvedValue(MOCK_EMBEDDING);
     mockEmbedQuery.mockResolvedValue(MOCK_EMBEDDING[0]);
   });
@@ -431,9 +450,8 @@ describe('context routes', () => {
         payload: { query: 'test', filters: { tags: ['architecture'] } },
       });
 
-      // Hybrid search calls both qdrant.search (semantic) and qdrant.scroll (lexical)
-      // Both should have been called with filter conditions
-      expect(mockQdrantSearch).toHaveBeenCalledWith(
+      // Facets land on the outer filter of the single fused Query API call
+      expect(mockQdrantQuery).toHaveBeenCalledWith(
         expect.objectContaining({
           filter: expect.objectContaining({
             must: expect.arrayContaining([{ key: 'tags', match: { any: ['architecture'] } }]),
@@ -453,9 +471,45 @@ describe('context routes', () => {
         payload: { query: 'test' },
       });
 
-      // hybrid() passes the limit straight to qdrant.search (no oversampling, no lexical leg)
-      expect(mockQdrantSearch).toHaveBeenCalledWith(expect.objectContaining({ limit: 50 }));
+      // One fused call: outer limit 50, each prefetch branch oversampled to 2x
+      const call = mockQdrantQuery.mock.calls[0]?.[0];
+      expect(call.limit).toBe(50);
+      expect(call.query).toEqual({ fusion: 'rrf' });
+      expect(
+        (call.prefetch as Array<{ using: string; limit: number }>).map((b) => b.using),
+      ).toEqual(['dense', 'bm25']);
+      expect(mockQdrantSearch).not.toHaveBeenCalled();
       expect(mockQdrantScroll).not.toHaveBeenCalled();
+    });
+
+    it('raw RRF scores do not starve the pack (min_score default 0.3)', async () => {
+      // Regression guard: every fused score in the fixture is ~0.02, i.e. below min_score.
+      // Only the rescale in SearchService keeps /context from returning an empty pack.
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/vault/context',
+        headers: {
+          authorization: 'Bearer cv-test-context-key',
+          'content-type': 'application/json',
+        },
+        payload: { query: 'system architecture' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      const allEntries = [
+        ...(body.summary ?? []),
+        ...(body.architecture ?? []),
+        ...(body.adrs ?? []),
+        ...(body.glossary ?? []),
+        ...(body.implementation ?? []),
+      ];
+      expect(allEntries.length).toBeGreaterThan(0);
+      expect(body.meta.chunks_included).toBeGreaterThan(0);
+      for (const entry of allEntries) {
+        expect(entry.source.score).toBeGreaterThanOrEqual(0.3);
+        expect(entry.source.score).toBeLessThanOrEqual(1);
+      }
     });
 
     it('embeds the query via embedQuery (query side), never via embed', async () => {

@@ -26,6 +26,7 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
           const searchService = new SearchService(
             request.getUserQdrant(),
             fastify.getUserEmbedder(userId),
+            request.getUserDb(),
           );
           const endTimer = fastify.metrics.searchDuration.startTimer({
             type: 'semantic',
@@ -52,7 +53,7 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
     },
   );
 
-  // POST /hybrid — Ranked retrieval endpoint; currently pure semantic ranking (see SearchService.hybrid)
+  // POST /hybrid — Dense + BM25 retrieval fused with RRF in a single Qdrant Query API call
   fastify.post<{ Body: SearchRequestBody }>(
     '/hybrid',
     { schema: hybridSearchSchema },
@@ -67,16 +68,26 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
           // query_ms measures total wall time including embedding (semantic path calls embedder)
           const start = Date.now();
           const userId = request.user!.userId;
-          const { query, limit = 10, filters = {} } = request.body;
+          const {
+            query,
+            limit = 10,
+            filters = {},
+            group_by_section = false,
+            section_max_chars,
+          } = request.body;
           const searchService = new SearchService(
             request.getUserQdrant(),
             fastify.getUserEmbedder(userId),
+            request.getUserDb(),
           );
           const endTimer = fastify.metrics.searchDuration.startTimer({
             type: 'hybrid',
             user_id: userId,
           });
-          const results = await searchService.hybrid(query, limit, filters);
+          const results = await searchService.hybrid(query, limit, filters, {
+            groupBySection: group_by_section,
+            sectionMaxChars: section_max_chars,
+          });
           endTimer();
           fastify.metrics.searchRequests.inc({ type: 'hybrid', user_id: userId });
           span.setAttribute('search.results_count', results.length);
@@ -97,7 +108,7 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
     },
   );
 
-  // POST /lexical — Lexical search using Qdrant full-text index on text/title/section_path
+  // POST /lexical — BM25 search over the sparse `bm25` vector (IDF applied server-side)
   fastify.post<{ Body: SearchRequestBody }>(
     '/lexical',
     { schema: lexicalSearchSchema },
@@ -116,6 +127,7 @@ export async function searchRoutes(fastify: FastifyInstance): Promise<void> {
           const searchService = new SearchService(
             request.getUserQdrant(),
             fastify.getUserEmbedder(userId),
+            request.getUserDb(),
           );
           const endTimer = fastify.metrics.searchDuration.startTimer({
             type: 'lexical',

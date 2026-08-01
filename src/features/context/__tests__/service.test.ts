@@ -14,6 +14,8 @@ function makeResult(
     status: null,
     type: null,
     chunk_index: 0,
+    parent_id: '',
+    section_text: '',
     rank: 1,
     ...overrides,
   };
