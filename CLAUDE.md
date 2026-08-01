@@ -56,9 +56,13 @@ tools/eval/           # RAG eval harness (golden set, gigaragas-style metrics, r
   Candidate depth per branch is `max(2 × limit, 40)`. `lexical` = sparse only,
   `semantic` = dense only.
 - **Scores from `hybrid`/`lexical` are rescaled against the top hit** (rank 1 → 1.0).
-  Raw RRF sums sit around 0.02 and raw BM25 sums are unbounded — neither survives a
-  fixed threshold like `/context`'s `min_score`, and the response schema caps `score` at 1.
+  Raw RRF sums have no fixed scale (the API exposes `"rrf" | "dbsf"` and no constant) and
+  raw BM25 sums are unbounded — neither survives a fixed threshold like `/context`'s
+  `min_score`, and the response schema caps `score` at 1.
   `semantic` alone returns an absolute (clamped cosine) score.
+  **Therefore rank 1 always leaves as 1.0 and no downstream threshold can reject a result
+  set — refusal is the grader's job, not a score cutoff.** Measured: top-hit score
+  distributions for answerable and unanswerable questions overlap, AUC 0.63–0.68.
 - Index-time and query-time sparse vectors MUST come from the same `bm25.ts` functions,
   or terms stop lining up and the lexical branch silently returns nothing.
 - Never dedupe results by `path`: multiple chunks of one file are intended (the UI uses

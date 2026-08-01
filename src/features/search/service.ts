@@ -509,12 +509,16 @@ export class SearchService {
    * Rescales a result set against its own top hit: rank 1 becomes 1.0, everything else keeps
    * its proportion, order is untouched.
    *
-   * Fusion and BM25 scores are not similarities. Qdrant's RRF sums 1/(k + rank), which lands
-   * every result in a ~0.016-0.033 band, and BM25 sums unbounded term weights. Passing either
-   * through raw breaks every consumer that compares a score against a threshold — most
-   * concretely `/api/vault/context`, whose `min_score` defaults to 0.3 and would silently
-   * discard the entire result set (exactly the Wave 0 regression). The schema also caps
-   * `score` at 1, so unbounded BM25 sums would fail response validation outright.
+   * Fusion and BM25 scores are not similarities. Qdrant's RRF sums 1/(k + rank) with a k it
+   * chooses itself — the API exposes only `"rrf" | "dbsf"`, no constant — and BM25 sums
+   * unbounded term weights. Neither has a fixed scale to compare against, so passing them
+   * through raw breaks every consumer that thresholds a score: `/api/vault/context` with its
+   * `min_score` was exactly the Wave 0 regression. The schema also caps `score` at 1, so
+   * unbounded BM25 sums would fail response validation outright.
+   *
+   * Consequence worth stating: after this, rank 1 is ALWAYS 1.0. No threshold downstream can
+   * reject a result set, so refusal is not implementable here — and measurement agrees, the
+   * top-hit distributions for answerable and unanswerable questions overlap (AUC 0.63-0.68).
    */
   private rescaleToTop(points: ScoredPoint[]): number[] {
     let max = 0;
