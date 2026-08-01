@@ -299,6 +299,24 @@ async function resolveDocSummary(
  * Enriches a file's chunks before they are embedded: a description point for every
  * split table, and the document annotation prepended to every chunk's text (the same
  * text is embedded and stored in the payload, so retrieval and generation agree).
+ *
+ * What the annotation is worth has been measured OFFLINE, against a stand-in annotation
+ * and `multilingual-e5-base` rather than GigaChat — see «Замер `INDEX_DOC_SUMMARY`» in
+ * `tools/rag_audit/README.md`. Three results are worth carrying here:
+ *
+ * - the fear stated on `DOC_SUMMARY_MAX_TOKENS` (`src/lib/chunker.ts`) — every chunk of a
+ *   file sharing an opening, so the branch stops telling them apart — did NOT show up: the
+ *   section-level metric moved 0.506 → 0.488…0.529 across annotation flavours, its noise;
+ * - neither did a benefit. An informative annotation does not beat a boilerplate one of
+ *   the same length, so what the model writes buys nothing measurable — EXCEPT on table
+ *   chunks (`table` hit@1 0.66 → 0.75), which are rows with no topic of their own;
+ * - the window is untouched by construction: `chunkBody` strips the prefix before the
+ *   anchor is located, `sections` rows are written pre-enrichment, and the body budget is
+ *   not reduced (`MAX_STORED_CHUNK_TOKENS` was RAISED to make room). Measured: 92.4 % →
+ *   92.9 % of answers still delivered inside the 4000-char window.
+ *
+ * Composition effects are model-specific, so none of this is a production verdict and the
+ * feature is left ON. The A/B that would settle it is written out in the same README.
  */
 async function enrichChunks(
   fastify: FastifyInstance,

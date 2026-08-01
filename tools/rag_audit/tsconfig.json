@@ -6,7 +6,12 @@
     "noEmit": true,
     "declaration": false,
     "declarationMap": false,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["**/*.ts"]
+  "include": [
+    "**/*.ts",
+    "../../src/**/*.ts"
+  ]
 }
