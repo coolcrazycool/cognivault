@@ -15,7 +15,10 @@
    в средние НЕ попадают и выносятся в отчёт отдельной строкой; пары-ловушки
    ``expected_refusal`` тоже вынесены — их средние живут в
    ``aggregate_refusal``, а их ветку меряют ``refusal_ok`` и обратный к нему
-   ``false_refusal_rate``;
+   ``false_refusal_rate``; третья корзина — метапары
+   (``expected_outcome: "meta"``, вопрос про саму базу или про ассистента):
+   средние в ``aggregate_meta``, ветку меряет ``meta_answered_rate``, и отказ
+   на такой паре считается ПРОВАЛОМ, а не успехом;
 5. результаты режутся по ``category`` golden-пары (``by_category``);
 6. пишутся ``report-<label>.json`` и ``report-<label>.md``.
 
@@ -116,7 +119,10 @@ BUCKET_NOTE = (
     "судья `answer_relevancy_ru` намеренно ставит 0 уклончивому ответу, и общее "
     "число зависело бы от ДОЛИ ловушек в наборе, а не от качества. Следствие: "
     "средние двух прогонов сравнимы, только если совпадают ОБА числа — "
-    "сверьте их перед `--compare`."
+    "сверьте их перед `--compare`. Третья корзина — метапары "
+    "`expected_outcome: meta` (n={meta}): вопрос про саму базу или про "
+    "ассистента, документа-цели нет, но отказ на нём — ПРОВАЛ, а не успех; их "
+    "ветку меряет `meta_answered_rate`."
 )
 
 FALSE_REFUSAL_NOTE = (
@@ -133,6 +139,38 @@ REFUSAL_KEY = "refusal_ok"
 FALSE_REFUSAL_KEY = "false_refusal"
 #: Его доля в агрегатах. МЕНЬШЕ — ЛУЧШЕ, в отличие от всех остальных чисел отчёта.
 FALSE_REFUSAL_RATE_KEY = "false_refusal_rate"
+#: Пер-сэмпловый флаг третьей корзины: метавопрос получил содержательный ответ,
+#: а не отказ (``None`` у всех остальных пар).
+META_KEY = "meta_answered"
+#: Его доля в агрегатах.
+META_RATE_KEY = "meta_answered_rate"
+
+#: Поле golden-пары с ТРЕХЗНАЧНЫМ вердиктом и его значения.
+OUTCOME_KEY = "expected_outcome"
+OUTCOME_ANSWER = "answer"
+OUTCOME_REFUSAL = "refusal"
+OUTCOME_META = "meta"
+OUTCOMES = (OUTCOME_ANSWER, OUTCOME_REFUSAL, OUTCOME_META)
+
+
+def expected_outcome(row: dict[str, Any]) -> str:
+    """Чего мы ждём от ассистента на этой паре: ответа, отказа или метаответа.
+
+    Три исхода вместо двух заведены 2026-08-01. Двоичное «ответил / отказался»
+    не описывало вопрос ПРО САМУ БАЗУ («что ты знаешь?», «о каких продуктах есть
+    информация?», «всегда ли ответ в Markdown?»): документа-цели у него нет, но и
+    отказ на нём — не правильный ответ, а ровно тот дефект, который чинится.
+    Такая пара была вынуждена лежать в ловушках и НАГРАЖДАТЬ отказ.
+
+    ``expected_refusal`` при этом НЕ переопределён: он остаётся флагом ловушки, и
+    все ловушечные метрики (`refusal_ok`, `aggregate_refusal`, разрезы стыка 3)
+    считают ровно то же, что считали. Строка без поля — старый golden-набор:
+    вердикт выводится из ``expected_refusal``, то есть поведение не меняется.
+    """
+    raw = str(row.get(OUTCOME_KEY, "") or "").strip()
+    if raw in OUTCOMES:
+        return raw
+    return OUTCOME_REFUSAL if row.get("expected_refusal") else OUTCOME_ANSWER
 
 #: Поле golden-пары с ручной категорией вопроса и заглушка для пар без неё.
 CATEGORY_KEY = "category"
@@ -721,7 +759,8 @@ async def run_sample(
     """
     question = str(row.get("question", "") or "")
     ground_truth = str(row.get("ground_truth", "") or "")
-    expects_refusal = bool(row.get("expected_refusal"))
+    outcome_expected = expected_outcome(row)
+    expects_refusal = outcome_expected == OUTCOME_REFUSAL
     started = time.perf_counter()
     sample: dict[str, Any] = {
         "id": row.get("id"),
@@ -735,6 +774,7 @@ async def run_sample(
         "source_chunk_index": row.get("source_chunk_index"),
         "section_path": row.get("section_path"),
         "expected_refusal": expects_refusal,
+        OUTCOME_KEY: outcome_expected,
         "accepted": row.get("accepted"),
         "answer": "",
         "sources": [],
@@ -744,6 +784,7 @@ async def run_sample(
         "retrieval_granularity": "none",
         REFUSAL_KEY: None,
         FALSE_REFUSAL_KEY: None,
+        META_KEY: None,
         "metrics": {},
         "error": "",
         "failed": False,
@@ -789,8 +830,13 @@ async def run_sample(
     refused = is_refusal(outcome.answer, finish_reason=outcome.finish_reason)
     sample[REFUSAL_KEY] = refused
     # Ложный отказ меряется ТОЛЬКО на отвечаемых парах: на паре-ловушке отказ —
-    # это правильный ответ, и он живёт в `refusal_ok`.
-    sample[FALSE_REFUSAL_KEY] = None if expects_refusal else refused
+    # это правильный ответ (он живёт в `refusal_ok`), а на метапаре — свой,
+    # третий исход (`meta_answered`), у которого свой знаменатель.
+    sample[FALSE_REFUSAL_KEY] = refused if outcome_expected == OUTCOME_ANSWER else None
+    # Метапара: успех — это СОДЕРЖАТЕЛЬНЫЙ ответ. Отказ здесь ловится тем же
+    # `is_refusal` (включая `finish_reason == "no_context"`, то есть «грейдер не
+    # оставил ни одного фрагмента»), но засчитывается с обратным знаком.
+    sample[META_KEY] = (not refused) if outcome_expected == OUTCOME_META else None
     hit, granularity = retrieval_hit(row, sample["sources"])
     sample[RETRIEVAL_KEY] = hit
     sample["retrieval_granularity"] = granularity
@@ -873,13 +919,27 @@ def answerable(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     ПРАВИЛЬНЫЙ отказ тянул общее среднее вниз, и оно зависело от доли ловушек
     в наборе, а не от качества. Теперь ловушки живут в своей корзине
     (``aggregate_refusal``), а их ветку меряет `refusal_ok`.
+
+    Метапары (``expected_outcome == "meta"``) вынесены по той же причине с
+    обратным знаком: документа-цели у них нет, поэтому `context_precision` и
+    `context_recall` меряли бы не качество ответа, а отсутствие разметки.
     """
-    return [s for s in samples if not s.get("expected_refusal")]
+    return [s for s in samples if expected_outcome(s) == OUTCOME_ANSWER]
 
 
 def refusal_rows(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     """Пары-ловушки: правильный ответ — отказ."""
-    return [s for s in samples if s.get("expected_refusal")]
+    return [s for s in samples if expected_outcome(s) == OUTCOME_REFUSAL]
+
+
+def meta_rows(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Метапары: вопрос про саму базу или про ассистента.
+
+    Отвечать обязательно, цели в корпусе нет. Отказ на такой паре — дефект, а не
+    правильный ответ, поэтому её ветку меряет `meta_answered_rate`, а не
+    `refusal_ok`.
+    """
+    return [s for s in samples if expected_outcome(s) == OUTCOME_META]
 
 
 def retrieval_hit_rate(samples: Sequence[dict[str, Any]]) -> float | None:
@@ -926,6 +986,26 @@ def false_refusal_rate(samples: Sequence[dict[str, Any]]) -> float | None:
     return round(sum(1 for v in values if v) / len(values), 4)
 
 
+def meta_answered_rate(samples: Sequence[dict[str, Any]]) -> float | None:
+    """Доля МЕТАПАР, на которые ассистент ответил, а не отказался.
+
+    Зеркало `refusal_ok` для третьей корзины: там отказ — успех, здесь — провал.
+    Отдельное число, а не строка в `false_refusal_rate`, потому что у того свой
+    знаменатель (отвечаемые пары), и подмешивание метапар меняло бы существующую
+    метрику вместо того, чтобы добавить новую.
+
+    **Больше — лучше.**
+    """
+    values = [
+        s.get(META_KEY)
+        for s in successful(samples)
+        if expected_outcome(s) == OUTCOME_META and isinstance(s.get(META_KEY), bool)
+    ]
+    if not values:
+        return None
+    return round(sum(1 for v in values if v) / len(values), 4)
+
+
 def metric_values(samples: Sequence[dict[str, Any]], name: str) -> list[float]:
     """Оценки метрики по успешным сэмплам (для среднего и разброса)."""
     out: list[float] = []
@@ -964,6 +1044,7 @@ def rate_metrics(samples: Sequence[dict[str, Any]]) -> dict[str, float | None]:
         RETRIEVAL_KEY: retrieval_hit_rate(samples),
         REFUSAL_KEY: refusal_rate(samples),
         FALSE_REFUSAL_RATE_KEY: false_refusal_rate(samples),
+        META_RATE_KEY: meta_answered_rate(samples),
     }
 
 
@@ -1077,6 +1158,7 @@ def build_report(
     # …и только по ОТВЕЧАЕМЫМ парам: см. :func:`answerable`.
     ok_answerable = answerable(ok)
     ok_refusal = refusal_rows(ok)
+    ok_meta = meta_rows(ok)
     aggregates = aggregate(ok_answerable)
     aggregates.update(rate_metrics(samples))
     origins: dict[str, int] = {}
@@ -1108,13 +1190,18 @@ def build_report(
         "buckets": {
             "answerable": len(ok_answerable),
             "refusal": len(ok_refusal),
+            "meta": len(ok_meta),
         },
         "aggregate": aggregates,
         # Ловушки не выбрасываются — их метрики считаются и лежат отдельно.
         "aggregate_refusal": aggregate(ok_refusal),
+        # То же для третьей корзины: судейские числа считаются, но решает
+        # `meta_answered_rate` — «ответил ли вообще».
+        "aggregate_meta": aggregate(ok_meta),
         "dispersion": dispersion(answerable(samples)),
         "coverage": coverage(ok_answerable),
         "coverage_refusal": coverage(ok_refusal),
+        "coverage_meta": coverage(ok_meta),
         "by_category": group_by_category(samples),
         "retrieval_granularity": granularity_counts(samples),
         "retrieval_degradation": granularity_degradation(samples),
@@ -1198,19 +1285,26 @@ def _render_run_params(report: dict[str, Any]) -> list[str]:
 
 
 def _bucket_numbers(report: dict[str, Any]) -> dict[str, int]:
-    """``{answerable, refusal}`` — размеры корзин оценённых пар.
+    """``{answerable, refusal, meta}`` — размеры корзин оценённых пар.
 
     Отчёт СТАРОГО формата ключа ``buckets`` не знает: числа восстанавливаются
-    из сэмплов, чтобы диф со старым отчётом не падал на пустом месте.
+    из сэмплов, чтобы диф со старым отчётом не падал на пустом месте. Он же не
+    знает и корзины ``meta`` — там она честно нулевая, а не «не измерена»:
+    метапар в наборе тогда не было вовсе.
     """
     buckets = report.get("buckets")
     if isinstance(buckets, dict):
         return {
             "answerable": int(buckets.get("answerable", 0) or 0),
             "refusal": int(buckets.get("refusal", 0) or 0),
+            "meta": int(buckets.get("meta", 0) or 0),
         }
     ok = successful([s for s in report.get("samples", []) or [] if isinstance(s, dict)])
-    return {"answerable": len(answerable(ok)), "refusal": len(refusal_rows(ok))}
+    return {
+        "answerable": len(answerable(ok)),
+        "refusal": len(refusal_rows(ok)),
+        "meta": len(meta_rows(ok)),
+    }
 
 
 def _false_refusal_denominator(report: dict[str, Any]) -> int:
@@ -1246,6 +1340,35 @@ def _render_refusal_bucket(report: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _render_meta_bucket(report: dict[str, Any]) -> list[str]:
+    """Таблица третьей корзины — метапар (вопрос про базу или про ассистента)."""
+    aggregates = report.get("aggregate_meta")
+    n = _bucket_numbers(report)["meta"]
+    if not isinstance(aggregates, dict) or not n:
+        return []  # метапар в наборе нет — таблице из прочерков места нет
+    cover = report.get("coverage_meta") or {}
+    lines = [f"## Метапары `expected_outcome: meta` ({n})", ""]
+    lines.append(
+        "Вопрос про САМУ базу («что ты знаешь?», «о каких продуктах есть "
+        "информация?») или про ассистента. Правильного документа не существует, "
+        "поэтому `retrieval_hit` по ним не считается, а судейские метрики ниже "
+        "приведены только для полноты: `context_precision`/`context_recall` "
+        "меряли бы отсутствие разметки, а не качество ответа. Осмысленная оценка "
+        f"ветки — `{META_RATE_KEY}`: доля метапар, на которые ассистент ответил, "
+        "а не отказался. **Больше — лучше**; отказ здесь — тот самый дефект, "
+        "ради которого корзина и заведена."
+    )
+    lines.append("")
+    lines.append("| Метрика | Значение | Оценено пар |")
+    lines.append("|---|---:|---:|")
+    for name in METRIC_NAMES:
+        lines.append(f"| {name} | {_fmt(aggregates.get(name))} | {cover.get(name, 0)} |")
+    answered = (report.get("aggregate") or {}).get(META_RATE_KEY)
+    lines.append(f"| {META_RATE_KEY} | {_fmt(answered)} | {n} |")
+    lines.append("")
+    return lines
+
+
 #: Колонки разреза по категориям: ключ отчёта → заголовок таблицы.
 _CATEGORY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("faithfulness_ru", "faith"),
@@ -1255,6 +1378,7 @@ _CATEGORY_COLUMNS: tuple[tuple[str, str], ...] = (
     (RETRIEVAL_KEY, "hit"),
     (REFUSAL_KEY, "refusal_ok"),
     (FALSE_REFUSAL_RATE_KEY, "false_ref ↓"),
+    (META_RATE_KEY, "meta_ans"),
 )
 
 
@@ -1332,7 +1456,8 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
     )
     lines.append(
         f"- отвечаемых пар: {buckets.get('answerable', 0)}, "
-        f"пар-ловушек `expected_refusal`: {buckets.get('refusal', 0)}"
+        f"пар-ловушек `expected_refusal`: {buckets.get('refusal', 0)}, "
+        f"метапар `expected_outcome: meta`: {buckets.get('meta', 0)}"
     )
     lines.append("")
     lines.extend(_render_run_params(report))
@@ -1363,10 +1488,17 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
         f"| {_fmt(aggregates.get(FALSE_REFUSAL_RATE_KEY))} | — | "
         f"{_false_refusal_denominator(report)} |"
     )
+    lines.append(
+        f"| {META_RATE_KEY} (доля МЕТАПАР, на которые ассистент ответил, а не "
+        "отказался; **больше — лучше**) "
+        f"| {_fmt(aggregates.get(META_RATE_KEY))} | — | "
+        f"{_bucket_numbers(report)['meta']} |"
+    )
     lines.append("")
     lines.append(FALSE_REFUSAL_NOTE)
     lines.append("")
     lines.extend(_render_refusal_bucket(report))
+    lines.extend(_render_meta_bucket(report))
     lines.extend(_render_categories(report))
     lines.append(DIAGNOSTIC_RULE)
     lines.append("")
@@ -1709,7 +1841,7 @@ def render_compare_md(
             f"| {pair['n']} | {delta_sign(delta, pair['stderr'], noise)} |"
         )
     # Доли (hit/refusal) парного разложения не имеют — только среднее по прогону.
-    for name in (RETRIEVAL_KEY, REFUSAL_KEY, FALSE_REFUSAL_RATE_KEY):
+    for name in (RETRIEVAL_KEY, REFUSAL_KEY, FALSE_REFUSAL_RATE_KEY, META_RATE_KEY):
         value_a, value_b = agg_a.get(name), agg_b.get(name)
         if isinstance(value_a, (int, float)) and isinstance(value_b, (int, float)):
             delta = round(float(value_b) - float(value_a), 4)

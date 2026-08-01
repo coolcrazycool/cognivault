@@ -19,12 +19,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from gen_golden import BackendError  # noqa: E402
 
 from run import (  # noqa: E402
+    _bucket_numbers,
     APPROXIMATE_WARNING,
     CATEGORY_KEY,
     DEFAULT_UI_URL,
     FALSE_REFUSAL_KEY,
     FALSE_REFUSAL_RATE_KEY,
     GRANULARITY_WARNING,
+    META_KEY,
+    META_RATE_KEY,
+    OUTCOME_KEY,
     REFUSAL_KEY,
     REPORT_DISCLAIMER,
     RETRIEVAL_KEY,
@@ -40,8 +44,10 @@ from run import (  # noqa: E402
     dispersion,
     false_refusal_rate,
     group_by_category,
+    expected_outcome,
     is_refusal,
     load_golden,
+    meta_answered_rate,
     paired_delta,
     parse_sse,
     rebuild_contexts,
@@ -923,6 +929,7 @@ def test_group_by_category_splits_metrics_and_counts_failures():
         RETRIEVAL_KEY: None,
         REFUSAL_KEY: None,
         FALSE_REFUSAL_RATE_KEY: None,
+        META_RATE_KEY: None,
     }
     assert groups[UNCATEGORIZED]["faithfulness_ru"] == 0.6
 
@@ -967,7 +974,7 @@ def test_refusal_rows_leave_the_judge_averages_and_get_their_own_bucket():
 
     assert report["aggregate"]["faithfulness_ru"] == 0.8  # не 0.267
     assert report["aggregate_refusal"]["faithfulness_ru"] == 0.0  # но и не потеряны
-    assert report["buckets"] == {"answerable": 1, "refusal": 2}
+    assert report["buckets"] == {"answerable": 1, "refusal": 2, "meta": 0}
     assert report["coverage"]["faithfulness_ru"] == 1
     assert report["coverage_refusal"]["faithfulness_ru"] == 2
     assert report["dispersion"]["faithfulness_ru"]["n"] == 1
@@ -982,7 +989,10 @@ def test_report_md_states_the_size_of_both_buckets():
         _sample("t1", 0.0, expected_refusal=True, **{REFUSAL_KEY: True}),
     ]
     text = render_report_md(_report("x", 0.0, samples=rows))
-    assert "отвечаемых пар: 1, пар-ловушек `expected_refusal`: 1" in text
+    assert (
+        "отвечаемых пар: 1, пар-ловушек `expected_refusal`: 1, "
+        "метапар `expected_outcome: meta`: 0" in text
+    )
     assert "ТОЛЬКО по отвечаемым парам (n=1)" in text
     assert "(n=2) вынесены" not in text  # n ловушек — своё число
     assert "Пары-ловушки `expected_refusal` (1)" in text
@@ -1104,3 +1114,105 @@ def test_compare_does_not_crash_on_a_report_from_the_old_harness():
     assert f"| {FALSE_REFUSAL_RATE_KEY} ↓ (меньше — лучше) | — |" in text
     # Старый отчёт и сам по себе всё ещё рендерится.
     assert "# RAG eval — прогон `old`" in render_report_md(old)
+
+
+# --------------------------------------------------------------------------- #
+# Третий исход: метапара — вопрос про саму базу или про ассистента
+# --------------------------------------------------------------------------- #
+
+
+def test_expected_outcome_falls_back_to_the_binary_flag():
+    """Старый golden-набор поля не знает — вердикт выводится, поведение то же."""
+    assert expected_outcome({"id": "q"}) == "answer"
+    assert expected_outcome({"id": "t", "expected_refusal": True}) == "refusal"
+    # Мусор в поле не должен молча создавать четвёртую корзину.
+    assert expected_outcome({"id": "q", OUTCOME_KEY: "чепуха"}) == "answer"
+    assert expected_outcome({"id": "m", OUTCOME_KEY: "meta"}) == "meta"
+
+
+def test_run_sample_scores_a_meta_row_by_answering_not_by_refusing():
+    """На метапаре отказ — ПРОВАЛ; на ловушке он же — успех. Разные корзины."""
+    meta_row = {
+        "id": "m1",
+        "question": "Что ты знаешь?",
+        "ground_truth": "эталон.",
+        OUTCOME_KEY: "meta",
+    }
+    sample, _judge = _run_one(meta_row, rag_log=None, body=REFUSAL_SSE)
+    assert sample[REFUSAL_KEY] is True  # факт отказа записан как был
+    assert sample[META_KEY] is False  # …но на метапаре это провал
+    assert sample[FALSE_REFUSAL_KEY] is None  # и не подмешивается в чужой знаменатель
+    assert sample[OUTCOME_KEY] == "meta"
+
+    sample, _judge = _run_one(meta_row, rag_log=None, body=SSE_BODY)
+    assert sample[META_KEY] is True
+
+    # У ловушки и у отвечаемой пары третьего флага нет вовсе.
+    trap = {"id": "t1", "question": "?", "expected_refusal": True}
+    sample, _judge = _run_one(trap, rag_log=None, body=REFUSAL_SSE)
+    assert sample[META_KEY] is None
+    sample, _judge = _run_one({"id": "q1", "question": "?"}, rag_log=None, body=SSE_BODY)
+    assert sample[META_KEY] is None
+
+
+def test_meta_rows_get_their_own_bucket_and_leave_the_others_intact():
+    """Метапара не разбавляет ни судейские средние, ни ветку отказа."""
+    rows = [
+        _sample("q1", 0.8, **{FALSE_REFUSAL_KEY: False}),
+        _sample("t1", 0.0, expected_refusal=True, **{REFUSAL_KEY: True}),
+        # Метапара с отказом НЕ попадает в false_refusal_rate: у него свой
+        # знаменатель — отвечаемые пары, и подмешивание меняло бы старое число.
+        _sample("m1", 0.2, **{OUTCOME_KEY: "meta", META_KEY: True}),
+        _sample("m2", 0.2, **{OUTCOME_KEY: "meta", META_KEY: False}),
+    ]
+    report = _report("x", 0.0, samples=rows)
+
+    assert report["buckets"] == {"answerable": 1, "refusal": 1, "meta": 2}
+    assert report["aggregate"]["faithfulness_ru"] == 0.8  # метапары не в среднем
+    assert report["aggregate_meta"]["faithfulness_ru"] == 0.2  # но и не потеряны
+    assert report["coverage_meta"]["faithfulness_ru"] == 2
+    assert report["aggregate"][META_RATE_KEY] == 0.5
+    # Существующие метрики не переопределены: ловушка по-прежнему одна.
+    assert report["aggregate"][REFUSAL_KEY] == 1.0
+    assert report["aggregate"][FALSE_REFUSAL_RATE_KEY] == 0.0
+
+
+def test_meta_answered_rate_ignores_failed_and_foreign_rows():
+    rows = [
+        _sample("m1", 0.5, **{OUTCOME_KEY: "meta", META_KEY: True}),
+        _sample("m2", 0.5, **{OUTCOME_KEY: "meta", META_KEY: False}),
+        _sample("m3", 0.5, failed=True, error="HTTP 500", **{OUTCOME_KEY: "meta", META_KEY: False}),
+        _sample("t1", 0.5, expected_refusal=True, **{REFUSAL_KEY: True}),
+    ]
+    assert meta_answered_rate(rows) == 0.5
+    assert meta_answered_rate([]) is None
+
+
+def test_report_md_shows_the_meta_bucket_only_when_it_has_rows():
+    rows = [_sample("q1", 0.8), _sample("m1", 0.4, **{OUTCOME_KEY: "meta", META_KEY: True})]
+    text = render_report_md(_report("x", 0.0, samples=rows))
+    assert "метапар `expected_outcome: meta`: 1" in text
+    assert "## Метапары `expected_outcome: meta` (1)" in text
+    assert f"| {META_RATE_KEY} " in text
+
+    quiet = render_report_md(_report("y", 0.0, samples=[_sample("q1", 0.8)]))
+    assert "## Метапары" not in quiet
+
+
+def test_bucket_numbers_of_a_legacy_report_report_zero_meta():
+    """Отчёт прежней версии метапар не знал — корзина честно нулевая."""
+    report = _report("old", 0.0, samples=[_sample("q1", 0.8)])
+    report.pop("buckets")
+    assert _bucket_numbers(report) == {"answerable": 1, "refusal": 0, "meta": 0}
+
+
+def test_compare_table_carries_the_meta_branch():
+    """Третий исход обязан быть виден и в дифе, иначе его сдвиг не заметят."""
+    rows_a = [_sample("m1", 0.5, **{OUTCOME_KEY: "meta", META_KEY: False})]
+    rows_b = [_sample("m1", 0.5, **{OUTCOME_KEY: "meta", META_KEY: True})]
+    text = render_compare_md(
+        _report("a", 0.0, samples=rows_a), _report("b", 0.0, samples=rows_b)
+    )
+    line = [l for l in text.splitlines() if l.startswith(f"| {META_RATE_KEY}")][0]
+    assert "+1.000" in line
+    assert "▲" in line

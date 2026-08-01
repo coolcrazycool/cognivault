@@ -1,12 +1,23 @@
 {
   "tool": "cognivault-rag-audit/audit_all",
   "format_version": 1,
-  "created_utc": "2026-08-01T15:21:48+00:00",
-  "label": "ba0133b",
+  "created_utc": "2026-08-01T18:08:29+00:00",
+  "label": "e28c1cc",
   "provenance": {
-    "commit": "ba0133b",
-    "dirty": false,
-    "dirty_files": [],
+    "commit": "e28c1cc",
+    "dirty": true,
+    "dirty_files": [
+      "ools/eval/README.md",
+      "tools/eval/golden.categories.json",
+      "tools/eval/golden.corpus.jsonl",
+      "tools/eval/golden.jsonl",
+      "tools/eval/run.py",
+      "tools/eval/tests/test_run.py",
+      "tools/rag_audit/README.md",
+      "tools/rag_audit/tests/test_golden_shape.py",
+      "tools/rag_audit/tests/test_xlsx_to_golden.py",
+      "tools/rag_audit/xlsx_to_golden.py"
+    ],
     "dump": {
       "name": "confluence-dump.zip",
       "sha256": "8ebffe34ab623939fe16da6510f9ae08b7193f830acc9d11db2f8fe1f3539104",
@@ -16,14 +27,14 @@
       {
         "name": "golden.jsonl",
         "path": "tools/eval/golden.jsonl",
-        "sha256": "ae1b6267f326402ccbfb268b1e8f36a5c59af22bba1749aee9012a9f9a0ed239",
+        "sha256": "a67c2080224a6b3ac131f66d12b35f3d07182c4d6e947ba9dfabde1564eb9f4c",
         "rows": 39
       },
       {
         "name": "golden.corpus.jsonl",
         "path": "tools/eval/golden.corpus.jsonl",
-        "sha256": "9b95a6172b11c4e503f589fad14c1f8b7650991f2d88a721fb9525ca1a8d5ca4",
-        "rows": 191
+        "sha256": "a04c21522893a44f353643f857346663e91387ce478ec08ec63a58c3b90adda1",
+        "rows": 212
       }
     ],
     "model": "intfloat/multilingual-e5-base",
@@ -149,9 +160,9 @@
     "sections": 260,
     "sections_over_cap": 44,
     "chunks_in_oversized_sections": 603,
-    "window_chars_mean": 2257.6,
-    "window_chars_5_blocks": 11288,
-    "window_ceiling": 0.8008
+    "window_chars_mean": 2189.5,
+    "window_chars_5_blocks": 10947,
+    "window_ceiling": 0.8005
   },
   "thresholds": {
     "convert.word_recall": 0.9993,
@@ -170,20 +181,18 @@
   },
   "comparison": {
     "reasons": {
-      "golden": "золотой набор другой (состав файлов или их содержимое) — метрика двигалась бы вместе с разметкой, а не с качеством",
-      "retrieval_config": "другая конфигурация: post: ['dedupe_chunks', 'group_by_section'] → ['dedupe_chunks', 'group_by_section', 'collapse_cross_file_duplicates']"
+      "golden": "золотой набор другой (состав файлов или их содержимое) — метрика двигалась бы вместе с разметкой, а не с качеством"
     },
     "blocked": {
       "3": [
-        "золотой набор другой (состав файлов или их содержимое) — метрика двигалась бы вместе с разметкой, а не с качеством",
-        "другая конфигурация: post: ['dedupe_chunks', 'group_by_section'] → ['dedupe_chunks', 'group_by_section', 'collapse_cross_file_duplicates']"
+        "золотой набор другой (состав файлов или их содержимое) — метрика двигалась бы вместе с разметкой, а не с качеством"
       ],
       "4": [
         "золотой набор другой (состав файлов или их содержимое) — метрика двигалась бы вместе с разметкой, а не с качеством"
       ]
     },
     "warnings": [
-      "ЛИНЕЙКА СДВИНУЛАСЬ: с базового прогона изменились audit_retrieval.py, audit_window.py, collapse_duplicates.ts — часть дельты может быть изменением ЗАМЕРА, а не качества"
+      "рабочее дерево грязное — прогон не привязан к коммиту: ools/eval/README.md, tools/eval/golden.categories.json, tools/eval/golden.corpus.jsonl, tools/eval/golden.jsonl, tools/eval/run.py, tools/eval/tests/test_run.py, tools/rag_audit/README.md, tools/rag_audit/tests/test_golden_shape.py, tools/rag_audit/tests/test_xlsx_to_golden.py, tools/rag_audit/xlsx_to_golden.py"
     ],
     "comparable": {
       "1": true,
@@ -193,9 +202,9 @@
     }
   },
   "baseline": {
-    "created_utc": "2026-08-01T14:29:44+00:00",
-    "commit": "b4c329c",
-    "label": "d27c997"
+    "created_utc": "2026-08-01T15:21:48+00:00",
+    "commit": "ba0133b",
+    "label": "ba0133b"
   },
   "changes": {
     "metrics": {
@@ -267,19 +276,18 @@
   "failures": [],
   "refusals": [
     "стык 3 (чанки → выдача (hybrid, попадание по файлу)): золотой набор другой (состав файлов или их содержимое) — метрика двигалась бы вместе с разметкой, а не с качеством",
-    "стык 3 (чанки → выдача (hybrid, попадание по файлу)): другая конфигурация: post: ['dedupe_chunks', 'group_by_section'] → ['dedupe_chunks', 'group_by_section', 'collapse_cross_file_duplicates']",
     "стык 4 (выдача → окно раздела (cap 4000, центрирование)): золотой набор другой (состав файлов или их содержимое) — метрика двигалась бы вместе с разметкой, а не с качеством"
   ],
   "warnings": [
-    "ЛИНЕЙКА СДВИНУЛАСЬ: с базового прогона изменились audit_retrieval.py, audit_window.py, collapse_duplicates.ts — часть дельты может быть изменением ЗАМЕРА, а не качества"
+    "рабочее дерево грязное — прогон не привязан к коммиту: ools/eval/README.md, tools/eval/golden.categories.json, tools/eval/golden.corpus.jsonl, tools/eval/golden.jsonl, tools/eval/run.py, tools/eval/tests/test_run.py, tools/rag_audit/README.md, tools/rag_audit/tests/test_golden_shape.py, tools/rag_audit/tests/test_xlsx_to_golden.py, tools/rag_audit/xlsx_to_golden.py"
   ],
   "timing": {
-    "convert": 4.78,
-    "chunk": 6.62,
-    "sections": 4.04,
-    "retrieval": 2.59,
-    "window": 70.08,
-    "total_s": 88.11
+    "convert": 4.93,
+    "chunk": 6.61,
+    "sections": 3.96,
+    "retrieval": 2.54,
+    "window": 68.04,
+    "total_s": 86.08
   },
   "exit_code": 2,
   "per_query": {
@@ -1433,6 +1441,111 @@
         "id": "g454-robustness",
         "origin": "generated",
         "rank": 1
+      },
+      {
+        "id": "g500-corpus_scope",
+        "origin": "authored",
+        "rank": 1
+      },
+      {
+        "id": "g501-corpus_scope",
+        "origin": "authored",
+        "rank": 1
+      },
+      {
+        "id": "g502-corpus_scope",
+        "origin": "authored",
+        "rank": 1
+      },
+      {
+        "id": "g503-corpus_scope",
+        "origin": "authored",
+        "rank": 1
+      },
+      {
+        "id": "g504-corpus_scope",
+        "origin": "authored",
+        "rank": 3
+      },
+      {
+        "id": "g505-corpus_scope",
+        "origin": "authored",
+        "rank": 2
+      },
+      {
+        "id": "g506-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g507-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g508-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g509-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g510-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g511-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g512-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g513-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g514-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g515-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g516-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g517-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g518-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g519-corpus_scope",
+        "origin": "authored",
+        "rank": null
+      },
+      {
+        "id": "g520-corpus_scope",
+        "origin": "authored",
+        "rank": null
       }
     ],
     "window": [
@@ -2524,6 +2637,48 @@
       {
         "id": "g454-robustness",
         "origin": "generated",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g500-corpus_scope",
+        "origin": "authored",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g501-corpus_scope",
+        "origin": "authored",
+        "judgeable": false,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g502-corpus_scope",
+        "origin": "authored",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g503-corpus_scope",
+        "origin": "authored",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g504-corpus_scope",
+        "origin": "authored",
+        "judgeable": true,
+        "containment": 1.0,
+        "contained": true
+      },
+      {
+        "id": "g505-corpus_scope",
+        "origin": "authored",
         "judgeable": true,
         "containment": 1.0,
         "contained": true

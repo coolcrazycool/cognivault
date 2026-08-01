@@ -8,7 +8,7 @@
 `context_recall`, без `source_path` — `retrieval_hit`. Так что первый прогон можно
 снять сразу, а эталоны и пути дописать после разбора корпуса.
 
-Категории и признак «правильный ответ — отказ» берутся из
+Категории и вердикт («ответ», «отказ», «метавопрос») берутся из
 `tools/eval/golden.categories.json` и сопоставляются по НОРМАЛИЗОВАННОМУ тексту
 вопроса, а не по номеру строки: переставили строки в Excel — ничего не сломалось,
 переформулировали вопрос — конвертер об этом честно скажет и не подставит чужую
@@ -39,7 +39,7 @@ _NS = {
 # ответ — отказ. Расхождение текста ломало бы context_recall на ловушках.
 REFUSAL_GROUND_TRUTH = "В доступных мне документах ответа на этот вопрос не нашлось."
 
-# kind — легаси-поле харнесса (factual/practical/unanswerable). Держим его
+# kind — легаси-поле харнесса (factual/practical/unanswerable/meta). Держим его
 # согласованным с категорией, чтобы старые отчёты и README не разъезжались.
 _KIND_BY_CATEGORY = {
     "refusal_trap": "unanswerable",
@@ -48,6 +48,29 @@ _KIND_BY_CATEGORY = {
     "table": "practical",
     "precision": "practical",
 }
+
+# Трёхзначный вердикт `expected_outcome` (tools/eval/run.py). Живёт здесь же, где
+# category и expected_refusal, — в golden.categories.json, потому что это
+# КЛАССИФИКАЦИЯ вопроса, а не добытая разбором корпуса разметка.
+OUTCOME_ANSWER = "answer"
+OUTCOME_REFUSAL = "refusal"
+OUTCOME_META = "meta"
+_OUTCOMES = (OUTCOME_ANSWER, OUTCOME_REFUSAL, OUTCOME_META)
+# Вид строки следует ВЕРДИКТУ, а не теме (x23-meta — метапара категории meta).
+_KIND_BY_OUTCOME = {OUTCOME_REFUSAL: "unanswerable", OUTCOME_META: "meta"}
+
+
+def outcome_of(meta: dict[str, Any]) -> str:
+    """Вердикт из классификации; при отсутствии выводится из expected_refusal.
+
+    Явное поле важнее вывода: метапара («ответ есть, но документа-цели нет»)
+    неотличима от ловушки по одному лишь expected_refusal — обе без source_path,
+    а требуют ПРОТИВОПОЛОЖНОГО поведения.
+    """
+    raw = str(meta.get("expected_outcome", "") or "").strip()
+    if raw in _OUTCOMES:
+        return raw
+    return OUTCOME_REFUSAL if meta.get("expected_refusal") else OUTCOME_ANSWER
 
 
 def normalize_question(text: str) -> str:
@@ -165,7 +188,8 @@ def build_rows(
         seen.add(key)
 
         category = meta.get("category") or "unclassified"
-        expected_refusal = bool(meta.get("expected_refusal"))
+        outcome = outcome_of(meta)
+        expected_refusal = outcome == OUTCOME_REFUSAL
         prev = existing.get(key, {})
         if prev:
             kept += 1
@@ -176,6 +200,13 @@ def build_rows(
             ground_truth = REFUSAL_GROUND_TRUTH
             source_path = section_path = chunk_index = None
             alt_source_paths: list[str] = []
+        elif outcome == OUTCOME_META:
+            # Метапара: документа-цели не существует, но эталон ответа — есть, и
+            # он размечен вручную (в xlsx колонка ответа пуста). Пути обнуляются
+            # как у ловушки, эталон переносится как у отвечаемой строки.
+            ground_truth = answer or prev.get("ground_truth") or ""
+            source_path = section_path = chunk_index = None
+            alt_source_paths = []
         else:
             ground_truth = answer or prev.get("ground_truth") or ""
             source_path = prev.get("source_path")
@@ -201,17 +232,18 @@ def build_rows(
                 # Ловушку комментарий переживает: он объясняет ВЕРДИКТ, а не ответ.
                 "ground_truth_note": str(prev.get("ground_truth_note") or ""),
                 # Вид строки следует ВЕРДИКТУ, а не теме: ловушка «неотвечаема»,
-                # какой бы категории ни был вопрос (x23-meta — ловушка категории
-                # meta). Иначе регенерация возвращала бы ей kind: factual.
-                "kind": "unanswerable"
-                if expected_refusal
-                else _KIND_BY_CATEGORY.get(category, "factual"),
+                # метапара — «meta», какой бы категории ни был вопрос. Иначе
+                # регенерация возвращала бы x23 kind: factual.
+                "kind": _KIND_BY_OUTCOME.get(
+                    outcome, _KIND_BY_CATEGORY.get(category, "factual")
+                ),
                 "category": category,
                 "source_path": source_path,
                 "alt_source_paths": alt_source_paths,
                 "section_path": section_path,
                 "source_chunk_index": chunk_index,
                 "expected_refusal": expected_refusal,
+                "expected_outcome": outcome,
                 "accepted": prev.get("accepted"),
             }
         )
@@ -261,7 +293,10 @@ def main() -> int:
     print("\nПо категориям:", file=sys.stderr)
     for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
         print(f"  {name:<14} {count}", file=sys.stderr)
-    answerable = [r for r in rows if not r["expected_refusal"]]
+    metas = sum(1 for r in rows if r["expected_outcome"] == OUTCOME_META)
+    if metas:
+        print(f"Метапар (expected_outcome: meta): {metas}", file=sys.stderr)
+    answerable = [r for r in rows if r["expected_outcome"] == OUTCOME_ANSWER]
     with_path = sum(1 for r in answerable if r["source_path"])
     print(f"\nОжидается отказ: {refusals} | отвечаемых: {len(answerable)}", file=sys.stderr)
     print(f"С эталонным ответом: {with_gt} из {len(rows)}", file=sys.stderr)

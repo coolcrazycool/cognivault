@@ -119,3 +119,49 @@ def test_kind_follows_the_verdict_not_the_topic():
     trap = next(r for r in rows if r["expected_refusal"])
     assert trap["category"] == "meta"
     assert trap["kind"] == "unanswerable"
+
+
+def test_expected_outcome_is_carried_through_and_derived_when_absent():
+    """Трёхзначный вердикт живёт в классификации и переживает регенерацию.
+
+    Без него метапара (`x23-meta`) на каждом прогоне конвертера возвращалась бы
+    в ловушки: по одному `expected_refusal` она от ловушки неотличима.
+    """
+    categories = dict(CATEGORIES)
+    categories["что такое x"] = {
+        "question": "Что такое X?",
+        "category": "meta",
+        "expected_refusal": False,
+        "expected_outcome": "meta",
+    }
+    existing = {
+        "что такое x": {
+            "question": "Что такое X?",
+            "ground_truth": "Ответ размечается Markdown.",
+            "source_path": "Confluence/S/X.md",
+            "alt_source_paths": ["Confluence/S/Y.md"],
+            "section_path": "X > Описание",
+            "source_chunk_index": 3,
+            "accepted": True,
+        }
+    }
+    rows, _warnings = build_rows(SHEET, categories, existing)
+    meta = next(r for r in rows if r["question"] == "Что такое X?")
+
+    assert meta["expected_outcome"] == "meta"
+    assert meta["expected_refusal"] is False
+    assert meta["kind"] == "meta"
+    # Цели у метапары нет — прежние пути относятся к другому вердикту…
+    assert meta["source_path"] is None
+    assert meta["alt_source_paths"] == []
+    assert meta["section_path"] is None
+    assert meta["source_chunk_index"] is None
+    # …а эталон ответа, в отличие от ловушки, обязан уцелеть.
+    assert meta["ground_truth"] == "Ответ размечается Markdown."
+
+    # Остальные строки поля не несут — вердикт выводится, как и раньше.
+    trap = next(r for r in rows if r["question"] == "Сколько стоит лицензия?")
+    assert (trap["expected_outcome"], trap["expected_refusal"]) == ("refusal", True)
+    assert trap["ground_truth"] == REFUSAL_GROUND_TRUTH
+    keys = list(trap.keys())
+    assert keys.index("expected_outcome") == keys.index("expected_refusal") + 1
