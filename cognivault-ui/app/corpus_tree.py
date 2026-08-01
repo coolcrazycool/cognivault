@@ -93,7 +93,18 @@ _DESC_MAX_CHARS = 140
 # * With annotations present, an annotated page is by construction a page that
 #   produced chunks, so it is excluded before size is even consulted. The bound
 #   can then be loose enough to cover every container page (frontmatter grows
-#   with the title and the ancestor chain) without ever touching a real page.
+#   with the title and the ancestor chain) without touching a real page — as
+#   long as that page's annotation actually exists. Annotation is best-effort
+#   (one index-time chat call per document), and a page whose call failed looks
+#   exactly like a container page to this test: on the reference corpus TEN of
+#   the 110 pages with a body are under 1000 bytes, and four of them
+#   («Описание витрин», «Потоки наполнения витрин», «Data Lineage REST APIs»,
+#   «OASIS UI») are the very pages that answer the acceptance set's section
+#   questions. A lost annotation there marks a real page «пусто» while a
+#   fragment of it sits in «Источники» below. There is no second signal in the
+#   catalogue that separates the two cases (`documents_with_summary < total` is
+#   the normal, healthy state — 17 pages legitimately have no annotation), so
+#   this is a known, bounded misreport rather than something the bound can fix.
 # * With no annotations anywhere — `INDEX_DOC_SUMMARY` off, or a non-gigachat
 #   provider — "no annotation" is true of everything and stops discriminating.
 #   Size is then the only evidence and gets the strict bound, which under-reports
