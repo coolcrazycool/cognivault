@@ -1,3 +1,4 @@
+import { getEncoding } from 'js-tiktoken';
 import { describe, expect, it } from 'vitest';
 import type { ChunkOptions } from '../chunker.js';
 import {
@@ -6,11 +7,35 @@ import {
   MAX_CHUNK_TOKENS,
   MIN_CHUNK_TOKENS,
   normalizeObsidianSyntax,
+  TABLE_MAX_TOKENS,
 } from '../chunker.js';
+
+const enc = getEncoding('cl100k_base');
+
+function countTokens(text: string): number {
+  return enc.encode(text).length;
+}
 
 // Helper to generate a long paragraph to exceed MAX_CHUNK_TOKENS
 function generateLongParagraph(words: number): string {
   return Array.from({ length: words }, (_, i) => `word${i}`).join(' ');
+}
+
+const TABLE_HEADER = '| Регион | Тариф | Комментарий |';
+const TABLE_DELIMITER = '| --- | --- | --- |';
+
+/** A GFM table whose rendered form is byte-identical to its source rows. */
+function makeTable(rowCount: number): { rows: string[]; markdown: string } {
+  const rows = Array.from(
+    { length: rowCount },
+    (_, i) => `| Регион ${i} | ${100 + i} руб | комментарий про регион номер ${i} |`,
+  );
+  return { rows, markdown: [TABLE_HEADER, TABLE_DELIMITER, ...rows].join('\n') };
+}
+
+/** Lines of a table chunk after its context prefix, blank line, header and delimiter. */
+function dataRowsOf(chunkText: string): string[] {
+  return chunkText.split('\n').slice(4);
 }
 
 describe('normalizeObsidianSyntax', () => {
@@ -352,6 +377,170 @@ describe('chunkMarkdown - parentId (small-to-big parents)', () => {
   it('produces a sha1-shaped parentId', () => {
     const chunks = chunkMarkdown('Intro paragraph without headings.', { title: 'Simple' });
     expect(chunks[0]?.parentId).toMatch(/^[0-9a-f]{40}$/);
+  });
+});
+
+describe('chunkMarkdown - table-aware chunking', () => {
+  it('renders a small inline table as markdown rows instead of glued cell text', () => {
+    const body = '## Раздел\n\n| Col A | Col B |\n| --- | --- |\n| cell1 | cell2 |';
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.text).toContain('| Col A | Col B |');
+    expect(chunks[0]?.text).toContain('| cell1 | cell2 |');
+    // Small enough to live next to prose — not a dedicated table chunk.
+    expect(chunks[0]?.contentKind).toBe('text');
+  });
+
+  it('keeps a table that fits the table budget in a single chunk', () => {
+    const { markdown } = makeTable(30);
+    const body = `## Тарифы\n\nТаблица тарифов.\n\n${markdown}`;
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks).toHaveLength(1);
+    const only = chunks[0];
+    expect(only?.contentKind).toBe('table_rows');
+    // Genuinely on the table path: over the prose budget, under the table budget.
+    expect(countTokens(only?.text ?? '')).toBeGreaterThan(MAX_CHUNK_TOKENS);
+    expect(countTokens(only?.text ?? '')).toBeLessThanOrEqual(TABLE_MAX_TOKENS);
+    expect(dataRowsOf(only?.text ?? '')).toHaveLength(30);
+  });
+
+  it('cuts an oversized table into row groups that each repeat prefix, header and delimiter', () => {
+    const { markdown } = makeTable(100);
+    const body = `## Тарифы\n\nТаблица тарифов по регионам.\n\n${markdown}`;
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.contentKind).toBe('table_rows');
+      const lines = chunk.text.split('\n');
+      expect(lines[0]).toBe('Док > Тарифы > Таблица: Таблица тарифов по регионам.');
+      expect(lines[1]).toBe('');
+      expect(lines[2]).toBe(TABLE_HEADER);
+      expect(lines[3]).toBe(TABLE_DELIMITER);
+      expect(countTokens(chunk.text)).toBeLessThanOrEqual(TABLE_MAX_TOKENS);
+
+      const dataRows = dataRowsOf(chunk.text);
+      expect(dataRows.length).toBeGreaterThanOrEqual(15);
+      expect(dataRows.length).toBeLessThanOrEqual(40);
+    }
+  });
+
+  it('never splits a row: every source row appears once, whole and in order', () => {
+    const { rows, markdown } = makeTable(100);
+    const body = `## Тарифы\n\nТаблица тарифов по регионам.\n\n${markdown}`;
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks.flatMap((chunk) => dataRowsOf(chunk.text))).toEqual(rows);
+  });
+
+  it('omits the caption entirely rather than leaving a dangling separator', () => {
+    const { markdown } = makeTable(100);
+    const body = `## Тарифы\n\n${markdown}`;
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.text.startsWith('Док > Тарифы > Таблица\n\n')).toBe(true);
+      expect(chunk.text).not.toContain('Таблица:');
+      expect(chunk.text).not.toContain('> \n');
+    }
+  });
+
+  it('does not repeat a caption paragraph as its own stub chunk', () => {
+    const { markdown } = makeTable(100);
+    const body = `## Тарифы\n\nТаблица тарифов по регионам.\n\n${markdown}`;
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks.every((chunk) => chunk.contentKind === 'table_rows')).toBe(true);
+  });
+
+  it('gives every row group of one table the same parentId and one whole-table parent', () => {
+    const { markdown } = makeTable(100);
+    const body = `## Тарифы\n\nТаблица тарифов по регионам.\n\n${markdown}`;
+    const { chunks, sections } = chunkMarkdownWithSections(body, { title: 'Док' });
+
+    expect(new Set(chunks.map((chunk) => chunk.parentId)).size).toBe(1);
+    expect(sections).toHaveLength(1);
+    expect(sections[0]?.text).toContain('| Регион 0 |');
+    expect(sections[0]?.text).toContain('| Регион 99 |');
+    expect(sections[0]?.parentId).toBe(chunks[0]?.parentId);
+  });
+
+  it('normalizes wikilinks and escapes pipes inside cells', () => {
+    const { markdown } = makeTable(100);
+    // A pipe inside a cell must be escaped in the source, or GFM reads it as a column
+    // break — that is true of a wikilink alias too.
+    const body = `## Тарифы\n\n${markdown}\n| [[Реальная страница\\|Алиас]] | a \\| b | хвост |`;
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    const cellChunk = chunks.find((chunk) => chunk.text.includes('Алиас'));
+    expect(cellChunk).toBeDefined();
+    expect(cellChunk?.text).not.toContain('[[');
+    // An unescaped pipe inside a cell would fake an extra column.
+    expect(cellChunk?.text).toContain('a \\| b');
+  });
+
+  it('marks prose chunks as text', () => {
+    const body = `## Раздел\n\n${generateLongParagraph(110)}`;
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    expect(chunks.every((chunk) => chunk.contentKind === 'text')).toBe(true);
+  });
+});
+
+describe('chunkMarkdown - undersized tail handling', () => {
+  it('merges a short trailing section into the last chunk of its predecessor', () => {
+    const body = [
+      '## Big',
+      '',
+      generateLongParagraph(300),
+      '',
+      generateLongParagraph(300),
+      '',
+      '## Tail',
+      '',
+      'tiny tail sentence.',
+    ].join('\n');
+    const chunks = chunkMarkdown(body, { title: 'T' });
+
+    expect(chunks).toHaveLength(2);
+    const last = chunks[1];
+    // The tail rides along with the previous chunk instead of forming a stub.
+    expect(last?.text).toContain('word299');
+    expect(last?.text).toContain('tiny tail sentence.');
+  });
+
+  it('never ends a split section with a sub-MIN_CHUNK_TOKENS scrap', () => {
+    const body = [
+      '## Big',
+      '',
+      generateLongParagraph(300),
+      '',
+      generateLongParagraph(300),
+      '',
+      'short closing remark.',
+    ].join('\n');
+    const chunks = chunkMarkdown(body, { title: 'T' });
+
+    expect(chunks).toHaveLength(2);
+    const last = chunks[chunks.length - 1];
+    expect(last?.text).toContain('short closing remark.');
+    expect(countTokens(last?.text ?? '')).toBeGreaterThanOrEqual(MIN_CHUNK_TOKENS);
+  });
+
+  it('does not fold a short trailing paragraph into a table chunk', () => {
+    const { markdown } = makeTable(100);
+    const body = `## Тарифы\n\n${markdown}\n\nИтого по таблице.`;
+    const chunks = chunkMarkdown(body, { title: 'Док' });
+
+    const last = chunks[chunks.length - 1];
+    expect(last?.contentKind).toBe('text');
+    expect(last?.text).toContain('Итого по таблице.');
+    for (const chunk of chunks.filter((c) => c.contentKind === 'table_rows')) {
+      expect(chunk.text).not.toContain('Итого');
+    }
   });
 });
 

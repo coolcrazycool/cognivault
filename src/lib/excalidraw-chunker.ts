@@ -4,6 +4,7 @@
 
 import { getEncoding } from 'js-tiktoken';
 import { ChunkParseError } from './chunk-errors.js';
+import { type ContentKind, MAX_CHUNK_TOKENS, splitTextByTokenBudget } from './chunker.js';
 
 // Initialize encoder once at module level (matches chunker.ts)
 const enc = getEncoding('cl100k_base');
@@ -31,6 +32,8 @@ export interface ExcalidrawChunk {
   text: string;
   sectionPath: string;
   chunkIndex: number;
+  /** Drawing text is always free text; kept so the payload shape matches markdown. */
+  contentKind: ContentKind;
 }
 
 // ── Token counting ──
@@ -136,10 +139,16 @@ export function chunkExcalidraw(content: string, drawingName: string): Excalidra
     groups.push(accumulator.join('\n'));
   }
 
-  // Build chunks from groups
-  return groups.map((text, idx) => ({
-    text,
-    sectionPath: `${drawingName} > Text ${idx + 1}`,
-    chunkIndex: idx,
-  }));
+  // Build chunks from groups. A single element (or a long run of merged short ones)
+  // can outgrow the chunk budget, so each group is cut on paragraph boundaries; all
+  // parts of a group keep its path and are told apart by chunkIndex.
+  const chunks: ExcalidrawChunk[] = [];
+  groups.forEach((group, idx) => {
+    const sectionPath = `${drawingName} > Text ${idx + 1}`;
+    for (const text of splitTextByTokenBudget(group, MAX_CHUNK_TOKENS)) {
+      chunks.push({ text, sectionPath, chunkIndex: chunks.length, contentKind: 'text' });
+    }
+  });
+
+  return chunks;
 }

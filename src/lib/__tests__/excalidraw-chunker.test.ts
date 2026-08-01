@@ -1,6 +1,19 @@
+import { getEncoding } from 'js-tiktoken';
 import { describe, expect, it } from 'vitest';
 import { ChunkParseError, isChunkParseError } from '../chunk-errors.js';
+import { MAX_CHUNK_TOKENS } from '../chunker.js';
 import { chunkExcalidraw } from '../excalidraw-chunker.js';
+
+const enc = getEncoding('cl100k_base');
+
+function countTokens(text: string): number {
+  return enc.encode(text).length;
+}
+
+/** ~130 cl100k tokens — well under the chunk budget on its own. */
+function paragraph(marker: string): string {
+  return `${marker} ${Array.from({ length: 60 }, (_, i) => `w${i}`).join(' ')}`;
+}
 
 // Helper: build a minimal Excalidraw JSON string
 function makeExcalidraw(elements: object[]): string {
@@ -162,6 +175,54 @@ describe('chunkExcalidraw - short element merging', () => {
 
     const chunks = chunkExcalidraw(file, 'MyDrawing');
     expect(chunks).toEqual([]);
+  });
+});
+
+describe('chunkExcalidraw - chunk size budget', () => {
+  const paragraphs = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta'].map(paragraph);
+  const longText = paragraphs.join('\n\n');
+
+  function drawingWithLongElement(): string {
+    return makeExcalidraw([textElement('1', longText), textElement('2', LONG_TEXT_2)]);
+  }
+
+  it('splits an element that exceeds MAX_CHUNK_TOKENS', () => {
+    const chunks = chunkExcalidraw(drawingWithLongElement(), 'MyDrawing');
+    expect(countTokens(longText)).toBeGreaterThan(MAX_CHUNK_TOKENS);
+    expect(chunks.length).toBeGreaterThan(2);
+  });
+
+  it('keeps every chunk within MAX_CHUNK_TOKENS', () => {
+    for (const chunk of chunkExcalidraw(drawingWithLongElement(), 'MyDrawing')) {
+      expect(countTokens(chunk.text)).toBeLessThanOrEqual(MAX_CHUNK_TOKENS);
+    }
+  });
+
+  it('cuts on paragraph boundaries, never inside a paragraph', () => {
+    const chunks = chunkExcalidraw(drawingWithLongElement(), 'MyDrawing');
+    const parts = chunks.filter((chunk) => chunk.sectionPath === 'MyDrawing > Text 1');
+
+    expect(parts.map((part) => part.text).join('\n\n')).toBe(longText);
+    for (const part of parts) {
+      for (const line of part.text.split('\n\n')) {
+        expect(paragraphs).toContain(line);
+      }
+    }
+  });
+
+  it('keeps the element path on every part and renumbers chunkIndex sequentially', () => {
+    const chunks = chunkExcalidraw(drawingWithLongElement(), 'MyDrawing');
+
+    expect(chunks.filter((c) => c.sectionPath === 'MyDrawing > Text 1').length).toBeGreaterThan(1);
+    expect(chunks[chunks.length - 1]?.sectionPath).toBe('MyDrawing > Text 2');
+    chunks.forEach((chunk, idx) => {
+      expect(chunk.chunkIndex).toBe(idx);
+    });
+  });
+
+  it('marks drawing chunks as text content', () => {
+    const chunks = chunkExcalidraw(drawingWithLongElement(), 'MyDrawing');
+    expect(chunks.every((chunk) => chunk.contentKind === 'text')).toBe(true);
   });
 });
 

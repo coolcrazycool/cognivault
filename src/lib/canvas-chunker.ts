@@ -2,6 +2,7 @@
 // Parses Obsidian .canvas files (JSON Canvas 1.0 spec) and extracts text nodes as chunks.
 
 import { ChunkParseError } from './chunk-errors.js';
+import { type ContentKind, MAX_CHUNK_TOKENS, splitTextByTokenBudget } from './chunker.js';
 
 // ── Type guards ──
 
@@ -25,6 +26,8 @@ export interface CanvasChunk {
   text: string;
   sectionPath: string;
   chunkIndex: number;
+  /** Canvas nodes are always free text; kept so the payload shape matches markdown. */
+  contentKind: ContentKind;
 }
 
 // ── Main export ──
@@ -88,11 +91,12 @@ export function chunkCanvas(content: string, canvasName: string): CanvasChunk[] 
     if (trimmed.length === 0) continue;
 
     nodeNumber++;
-    chunks.push({
-      text: trimmed,
-      sectionPath: `${canvasName} > Node ${nodeNumber}`,
-      chunkIndex: nodeNumber - 1,
-    });
+    // A canvas node holds arbitrarily much markdown; anything over the budget is cut
+    // on paragraph boundaries. All parts keep the node's path — chunkIndex separates them.
+    const sectionPath = `${canvasName} > Node ${nodeNumber}`;
+    for (const text of splitTextByTokenBudget(trimmed, MAX_CHUNK_TOKENS)) {
+      chunks.push({ text, sectionPath, chunkIndex: chunks.length, contentKind: 'text' });
+    }
   }
 
   return chunks;
