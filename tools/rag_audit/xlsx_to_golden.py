@@ -35,6 +35,10 @@ _NS = {
     "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
 }
 
+# Дословно как в tools/eval/gen_golden.py: эталон для вопросов, где правильный
+# ответ — отказ. Расхождение текста ломало бы context_recall на ловушках.
+REFUSAL_GROUND_TRUTH = "В доступных мне документах ответа на этот вопрос не нашлось."
+
 # kind — легаси-поле харнесса (factual/practical/unanswerable). Держим его
 # согласованным с категорией, чтобы старые отчёты и README не разъезжались.
 _KIND_BY_CATEGORY = {
@@ -113,10 +117,36 @@ def load_categories(path: str) -> tuple[dict[str, dict[str, Any]], list[dict[str
     return {normalize_question(e["question"]): e for e in entries}, entries
 
 
-def build_rows(sheet: list[list[str]], by_question: dict[str, dict[str, Any]]) -> tuple[list[dict], list[str]]:
+def load_existing(path: str) -> dict[str, dict[str, Any]]:
+    """Ранее размеченные строки по нормализованному вопросу.
+
+    Эталонные ответы и пути к источникам добываются разбором корпуса и стоят
+    дорого, а в xlsx их нет. Поэтому регенерация обязана их сохранять: иначе
+    один повторный запуск молча стирает всю разметку.
+    """
+    if not os.path.exists(path):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            out[normalize_question(row.get("question", ""))] = row
+    return out
+
+
+def build_rows(
+    sheet: list[list[str]],
+    by_question: dict[str, dict[str, Any]],
+    existing: dict[str, dict[str, Any]] | None = None,
+) -> tuple[list[dict], list[str]]:
     rows: list[dict[str, Any]] = []
     warnings: list[str] = []
     seen: set[str] = set()
+    existing = existing or {}
+    kept = 0
 
     for raw in sheet:
         if len(raw) < 2:
@@ -136,24 +166,41 @@ def build_rows(sheet: list[list[str]], by_question: dict[str, dict[str, Any]]) -
 
         category = meta.get("category") or "unclassified"
         expected_refusal = bool(meta.get("expected_refusal"))
+        prev = existing.get(key, {})
+        if prev:
+            kept += 1
+        # Ловушка не имеет источника по определению: если вопрос переехал в
+        # refusal_trap, прежние путь и эталон относятся к другому вердикту и
+        # должны уйти, иначе retrieval_hit начнёт мерить несуществующую цель.
+        if expected_refusal:
+            ground_truth = REFUSAL_GROUND_TRUTH
+            source_path = section_path = chunk_index = None
+        else:
+            ground_truth = answer or prev.get("ground_truth") or ""
+            source_path = prev.get("source_path")
+            section_path = prev.get("section_path")
+            chunk_index = prev.get("source_chunk_index")
+
         rows.append(
             {
                 "id": f"x{int(num_cell):02d}-{category}",
                 "question": question,
-                "ground_truth": answer,
+                "ground_truth": ground_truth,
                 "kind": _KIND_BY_CATEGORY.get(category, "factual"),
                 "category": category,
-                "source_path": None,
-                "section_path": None,
-                "source_chunk_index": None,
+                "source_path": source_path,
+                "section_path": section_path,
+                "source_chunk_index": chunk_index,
                 "expected_refusal": expected_refusal,
-                "accepted": None,
+                "accepted": prev.get("accepted"),
             }
         )
 
     for key, meta in by_question.items():
         if key not in seen:
             warnings.append(f"классификация есть, а вопроса в xlsx нет: «{meta['question'][:70]}»")
+    if existing:
+        warnings.append(f"перенесена разметка из существующего набора: {kept} из {len(rows)} строк")
     return rows, warnings
 
 
@@ -166,15 +213,16 @@ def main() -> int:
     ap.add_argument("xlsx", help="файл с вопросами заказчика")
     ap.add_argument("--categories", default=os.path.normpath(default_cats))
     ap.add_argument("--out", default=os.path.normpath(default_out))
-    ap.add_argument("--force", action="store_true", help="перезаписать существующий golden.jsonl")
+    ap.add_argument("--reset", action="store_true",
+                    help="НЕ переносить разметку из существующего набора (эталоны и пути будут потеряны)")
     args = ap.parse_args()
 
-    if os.path.exists(args.out) and not args.force:
-        print(f"{args.out} уже существует — перезапись только с --force", file=sys.stderr)
-        return 2
+    # По умолчанию перезапись безопасна: разметка переносится из текущего
+    # набора по тексту вопроса. Стереть её можно только явным --reset.
+    existing = {} if args.reset else load_existing(args.out)
 
     by_question, _ = load_categories(args.categories)
-    rows, warnings = build_rows(read_sheet(args.xlsx), by_question)
+    rows, warnings = build_rows(read_sheet(args.xlsx), by_question, existing)
     if not rows:
         print("не нашлось ни одного вопроса — проверьте, что колонки идут как «№ | Вопрос | Ответ»", file=sys.stderr)
         return 1
@@ -193,12 +241,17 @@ def main() -> int:
     print("\nПо категориям:", file=sys.stderr)
     for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
         print(f"  {name:<14} {count}", file=sys.stderr)
-    print(f"\nОжидается отказ: {refusals}", file=sys.stderr)
+    answerable = [r for r in rows if not r["expected_refusal"]]
+    with_path = sum(1 for r in answerable if r["source_path"])
+    print(f"\nОжидается отказ: {refusals} | отвечаемых: {len(answerable)}", file=sys.stderr)
     print(f"С эталонным ответом: {with_gt} из {len(rows)}", file=sys.stderr)
     if with_gt < len(rows):
         print("  → context_recall посчитается только по строкам с эталоном", file=sys.stderr)
-    print("source_path не заполнен ни у одной строки → retrieval_hit не измеряется.", file=sys.stderr)
-    print("Заполнить после разбора выгрузки корпуса.", file=sys.stderr)
+    # Путь нужен только отвечаемым: у ловушки источника нет по определению,
+    # и retrieval_hit её осознанно не измеряет.
+    print(f"С путём к источнику: {with_path} из {len(answerable)} отвечаемых", file=sys.stderr)
+    if with_path < len(answerable):
+        print("  → retrieval_hit посчитается только по строкам с путём", file=sys.stderr)
     for line in warnings:
         print(f"ВНИМАНИЕ: {line}", file=sys.stderr)
     return 0
