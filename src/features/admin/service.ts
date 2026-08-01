@@ -6,6 +6,8 @@ import type * as schema from '../../db/schema.js';
 import { indexedFiles } from '../../db/schema.js';
 import type { TenantQdrantClient } from '../../lib/tenant-qdrant-client.js';
 import type { FileFailedEvent } from '../../plugins/pipeline-events.js';
+import type { AdminInterlock } from './interlock.js';
+import { createAdminInterlock } from './interlock.js';
 
 // ── Types ──
 
@@ -40,9 +42,16 @@ function recordJobError(job: ReindexJob, message: string): void {
 export class ReindexService {
   private readonly fastify: FastifyInstance;
   private readonly jobs = new Map<string, ReindexJob>();
+  private readonly interlock: AdminInterlock;
 
-  constructor(fastify: FastifyInstance) {
+  /**
+   * The interlock is shared with {@link import('./rebuild-service.js').CollectionRebuildService}
+   * — a full reindex and a collection rebuild write the same vectors and must never
+   * overlap. It defaults to a private one so the service stays constructible on its own.
+   */
+  constructor(fastify: FastifyInstance, interlock: AdminInterlock = createAdminInterlock()) {
     this.fastify = fastify;
+    this.interlock = interlock;
   }
 
   async createJob(
@@ -62,6 +71,19 @@ export class ReindexService {
   }
 
   private async createFullJob(userQdrant: TenantQdrantClient, userId: string): Promise<ReindexJob> {
+    // A rebuild is about to drop (or has already dropped) the collection this job would
+    // write into, and it re-indexes this user itself. Whoever got there first wins.
+    if (this.interlock.rebuildRunning) {
+      throw Object.assign(
+        new Error(
+          'A collection rebuild is in progress — it re-indexes every user, including ' +
+            'this one. Wait for it to finish (GET /api/admin/collection/rebuild/status) ' +
+            'before starting a per-user reindex.',
+        ),
+        { code: 'REINDEX_IN_PROGRESS', statusCode: 409 },
+      );
+    }
+
     const indexerEntry = this.fastify.indexers.get(userId);
     if (indexerEntry?.indexer.isIndexing) {
       throw Object.assign(new Error('Reindex already in progress'), {
@@ -82,6 +104,11 @@ export class ReindexService {
     };
 
     this.jobs.set(job.id, job);
+
+    // Visible to a rebuild from here until detachListeners() runs, so it cannot drop the
+    // collection out from under this job.
+    const interlock = this.interlock;
+    interlock.fullReindexUsers.add(userId);
 
     // Listen for 'changes' events to count files as they are dispatched for processing
     const onChanges = (events: import('../../lib/indexer.js').FileChangeEvent[]): void => {
@@ -125,6 +152,7 @@ export class ReindexService {
       pipelineEvents.removeListener('file-failed', onFileFailed);
       indexerEntry?.indexer.removeListener('changes', onChanges);
       indexerEntry?.indexer.removeListener('scanComplete', onScanComplete);
+      interlock.fullReindexUsers.delete(userId);
     }
 
     indexerEntry?.indexer.on('changes', onChanges);

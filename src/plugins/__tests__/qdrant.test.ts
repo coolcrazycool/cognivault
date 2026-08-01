@@ -20,6 +20,7 @@ const mockQuery = vi.fn();
 const mockVersionInfo = vi.fn();
 const mockRetrieve = vi.fn();
 const mockUpsert = vi.fn();
+const mockDeleteCollection = vi.fn();
 /** Records the options object the plugin passes to `new QdrantClient(...)`. */
 const mockClientConstructor = vi.fn();
 
@@ -37,6 +38,7 @@ vi.mock('@qdrant/js-client-rest', () => {
     versionInfo = mockVersionInfo;
     retrieve = mockRetrieve;
     upsert = mockUpsert;
+    deleteCollection = mockDeleteCollection;
 
     constructor(params?: unknown) {
       mockClientConstructor(params);
@@ -130,6 +132,7 @@ describe('qdrantPlugin', () => {
     mockRetrieve.mockResolvedValue([]);
     mockUpsert.mockResolvedValue({});
     mockCreateCollection.mockResolvedValue({});
+    mockDeleteCollection.mockResolvedValue(true);
     mockUpdateCollectionAliases.mockResolvedValue(true);
     mockVersionInfo.mockResolvedValue({
       title: 'qdrant - vector search engine',
@@ -730,6 +733,195 @@ describe('qdrantPlugin', () => {
       // in src/lib/__tests__/tenant-qdrant-client.test.ts.
       expect(payload).not.toHaveProperty('user_id');
       expect(Object.keys(payload)).toEqual(['bm25_scheme_version']);
+
+      await app.close();
+    });
+  });
+
+  /**
+   * The maintenance surface `POST /api/admin/collection/rebuild` drives. What matters
+   * here is that a rebuilt collection is indistinguishable from one this build created
+   * at startup — same schema, same indexes, same scheme marker.
+   */
+  describe('qdrantAdmin', () => {
+    const MARKER = '00000000-0000-0000-0000-000000000000';
+
+    async function boot(): Promise<FastifyInstance> {
+      mockCreatePayloadIndex.mockResolvedValue({});
+      const Fastify = (await import('fastify')).default;
+      const { default: qdrantPlugin } = await import('../qdrant.js');
+      const app = Fastify({ logger: false });
+      await app.register(qdrantPlugin);
+      await app.ready();
+      return app;
+    }
+
+    it('names the physical collection and the alias, never the other way round', async () => {
+      provisioned();
+      const app = await boot();
+
+      // The rebuild confirmation string is this name — it must be the collection the
+      // vectors live in, not the alias in front of it.
+      expect(app.qdrantAdmin.collection).toBe(PHYSICAL);
+      expect(app.qdrantAdmin.alias).toBe(ALIAS);
+
+      await app.close();
+    });
+
+    it('describes the collection: recorded vs expected scheme version and points', async () => {
+      const { BM25_SCHEME_VERSION } = await import('../../lib/bm25.js');
+      provisioned();
+      mockGetCollection.mockResolvedValue({
+        points_count: 1234,
+        config: {
+          params: {
+            vectors: { dense: { size: 1536, distance: 'Cosine', on_disk: true } },
+            sparse_vectors: { bm25: { modifier: 'idf' } },
+          },
+        },
+      });
+      mockRetrieve.mockResolvedValue([{ id: MARKER, payload: { bm25_scheme_version: 2 } }]);
+
+      const app = await boot();
+
+      expect(await app.qdrantAdmin.describe()).toEqual({
+        collection: PHYSICAL,
+        alias: ALIAS,
+        schemeVersion: 2,
+        expectedSchemeVersion: BM25_SCHEME_VERSION,
+        pointsCount: 1234,
+      });
+
+      await app.close();
+    });
+
+    it('reports null counts instead of throwing while the collection is dropped', async () => {
+      provisioned();
+      const app = await boot();
+
+      mockGetCollection.mockRejectedValue(Object.assign(new Error('Not found'), { status: 404 }));
+      mockRetrieve.mockRejectedValue(new Error('Not found'));
+
+      // The operator polls this endpoint DURING a rebuild; a 500 there tells them nothing.
+      expect(await app.qdrantAdmin.describe()).toMatchObject({
+        collection: PHYSICAL,
+        schemeVersion: null,
+        pointsCount: null,
+      });
+
+      await app.close();
+    });
+
+    it('drops the physical collection, never the alias', async () => {
+      provisioned();
+      const app = await boot();
+
+      await app.qdrantAdmin.dropCollection();
+
+      expect(mockDeleteCollection).toHaveBeenCalledWith(PHYSICAL);
+
+      await app.close();
+    });
+
+    it('treats an already-absent collection as a completed drop', async () => {
+      provisioned();
+      const app = await boot();
+      mockDeleteCollection.mockRejectedValue(
+        Object.assign(new Error("Collection doesn't exist"), { status: 404 }),
+      );
+
+      // A rebuild retried after it died between dropping and creating starts here.
+      await expect(app.qdrantAdmin.dropCollection()).resolves.toBeUndefined();
+
+      await app.close();
+    });
+
+    it('propagates a real drop failure so the job can report the collection is intact', async () => {
+      provisioned();
+      const app = await boot();
+      mockDeleteCollection.mockRejectedValue(new Error('Connection refused'));
+
+      await expect(app.qdrantAdmin.dropCollection()).rejects.toThrow('Connection refused');
+
+      await app.close();
+    });
+
+    it('re-creates the collection with the hybrid schema, every payload index and the current scheme marker', async () => {
+      const { BM25_SCHEME_VERSION } = await import('../../lib/bm25.js');
+      provisioned();
+      const app = await boot();
+
+      // The alias vanished with the collection Qdrant just deleted.
+      mockGetAliases.mockResolvedValue({ aliases: [] });
+      vi.clearAllMocks();
+      mockCreateCollection.mockResolvedValue({});
+      mockCreatePayloadIndex.mockResolvedValue({});
+      mockUpsert.mockResolvedValue({});
+      mockUpdateCollectionAliases.mockResolvedValue(true);
+      mockGetAliases.mockResolvedValue({ aliases: [] });
+
+      await app.qdrantAdmin.createCollection();
+
+      // Same schema as a startup creation — this goes through the same function.
+      expect(mockCreateCollection.mock.calls[0]?.[0]).toBe(PHYSICAL);
+      expect(createdSchema()).toMatchObject({
+        vectors: { dense: { size: 1536, distance: 'Cosine', on_disk: true } },
+        sparse_vectors: { bm25: { modifier: 'idf' } },
+        on_disk_payload: true,
+      });
+
+      // Every payload index, including the tenant index every request filters on.
+      expect(indexedFieldNames()).toEqual(expect.arrayContaining(REQUIRED_INDEXED_FIELDS));
+      const userIdCall = mockCreatePayloadIndex.mock.calls.find(
+        (call) => call[1].field_name === 'user_id',
+      );
+      expect(userIdCall?.[1].field_schema).toMatchObject({ type: 'keyword', is_tenant: true });
+
+      // Stamped with THIS build's scheme — the whole point of rebuilding.
+      const markerCall = mockUpsert.mock.calls.find((c) => c[0] === PHYSICAL);
+      expect((markerCall?.[1] as { points: Record<string, unknown>[] }).points[0]).toEqual({
+        id: MARKER,
+        vector: {},
+        payload: { bm25_scheme_version: BM25_SCHEME_VERSION },
+      });
+
+      await app.close();
+    });
+
+    it('re-attaches the alias the drop took with it', async () => {
+      provisioned();
+      const app = await boot();
+
+      mockUpdateCollectionAliases.mockClear();
+      mockGetAliases.mockResolvedValue({ aliases: [] });
+
+      await app.qdrantAdmin.createCollection();
+
+      expect(mockUpdateCollectionAliases).toHaveBeenCalledWith({
+        actions: [{ create_alias: { collection_name: PHYSICAL, alias_name: ALIAS } }],
+      });
+
+      await app.close();
+    });
+
+    it('moves the alias atomically when it survived pointing somewhere else', async () => {
+      provisioned();
+      const app = await boot();
+
+      mockUpdateCollectionAliases.mockClear();
+      mockGetAliases.mockResolvedValue({
+        aliases: [{ alias_name: ALIAS, collection_name: 'cognivault_v1' }],
+      });
+
+      await app.qdrantAdmin.createCollection();
+
+      // One action list, so the alias is never absent between delete and create.
+      expect(mockUpdateCollectionAliases).toHaveBeenCalledWith({
+        actions: [
+          { delete_alias: { alias_name: ALIAS } },
+          { create_alias: { collection_name: PHYSICAL, alias_name: ALIAS } },
+        ],
+      });
 
       await app.close();
     });

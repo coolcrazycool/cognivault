@@ -13,7 +13,45 @@ declare module 'fastify' {
   interface FastifyInstance {
     createTenantQdrant: (userId: string) => TenantQdrantClient;
     purgeUserVectors: (userId: string) => Promise<void>;
+    qdrantAdmin: QdrantAdmin;
   }
+}
+
+/**
+ * What the operator is about to destroy, and whether the corpus in it is comparable to
+ * this build. `null` means "could not be read" — a dropped collection reports
+ * `pointsCount: null`, which is exactly the honest answer while a rebuild is running.
+ */
+export interface QdrantCollectionInfo {
+  /** Physical collection holding the vectors — the name a rebuild must confirm. */
+  collection: string;
+  /** Alias all runtime point traffic goes through. */
+  alias: string;
+  /** BM25 scheme version recorded on the collection, or null when unknown/unreadable. */
+  schemeVersion: number | null;
+  /** BM25 scheme version this build produces. */
+  expectedSchemeVersion: number;
+  /** Points currently in the collection, or null when it cannot be read. */
+  pointsCount: number | null;
+}
+
+/**
+ * Collection-level maintenance, exposed to the admin feature so a rebuild can go
+ * through the SAME creation path startup uses ({@link createCollectionWithSchema}).
+ * Every method reads `holder.current`, so a renewed IAM token is picked up.
+ */
+export interface QdrantAdmin {
+  /** Alias runtime traffic goes through ({@link COLLECTION_NAME}). */
+  readonly alias: string;
+  /** Physical collection the alias resolved to at startup. */
+  readonly collection: string;
+  /** {@link BM25_SCHEME_VERSION} of this build. */
+  readonly expectedSchemeVersion: number;
+  describe(): Promise<QdrantCollectionInfo>;
+  /** Delete the physical collection. A collection that is already gone is a success. */
+  dropCollection(): Promise<void>;
+  /** Re-create it with the current schema and point the alias back at it. */
+  createCollection(): Promise<void>;
 }
 
 /**
@@ -101,6 +139,25 @@ function isAlreadyExistsError(err: unknown): boolean {
 }
 
 /**
+ * Whether an error means "the collection is not there". Deleting an absent collection is
+ * the outcome a drop wanted, so this has to be recognised: a rebuild retried after a
+ * failed re-creation starts from a collection that is already gone.
+ */
+function isNotFoundError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) {
+    return false;
+  }
+  const candidate = err as { message?: unknown; status?: unknown; statusCode?: unknown };
+  if (candidate.status === 404 || candidate.statusCode === 404) {
+    return true;
+  }
+  return (
+    typeof candidate.message === 'string' &&
+    /(not found|doesn'?t exist|does not exist)/i.test(candidate.message)
+  );
+}
+
+/**
  * Create a payload index if it is missing. Idempotent: "already exists" is silently
  * ignored. Any other failure is logged but never thrown — a missing index degrades
  * search quality, it must not prevent the service from starting.
@@ -170,6 +227,69 @@ function buildCollectionSchema(dimensions: number): CreateCollectionBody {
   }
 
   return body;
+}
+
+/**
+ * Create the collection and everything that must exist alongside it: the payload
+ * indexes, the full-text indexes, the `user_id` tenant index and the BM25 scheme
+ * marker.
+ *
+ * THE ONLY place a collection is created. Startup calls it through
+ * {@link resolveCollection}; `POST /api/admin/collection/rebuild` calls it through
+ * {@link QdrantAdmin.createCollection}. A second copy of these parameters would drift
+ * from this one and produce a collection that looks right and ranks wrong.
+ */
+async function createCollectionWithSchema(
+  client: QdrantClient,
+  collection: string,
+  dimensions: number,
+  log: FastifyBaseLogger,
+): Promise<void> {
+  await client.createCollection(collection, buildCollectionSchema(dimensions));
+  log.info({ collection, dimensions }, 'Created Qdrant collection');
+
+  for (const { field, type } of PAYLOAD_INDEXES) {
+    await ensurePayloadIndex(client, collection, field, type, log);
+  }
+  for (const field of TEXT_INDEXES) {
+    await ensurePayloadIndex(client, collection, field, TEXT_INDEX_SCHEMA, log);
+  }
+  await ensurePayloadIndex(client, collection, 'user_id', USER_ID_INDEX_SCHEMA, log);
+
+  // A collection this build creates is comparable to this build by construction, so the
+  // marker is written unconditionally here — see enforceSchemeVersion for when it is not.
+  await recordSchemeVersion(client, collection, log);
+}
+
+type AliasActions = Parameters<QdrantClient['updateCollectionAliases']>[0]['actions'];
+
+/**
+ * Make {@link COLLECTION_NAME} point at `collection`, whatever it pointed at before.
+ *
+ * Idempotent, and atomic when it has to move: Qdrant applies the whole action list or
+ * none of it, so the alias is never absent between the two steps. Dropping a collection
+ * takes its aliases with it, which is why a rebuild has to re-attach rather than assume.
+ */
+async function ensureAlias(
+  client: QdrantClient,
+  collection: string,
+  log: FastifyBaseLogger,
+): Promise<void> {
+  const { aliases } = await client.getAliases();
+  const existing = aliases.find((a) => a.alias_name === COLLECTION_NAME);
+
+  if (existing?.collection_name === collection) {
+    return;
+  }
+
+  const actions: AliasActions = [];
+  if (existing !== undefined) {
+    actions.push({ delete_alias: { alias_name: COLLECTION_NAME } });
+  }
+  actions.push({ create_alias: { collection_name: collection, alias_name: COLLECTION_NAME } });
+
+  await client.updateCollectionAliases({ actions });
+  log.info({ alias: COLLECTION_NAME, collection }, 'Attached Qdrant collection alias');
 }
 
 /**
@@ -358,10 +478,12 @@ async function recordSchemeVersion(
  *    not a supported state, whereas "this collection was built at vN" is the fact the
  *    deploy procedure actually turns on.
  *
- * WHEN it is written: only when this build creates the collection, and when it adopts
- * an EMPTY unversioned one. Never on a non-empty collection whose version is unknown —
- * stamping that would replace an honest "unknown" with a confident lie, which is the
- * failure this whole check exists to remove.
+ * WHEN it is written: when this build creates the collection (in
+ * {@link createCollectionWithSchema}, which is also the path
+ * `POST /api/admin/collection/rebuild` takes), and here when it adopts an EMPTY
+ * unversioned one. Never on a non-empty collection whose version is unknown — stamping
+ * that would replace an honest "unknown" with a confident lie, which is the failure this
+ * whole check exists to remove.
  *
  * WHY it does not fail startup, unlike the dimension check above:
  *  - a dimension mismatch makes every upsert and every dense query fail at the Qdrant
@@ -382,15 +504,9 @@ async function recordSchemeVersion(
 async function enforceSchemeVersion(
   client: QdrantClient,
   collection: string,
-  created: boolean,
   pointsCount: number | null | undefined,
   log: FastifyBaseLogger,
 ): Promise<boolean> {
-  if (created) {
-    await recordSchemeVersion(client, collection, log);
-    return false;
-  }
-
   const recorded = await readSchemeVersion(client, collection, log);
 
   if (recorded === BM25_SCHEME_VERSION) {
@@ -486,20 +602,10 @@ async function resolveCollection(
 
   const created = !names.has(PHYSICAL_COLLECTION);
   if (created) {
-    await client.createCollection(PHYSICAL_COLLECTION, buildCollectionSchema(dimensions));
-    log.info({ collection: PHYSICAL_COLLECTION, dimensions }, 'Created Qdrant collection');
+    await createCollectionWithSchema(client, PHYSICAL_COLLECTION, dimensions, log);
   }
 
-  // Atomic: the alias appears fully formed or not at all.
-  await client.updateCollectionAliases({
-    actions: [
-      { create_alias: { collection_name: PHYSICAL_COLLECTION, alias_name: COLLECTION_NAME } },
-    ],
-  });
-  log.info(
-    { alias: COLLECTION_NAME, collection: PHYSICAL_COLLECTION },
-    'Attached Qdrant collection alias',
-  );
+  await ensureAlias(client, PHYSICAL_COLLECTION, log);
 
   return { collection: PHYSICAL_COLLECTION, created };
 }
@@ -714,56 +820,49 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
   // alias is being repointed.
   const { collection, created } = await resolveCollection(client, dimensions, fastify.log);
 
-  let pointsCount: number | null | undefined;
+  // A collection this build just created needs none of what follows: its schema is the
+  // one this build asks for, its indexes and marker were written by
+  // createCollectionWithSchema, and it holds no legacy points to purge.
+  let schemeMismatch = false;
   if (!created) {
     const info = await client.getCollection(collection);
     assertUsableCollection(info, collection, dimensions, fastify.log);
     // Distinguishes "created before this check and never indexed" from "populated by an
     // unknown build" — see enforceSchemeVersion.
-    pointsCount = info.points_count;
-  }
+    const pointsCount = info.points_count;
 
-  if (created) {
-    // Create payload indexes for filtering
-    for (const { field, type } of PAYLOAD_INDEXES) {
-      await ensurePayloadIndex(client, collection, field, type, fastify.log);
+    // Full-text and tenant indexes are re-asserted on every start — idempotent, and they
+    // are the ones added after collections in the field had already been created.
+    for (const field of TEXT_INDEXES) {
+      await ensurePayloadIndex(client, collection, field, TEXT_INDEX_SCHEMA, fastify.log);
     }
+    await ensurePayloadIndex(client, collection, 'user_id', USER_ID_INDEX_SCHEMA, fastify.log);
+
+    // Purge legacy vectors without user_id payload. The scheme marker is deliberately
+    // user-less for exactly the reason this purge exists, so it has to be excluded by id —
+    // otherwise every start would wipe the record it is about to read.
+    await client.delete(collection, {
+      wait: true,
+      filter: {
+        must: [{ is_empty: { key: 'user_id' } }],
+        must_not: [{ has_id: [SCHEME_POINT_ID] }],
+      },
+    });
+    fastify.log.info('Purged legacy vectors without user_id');
+
+    // Beside the dimension check in spirit, after the purge in order: the marker must not
+    // be written into a delete that is still in flight.
+    schemeMismatch = await enforceSchemeVersion(client, collection, pointsCount, fastify.log);
   }
 
-  // Create full-text indexes for lexical search — idempotent (safe on restart)
-  for (const field of TEXT_INDEXES) {
-    await ensurePayloadIndex(client, collection, field, TEXT_INDEX_SCHEMA, fastify.log);
-  }
-
-  // Create user_id tenant index — idempotent (safe on restart)
-  await ensurePayloadIndex(client, collection, 'user_id', USER_ID_INDEX_SCHEMA, fastify.log);
-
-  // Purge legacy vectors without user_id payload. The scheme marker is deliberately
-  // user-less for exactly the reason this purge exists, so it has to be excluded by id —
-  // otherwise every start would wipe the record it is about to read.
-  await client.delete(collection, {
-    wait: true,
-    filter: {
-      must: [{ is_empty: { key: 'user_id' } }],
-      must_not: [{ has_id: [SCHEME_POINT_ID] }],
-    },
-  });
-  fastify.log.info('Purged legacy vectors without user_id');
-
-  // Beside the dimension check in spirit, after the purge in order: the marker must not
-  // be written into a delete that is still in flight.
-  const schemeMismatch = await enforceSchemeVersion(
-    client,
-    collection,
-    created,
-    pointsCount,
-    fastify.log,
-  );
   // A startup log scrolls away; the gauge is what an alert can hang off. Guarded because
   // this plugin is registered standalone in its own tests, without the metrics plugin.
-  if (fastify.hasDecorator('metrics')) {
-    fastify.metrics.bm25SchemeMismatch.set(schemeMismatch ? 1 : 0);
-  }
+  const setSchemeMismatchGauge = (mismatch: boolean): void => {
+    if (fastify.hasDecorator('metrics')) {
+      fastify.metrics.bm25SchemeMismatch.set(mismatch ? 1 : 0);
+    }
+  };
+  setSchemeMismatchGauge(schemeMismatch);
 
   // Expose factory for tenant-scoped Qdrant clients — raw client stays internal.
   // Reads `holder.current` on every call, so a renewed token is picked up without
@@ -771,6 +870,68 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
   fastify.decorate('createTenantQdrant', (userId: string) => {
     return new TenantQdrantClient(holder.current, userId);
   });
+
+  // Collection-level maintenance for the admin feature. `collection` is pinned to what
+  // the alias resolved to at startup: that is the collection actually holding the
+  // vectors, and it is the name the operator has to type to confirm a rebuild.
+  const qdrantAdmin: QdrantAdmin = {
+    alias: COLLECTION_NAME,
+    collection,
+    expectedSchemeVersion: BM25_SCHEME_VERSION,
+
+    async describe(): Promise<QdrantCollectionInfo> {
+      const live = holder.current;
+      let pointsCount: number | null = null;
+      try {
+        const info = await live.getCollection(collection);
+        pointsCount = info.points_count ?? null;
+      } catch (err: unknown) {
+        // A dropped collection (mid-rebuild) is the expected reason. Reporting null beats
+        // failing the status call the operator is watching the rebuild through.
+        fastify.log.warn(
+          { err, collection },
+          'Could not read the collection for /api/admin/collection',
+        );
+      }
+      const recorded = await readSchemeVersion(live, collection, fastify.log);
+      return {
+        collection,
+        alias: COLLECTION_NAME,
+        schemeVersion: recorded ?? null,
+        expectedSchemeVersion: BM25_SCHEME_VERSION,
+        pointsCount,
+      };
+    },
+
+    async dropCollection(): Promise<void> {
+      try {
+        await holder.current.deleteCollection(collection);
+        fastify.log.warn(
+          { collection, alias: COLLECTION_NAME },
+          'Dropped the Qdrant collection — every tenant lost its vectors and search ' +
+            'returns nothing until the rebuild finishes indexing',
+        );
+      } catch (err: unknown) {
+        if (!isNotFoundError(err)) {
+          throw err;
+        }
+        // Already gone: a retry of a rebuild that died between dropping and creating.
+        fastify.log.warn({ collection }, 'Collection was already absent — nothing to drop');
+      }
+      // The alias goes with the collection (Qdrant deletes aliases of a deleted
+      // collection). createCollection() re-attaches it explicitly rather than trusting
+      // that, so either behaviour lands in the same place.
+    },
+
+    async createCollection(): Promise<void> {
+      await createCollectionWithSchema(holder.current, collection, dimensions, fastify.log);
+      await ensureAlias(holder.current, collection, fastify.log);
+      // Freshly stamped with this build's version — whatever the gauge said before, the
+      // corpus about to be written is comparable to this build.
+      setSchemeMismatchGauge(false);
+    },
+  };
+  fastify.decorate('qdrantAdmin', qdrantAdmin);
 
   // Expose purge function for user removal cleanup
   fastify.decorate('purgeUserVectors', async (userId: string) => {

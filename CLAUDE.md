@@ -34,7 +34,7 @@ src/
     search/           #   /api/vault/search/{semantic,hybrid,lexical}
     context/          #   /api/vault/context
     vault/            #   /api/vault/* CRUD + /upload
-    admin/            #   /api/admin/reindex[/status]
+    admin/            #   /api/admin/reindex[/status], /api/admin/collection[/rebuild]
   lib/
     bm25.ts           # sparse vectors: tokenizer + vendored ru Snowball stemmer, FNV-1a, BM25 tf
     chunker.ts        # heading/table chunking, parent sections
@@ -180,6 +180,20 @@ how it got there.
   physical collection is `cognivault_v2`. A re-index can build a new collection and repoint
   the alias atomically. Maintenance calls target the physical name. `user_id` is a keyword
   index with `is_tenant: true`.
+- **One creation path for the collection** — `createCollectionWithSchema()` in
+  `src/plugins/qdrant.ts` is the ONLY place a collection is created (schema, payload
+  indexes, tenant index, BM25 scheme marker). Startup reaches it via `resolveCollection`,
+  `POST /api/admin/collection/rebuild` via the `fastify.qdrantAdmin` decorator. A second
+  copy of those parameters would drift and produce a collection that looks right and ranks
+  wrong.
+- **The rebuild is destructive and cross-tenant** — `POST /api/admin/collection/rebuild`
+  drops the physical collection (every user's vectors, not the caller's), recreates it and
+  re-indexes every registered vault. The only guard is `confirm`, which must equal the
+  physical collection name; auth stays the ordinary per-user token. Search returns nothing
+  between the drop and the end of indexing — accepted in place of a blue/green rebuild.
+  A rebuild and a per-user full reindex are mutually exclusive in both directions via the
+  shared `AdminInterlock` (`src/features/admin/interlock.ts`), which is per-process: it
+  does not serialise two replicas.
 - **Indexing is transactional** — the `indexed_files` row is persisted only AFTER a
   successful upsert plus stale-vector cleanup (`confirmIndexed` / `failIndexed` on
   `VaultIndexer`). A parse failure raises a typed `ChunkParseError` and touches neither the
