@@ -289,7 +289,7 @@ export class SearchService {
   private sectionKey(point: ScoredPoint): string | undefined {
     const parentId = point.payload?.parent_id;
     if (typeof parentId !== 'string' || parentId.length === 0) return undefined;
-    return `${point.payload?.path ?? ''} ${parentId}`;
+    return `${point.payload?.path ?? ''}\0${parentId}`;
   }
 
   /** Fetches the parent-document text of every grouped point in a single SQLite query. */
@@ -314,7 +314,7 @@ export class SearchService {
     // the composite key below is what pins each row back to the right note.
     const rows = this.db.select().from(sections).where(inArray(sections.parentId, parentIds)).all();
     for (const row of rows) {
-      texts.set(`${row.path} ${row.parentId}`, row.text);
+      texts.set(`${row.path}\0${row.parentId}`, row.text);
     }
 
     // Truncation is per POINT, not per row: the window is centred on the chunk that was
