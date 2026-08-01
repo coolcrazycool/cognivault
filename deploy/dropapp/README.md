@@ -22,6 +22,30 @@ Namespace: `ci05490208-oasis-cognivault`.
 | бэкенд | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-fd27f9f` |
 | UI | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-fd27f9f` |
 
+### Что нового в `sha-fd27f9f`
+
+- **Гибридный поиск (Волна 3).** Рядом с плотным вектором на той же точке лежит
+  разреженный BM25, слияние RRF считает сам Qdrant одним запросом Query API. Схема
+  коллекции сменилась на **именованные векторы** (`dense` + `bm25`): физическая
+  коллекция теперь `cognivault_v2`, а `cognivault` — **алиас** на неё. **При
+  развёртывании с нуля делать для этого ничего не нужно** — приложение создаёт и
+  коллекцию, и алиас само (раздел 3.6).
+- **Parent-child.** В SQLite появилась таблица `sections`: ищем чанк, а в контекст
+  отдаём весь раздел (`section_text` в ответе `/hybrid`). Заполняется **только для
+  markdown** — у PDF/CSV/canvas разделов нет.
+- **Ширина ретрива 20 → 40** (`RAG_RERANK_CANDIDATES` у UI). Грейдер батчится по 12,
+  поэтому это **четыре** вызова оценки вместо двух; латентность та же (батчи идут
+  параллельно), стоимость этапа — вдвое выше.
+- **Таблицы и обогащение чанков (Волна 4).** Таблицы сериализуются в GFM и режутся по
+  группам строк с повтором шапки. Индексация ходит в chat/completions GigaChat за
+  аннотацией документа (кэш в SQLite по `content_hash`) и за описанием большой таблицы.
+  Новые ключи ConfigMap бэкенда: `INDEX_DOC_SUMMARY`, `INDEX_TABLE_SUMMARY`,
+  `GIGACHAT_CHAT_MODEL`, `GIGACHAT_CHAT_TIMEOUT_MS`, `GIGACHAT_CHAT_MAX_TOKENS`
+  (раздел 4.1, стоимость — раздел 6.5).
+- **Настройки в UI.** Модель, ручки RAG и два промпта правятся прямо в морде и
+  хранятся **пер-пользовательски** в `/data/users/<хеш токена>/config.json`. Эти
+  значения **перекрывают** ConfigMap — см. врезку в разделе 4.1.
+
 ---
 
 ## Как работать с кластером: веб-консоль DropApp
@@ -63,7 +87,7 @@ https://console.bcayrqks.k8s.delta.sbrf.ru/k8s/ns/ci05490208-oasis-cognivault/
 | `03-configmap-ui.yaml` | ConfigMap `cognivault-ui-config` | **Да** |
 | `04-backend.yaml` | Deployment `cognivault` + Service `cognivault` (:3000) | **Да** |
 | `05-ui.yaml` | Deployment `cognivault-ui` + Service `cognivault-ui` (:8787) | **Да** |
-| `06-ingress.yaml` | Ingress `oasis-cognivault-ingress` | **Уже существует в кластере** и настроен верно. Импортировать только при развёртывании с нуля, см. шаг 7 |
+| `06-ingress.yaml` | Ingress `oasis-cognivault-ingress` | **Да при чистом старте.** Если объект в namespace уже есть (его заводит платформа) — не импортировать, а проверить правила: шаги 7 и 7.1 |
 | `07-serviceentry-egress.yaml` | ServiceEntry `gigachat-egress`, `qdrant-external-egress`, `confluence-egress` | Только при Istio `REGISTRY_ONLY` |
 | `99-qdrant-inhouse.yaml` | Service `qdrant` + Deployment `qdrant` | **Нет.** Откат на внутрикластерный Qdrant, по умолчанию НЕ применять |
 
@@ -86,7 +110,7 @@ Ingress oasis-cognivault-ingress (nginx, HTTP, без TLS)
    └─> Service cognivault-ui:8787 ──> под UI ──┬─> Service cognivault:3000 ─> под бэкенда
                                                │        ├─> IAM :6433 /auth (mTLS) ─> JWT
                                                │        └─> Platform V Vector DB :6433 (mTLS + Bearer)
-                                               │        └─> GigaChat (эмбеддинги, mTLS)
+                                               │        └─> GigaChat (эмбеддинги + аннотации при индексации, mTLS)
                                                ├─> GigaChat (генерация ответа, mTLS)
                                                └─> Confluence (опционально)
 ```
@@ -191,7 +215,8 @@ kubectl create secret docker-registry sberosc-pull -n $NS \
 
 ## 3. TLS и связность до внешнего Qdrant
 
-Бэкенд подключается к Qdrant **на старте** и создаёт коллекцию `cognivault`.
+Бэкенд подключается к Qdrant **на старте**: на чистом сервере создаёт коллекцию
+`cognivault_v2` и вешает на неё алиас `cognivault` (раздел 3.6).
 Если Qdrant недоступен — под уходит в CrashLoopBackOff (startupProbe даёт ~150 с
 ретраев). Проверять связность разумно заранее — из уже работающего пода (например,
 из пода UI, который от Qdrant не зависит) или сразу после первой выкатки.
@@ -444,8 +469,13 @@ node -e "const https=require('https'),fs=require('fs');const u=new URL(process.e
 ```
 auth 200 ok
 token length 512 exp 2026-07-31T14:30:00.000Z
-collections 200 {"result":{"collections":[{"name":"cognivault"}]},"status":"ok","time":0.0001}
+collections 200 {"result":{"collections":[{"name":"cognivault_v2"}]},"status":"ok","time":0.0001}
 ```
+
+Список коллекций на **чистом** сервере пуст — это нормально, коллекцию создаст сам
+бэкенд на первом старте. После первого старта в нём появляется `cognivault_v2`;
+имя `cognivault` в `/collections` не показывается, потому что это алиас — его видно
+в `/aliases` (раздел 3.6).
 
 Если `auth` вернул не 200 — смотрите тело: 401 значит неверные ТУЗ/пароль в
 `vectordb-creds`, `ERR … ECONNREFUSED` на порту 6533 — IAM всё-таки на 6433 (уберите
@@ -459,65 +489,126 @@ collections 200 {"result":{"collections":[{"name":"cognivault"}]},"status":"ok",
 `Qdrant client configured` покажет выбранную схему: `iam`, `api-key` или `none`.
 Ни пароль, ни токен в логи не попадают — токен описывается только длиной и сроком
 истечения (`Obtained Qdrant IAM token`, поля `tokenLength`, `expiresAt`).
----
 
-## 3.6. Миграция коллекции Qdrant — разово, перед первой выкаткой образа `sha-fd27f9f`
+### 3.6 Коллекция Qdrant: чистый старт и миграция
 
 Гибридный поиск требует, чтобы плотный и разреженный векторы лежали на одной точке, а для
-этого оба должны быть **именованными**. Старая коллекция создавалась с безымянным вектором,
-поэтому схема сменилась: физическая коллекция теперь `cognivault_v2`, а `cognivault` —
-**алиас** на неё.
+этого оба должны быть **именованными**. Поэтому схема такая: физическая коллекция —
+`cognivault_v2` (векторы `dense` + разреженный `bm25`), а `cognivault` — **алиас** на неё.
+
+**Сначала определите свой сценарий:**
+
+| Сценарий | Что делать |
+|----------|------------|
+| **Чистый namespace** (коллекции `cognivault` во внешнем Qdrant ещё нет) | **Ничего.** Весь остаток раздела 3.6 **пропускается**: на первом старте приложение само создаст `cognivault_v2` и повесит алиас `cognivault`, а в логах появятся `Created Qdrant collection` и `Attached Qdrant collection alias`. Переходите к разделу 4 |
+| **Обновление существующего окружения**, где `cognivault` уже существует **как коллекция** (её создавал образ до `sha-fd27f9f`) | Выполнить разовую миграцию — шаги ниже |
+
+Как понять, какой у вас случай:
+
+- **самый простой способ — просто выкатиться.** Если имя `cognivault` занято старой
+  коллекцией, бэкенд не стартует и пишет об этом прямым текстом (см. ниже). Ничего
+  необратимого при этом не происходит: старая коллекция не удаляется и не меняется;
+- если хочется знать заранее — однострочник из 3.5 (он печатает список коллекций).
+  `cognivault` в списке = второй сценарий; пустой список или уже готовый
+  `cognivault_v2` = первый, мигрировать нечего.
+
+> Внешний Qdrant общий для стенда, поэтому «чистый namespace» и «чистый Qdrant» — не
+> одно и то же: namespace могли пересоздать, а коллекция от прошлой инсталляции
+> осталась. Смотрите на список коллекций, а не на возраст namespace.
+
+#### Разовая миграция (только второй сценарий)
 
 Приложение **намеренно не стартует**, если `cognivault` существует как коллекция, а не как
 алиас, и пишет в лог:
 
 ```
-Qdrant name "cognivault" exists as a COLLECTION, not as an alias
+"cognivault" exists as a COLLECTION, not as an alias, so the alias cannot be created
 ```
 
 Это защита: без неё сервис молча писал бы в старую схему, а гибрид тихо деградировал бы до
 плотного поиска. Порядок разовой миграции:
 
 1. **Остановить бэкенд** — Deployment `cognivault` → **Actions** → масштаб в 0 реплик.
-2. **Убрать старую коллекцию** во внешнем Qdrant. Безопаснее переименовать, а не удалять —
-   тогда останется путь отката. Через вкладку **Terminal** любого пода (нужен токен IAM,
-   см. 3.5):
+   (Если под уже в CrashLoopBackOff из-за этой самой ошибки — тем более: рабочего
+   терминала у него всё равно нет.)
+2. **Убрать старую коллекцию** во внешнем Qdrant. Делается это из вкладки **Terminal**
+   **пода UI** — бэкенда в этот момент нет. Логин и пароль подставьте руками:
+   **Secrets** → `vectordb-creds` → **Reveal values**. Однострочник печатает список
+   коллекций и затем удаляет `cognivault`:
+
+   ```
+   python -c "import json,ssl,urllib.request as u; B='https://tsled-oasis0001.esrt.sber.ru:6433'; c=ssl.create_default_context(cafile='/certs/cacert.pem'); c.load_cert_chain('/certs/client_crt.crt','/certs/client_key.key'); t=json.load(u.urlopen(u.Request(B+'/auth',data=json.dumps({'username':'ЛОГИН','password':'ПАРОЛЬ'}).encode(),headers={'Content-Type':'application/json'}),context=c,timeout=15))['result']['token']; h={'Authorization':'Bearer '+t}; print(u.urlopen(u.Request(B+'/collections',headers=h),context=c,timeout=15).read().decode()[:400]); print(u.urlopen(u.Request(B+'/collections/cognivault',headers=h,method='DELETE'),context=c,timeout=60).read().decode()[:200])"
+   ```
+
+   Если приватный ключ зашифрован, добавьте пароль третьим аргументом:
+   `c.load_cert_chain('/certs/client_crt.crt','/certs/client_key.key','ПАРОЛЬ_КЛЮЧА')`.
+
+   <details>
+   <summary>Тот же шаг из пода бэкенда, если он ещё жив (креды берутся из env)</summary>
 
    ```
    node -e 'const https=require("node:https"),fs=require("node:fs");const o={host:new URL(process.env.QDRANT_URL).hostname,port:6433,cert:fs.readFileSync("/certs/client_crt.crt"),key:fs.readFileSync("/certs/client_key.key"),ca:fs.readFileSync("/certs/cacert.pem"),passphrase:process.env.GIGACHAT_KEY_PASSPHRASE};const b=JSON.stringify({username:process.env.QDRANT_USERNAME,password:process.env.QDRANT_PASSWORD});const rq=(op,body,h)=>new Promise(r=>{const q=https.request({...o,...op,headers:h},s=>{let d="";s.on("data",c=>d+=c);s.on("end",()=>r([s.statusCode,d]))});q.on("error",e=>r(["ERR",e.message]));if(body)q.write(body);q.end()});(async()=>{const[,a]=await rq({path:"/auth",method:"POST"},b,{"Content-Type":"application/json","Content-Length":Buffer.byteLength(b)});const t=JSON.parse(a).result.token;const H={Authorization:"Bearer "+t};console.log("collections",...(await rq({path:"/collections",method:"GET"},null,H)));console.log("delete",...(await rq({path:"/collections/cognivault",method:"DELETE"},null,H)))})()'
    ```
+   </details>
 
-   Команда сначала печатает список коллекций — **сверьтесь с ним**, прежде чем удалять.
+   Обе команды сначала печатают список коллекций — **сверьтесь с ним**, прежде чем
+   удалять. Обойтись без удаления нельзя: имена коллекций и алиасов у Qdrant живут в
+   одном пространстве, поэтому пока `cognivault` занят коллекцией, алиас с таким
+   именем не создать. Удаление необратимо — если содержимое старой коллекции ещё
+   нужно, сначала снимите с неё snapshot (`POST /collections/cognivault/snapshots`
+   тем же способом, что и запросы выше). Ценность его невелика: старые векторы всё
+   равно не годятся для гибрида, а документы лежат в волте.
 3. **Поднять бэкенд** обратно в 1 реплику. На старте он создаст `cognivault_v2` и повесит
-   алиас; в логах появится `Created Qdrant collection` и `Connected to Qdrant`.
-4. **Переиндексировать** — раздел 6. Без этого поиск вернёт пустоту: новая коллекция пуста.
+   алиас; в логах появятся `Created Qdrant collection`, `Attached Qdrant collection alias`
+   и `Connected to Qdrant`.
+4. **Переиндексировать** — раздел 6.3. Без этого поиск вернёт пустоту: новая коллекция пуста.
 
 Проверить результат можно тем же однострочником, заменив путь на `/aliases` — алиас
 `cognivault` должен указывать на `cognivault_v2`.
+
+> Полная переиндексация нужна в **обоих** сценариях: и на чистом старте, и после
+> миграции коллекция пустая. Разница только в том, что при чистом старте удалять
+> нечего.
 
 ---
 
 ## 4. Порядок применения
 
-Консоль: **«+»** → **Import YAML** (`/k8s/ns/ci05490208-oasis-cognivault/import`),
-по одному файлу за шаг, в этом порядке:
+Полный линейный маршрут развёртывания **с нуля**. Шаги идут строго по порядку; ничего
+из списка пропускать нельзя, кроме явно помеченного «опционально».
 
-1. `02-configmap-backend.yaml`
-2. `03-configmap-ui.yaml`
-3. `04-backend.yaml` (Deployment + Service — многодокументный файл, вставляется целиком)
-4. `05-ui.yaml`
+| № | Шаг | Где | Подробности |
+|---|-----|-----|-------------|
+| 1 | Проверить, что в namespace есть `vectordb-creds` (ключи `username`, `password`) | **Secrets** | раздел 1 |
+| 2 | Создать секрет `cognivault-gigachat-certs` (`client_crt.crt`, `client_key.key`, `cacert.pem`, при необходимости `key.passphrase`) | **Secrets** → **Create** → **Key/value secret** | 2.1 |
+| 3 | Создать pull-secret `sberosc-pull` | **Secrets** → **Create** → **Image pull secret** | 2.2 |
+| 4 | Импортировать `02-configmap-backend.yaml` | **«+»** → **Import YAML** | 4.1 |
+| 5 | Импортировать `03-configmap-ui.yaml` | то же | 4.1 |
+| 6 | Импортировать `04-backend.yaml` (Deployment + Service, многодокументный файл — вставляется целиком) | то же | — |
+| 7 | Импортировать `05-ui.yaml` (Deployment + Service) | то же | — |
+| 8 | *(опционально)* Импортировать `07-serviceentry-egress.yaml` — только если Istio режет egress (`REGISTRY_ONLY`) | то же | 0, 3.3 |
+| 9 | Импортировать `06-ingress.yaml` — **при развёртывании с нуля**. Если объект `oasis-cognivault-ingress` в namespace уже есть, не импортировать, а проверить его правила | то же / раздел 7 | 7, 7.1 |
+| 10 | Дождаться готовности обоих подов, проверить логи | **Pods** → **Logs** | 5 |
+| 11 | Завести пользователя, получить cv-токен | под бэкенда → **Terminal** | 6.1 |
+| 12 | Залить документы (zip через UI или `POST /api/vault/upload`) | браузер | 6.2 |
+| 13 | Запустить полную переиндексацию, дождаться её конца | под бэкенда → **Terminal** | 6.3 |
+| 14 | Проверить, что гибрид отвечает | под бэкенда → **Terminal** | 6.4 |
 
-Дальше — только по необходимости:
+Импорт манифестов: **«+»** → **Import YAML**
+(`/k8s/ns/ci05490208-oasis-cognivault/import`), по одному файлу за шаг.
 
-- `07-serviceentry-egress.yaml` — если Istio режет egress (`REGISTRY_ONLY`);
-- `06-ingress.yaml` — **только** при развёртывании с нуля. В существующем окружении
-  объект `oasis-cognivault-ingress` уже есть и уже смотрит на `cognivault-ui:8787`,
-  трогать его не нужно. Подробности — шаг 7.
+`00-secrets.example.yaml` и `99-qdrant-inhouse.yaml` **не импортировать**
+(шаблон и путь отката соответственно).
 
-`00-secrets.example.yaml` и `99-qdrant-inhouse.yaml` **не импортировать**.
+> ConfigMap'ы идут раньше Deployment'ов не случайно: под бэкенда читает их через
+> `envFrom` при старте. Если импортировать Deployment раньше — под упадёт на
+> отсутствии конфига. Секреты идут раньше ConfigMap'ов по той же причине: без
+> `sberosc-pull` образ не скачается, без `cognivault-gigachat-certs` под не
+> смонтирует `/certs` и упадёт на чтении сертификата.
 
-> ConfigMap'ы идут первыми не случайно: под бэкенда читает их через `envFrom` при
-> старте. Если импортировать Deployment раньше — под упадёт на отсутствии конфига.
+> Коллекцию Qdrant вручную создавать **не надо** — на чистом сервере приложение
+> делает это само на шаге 10 (раздел 3.6). Отдельная миграция нужна только при
+> обновлении окружения, где `cognivault` уже существует коллекцией.
 
 <details>
 <summary><b>Если у вас есть CLI</b></summary>
@@ -529,9 +620,112 @@ kubectl apply -n $NS -f deploy/dropapp/03-configmap-ui.yaml
 kubectl apply -n $NS -f deploy/dropapp/04-backend.yaml
 kubectl apply -n $NS -f deploy/dropapp/05-ui.yaml
 # kubectl apply -n $NS -f deploy/dropapp/07-serviceentry-egress.yaml
-# kubectl apply -n $NS -f deploy/dropapp/06-ingress.yaml
+kubectl apply -n $NS -f deploy/dropapp/06-ingress.yaml
 ```
 </details>
+
+### 4.1 Ключи ConfigMap: полная сверка
+
+Импортированные файлы дают ровно такой набор. Сверяйтесь с этими таблицами, если
+правите ConfigMap руками через YAML-редактор консоли: **лишних ключей быть не должно,
+пропущенных — тоже**.
+
+**`cognivault-config` (`02-configmap-backend.yaml`)**
+
+| Ключ | Значение | Зачем |
+|------|----------|-------|
+| `PORT` | `3000` | порт HTTP |
+| `HOST` | `0.0.0.0` | адрес привязки |
+| `LOG_LEVEL` | `info` | уровень Pino |
+| `COGNIVAULT_DATA_DIR` | `/data` | корень данных (emptyDir!) |
+| `POLL_INTERVAL_MS` | `5000` | период обхода волтов файловым поллером |
+| `STABILITY_DELAY_MS` | `2000` | сколько файл должен пролежать неизменным, прежде чем его возьмут в индексацию |
+| `QDRANT_URL` | `https://tsled-oasis0001.esrt.sber.ru:6433` | внешний Qdrant, резерв — раздел 9 |
+| `QDRANT_TIMEOUT_MS` | `30000` | таймаут запроса к СУБД и к `/auth` |
+| `QDRANT_CA_PATH` | `/certs/cacert.pem` | CA внутреннего УЦ (3.1) |
+| `QDRANT_CERT_PATH` | `/certs/client_crt.crt` | клиентский сертификат mTLS |
+| `QDRANT_KEY_PATH` | `/certs/client_key.key` | приватный ключ к нему |
+| `QDRANT_VERIFY_SSL` | `true` | проверка сертификата сервера Qdrant |
+| `QDRANT_QUANTIZATION` | `false` | скалярная int8-квантизация плотного вектора. Применяется **только в момент создания коллекции**: на чистом старте это единственный шанс включить её без пересоздания |
+| `EMBEDDING_PROVIDER` | `gigachat` | провайдер эмбеддингов |
+| `GIGACHAT_BASE_URL` | `https://gigachat-ift.sberdevices.delta.sbrf.ru/v1` | шлюз GigaChat |
+| `GIGACHAT_MODEL` | `EmbeddingsGigaR` | модель эмбеддингов |
+| `GIGACHAT_QUERY_INSTRUCTION` | строка Сбера с `{query}` | инструкция-префикс **только** для запроса |
+| `EMBEDDING_DIMENSIONS` | `2560` | размерность вектора `dense` |
+| `GIGACHAT_CERT_PATH` | `/certs/client_crt.crt` | mTLS до GigaChat |
+| `GIGACHAT_KEY_PATH` | `/certs/client_key.key` | то же |
+| `GIGACHAT_VERIFY_SSL` | `false` | временный escape hatch (3.1) |
+| `GIGACHAT_MAX_REQUEST_BYTES` | `120000` | защита от 413 от шлюза |
+| `GIGACHAT_MAX_BATCH_ITEMS` | `64` | размер батча эмбеддингов |
+| `GIGACHAT_MAX_REQUEST_TOKENS` | `2048` | лимит токенов на один HTTP-запрос |
+| `GIGACHAT_MAX_EMBEDDING_TOKENS` | `3300` | лимит на один текст (cl100k, с запасом) |
+| `GIGACHAT_MAX_RETRIES` | `5` | ретраи |
+| `GIGACHAT_RETRY_BASE_DELAY_MS` | `1000` | база экспоненциальной паузы |
+| `INDEX_DOC_SUMMARY` | `true` | аннотация документа в каждый чанк (6.5) |
+| `INDEX_TABLE_SUMMARY` | `true` | описание большой таблицы отдельной точкой (6.5) |
+| `GIGACHAT_CHAT_MODEL` | `GigaChat` | модель **для суммаризации при индексации** — не эмбеддер и не модель чата |
+| `GIGACHAT_CHAT_TIMEOUT_MS` | `30000` | таймаут вызова суммаризации |
+| `GIGACHAT_CHAT_MAX_TOKENS` | `300` | длина аннотации |
+
+Закомментированы в файле и по умолчанию **не действуют** (включать осознанно):
+`OTEL_EXPORTER_OTLP_ENDPOINT` (без него телеметрия просто не экспортируется, метрики
+`/metrics` работают всегда), `QDRANT_AUTH_URL` (порт IAM, 3.5),
+`QDRANT_TOKEN_REFRESH_SKEW_MS` (дефолт 5 минут), `GIGACHAT_CA_PATH` (3.1).
+
+Приходят **не из ConfigMap, а из секретов** через `env` в `04-backend.yaml`:
+`QDRANT_USERNAME`, `QDRANT_PASSWORD` (из `vectordb-creds`), `QDRANT_KEY_PASSPHRASE`
+и `GIGACHAT_KEY_PASSPHRASE` (из `cognivault-gigachat-certs`, `optional: true`).
+В ConfigMap их быть не должно.
+
+**`cognivault-ui-config` (`03-configmap-ui.yaml`)**
+
+| Ключ | Значение | Зачем |
+|------|----------|-------|
+| `COGNIVAULT_UI_MODE` | `server` | мультитенантный режим (токен на запрос) |
+| `COGNIVAULT_BASE_URL` | `http://cognivault:3000` | Service бэкенда из `04-backend.yaml` |
+| `UI_HOST` | `0.0.0.0` | адрес привязки; иначе под недоступен снаружи контейнера |
+| `UI_PORT` | `8787` | порт UI; должен совпадать с `containerPort` в `05-ui.yaml` и с портом в `06-ingress.yaml` |
+| `UI_DATA_DIR` | `/data` | история чатов, `rag_log.jsonl`, пер-пользовательские настройки (emptyDir!) |
+| `GIGACHAT_BASE_URL` | `https://gigachat-ift.sberdevices.delta.sbrf.ru/v1` | шлюз GigaChat |
+| `GIGACHAT_MODEL` | `GigaChat-3-Ultra-preview` | модель **генерации ответа** |
+| `GIGACHAT_CERT_PATH` | `/certs/client_crt.crt` | mTLS |
+| `GIGACHAT_KEY_PATH` | `/certs/client_key.key` | mTLS |
+| `GIGACHAT_VERIFY_SSL` | `false` | временный escape hatch |
+| `GIGACHAT_TEMPERATURE` | `0.2` | температура генерации |
+| `GIGACHAT_MAX_TOKENS` | `4096` | потолок ответа |
+| `GIGACHAT_MODEL_CONTEXT_TOKENS` | `32768` | контекст модели, из него считается тримминг истории |
+| `RAG_MODE` | `auto` | режим включения RAG |
+| `RAG_MAX_CONTEXT_CHARS` | `24000` | бюджет контекста |
+| `RAG_FILE_FULL_CHARS` | `6000` | порог разворачивания файла целиком |
+| `RAG_SECTION_MAX_CHARS` | `4000` | обрезка `section_text` (parent-child) |
+| `RAG_MAX_EXPANDED_FILES` | `2` | сколько файлов разворачивать целиком |
+| `RAG_LIMIT` | `10` | сколько фрагментов идёт в контекст-сборку |
+| `RAG_SOURCE` | `hybrid` | эндпоинт поиска: `/api/vault/search/hybrid` |
+| `RAG_CONDENSE_ENABLED` | `true` | вызов 1: интент + condense |
+| `RAG_GRADER_ENABLED` | `true` | вызов 2: батч-грейдер (он же реранкер) |
+| `RAG_GRADER_THRESHOLD` | `4` | порог оценки 1–5 |
+| `RAG_GRADER_KEEP_TOP` | `2` | сколько топ-хитов проходят всегда |
+| `RAG_RERANK_CANDIDATES` | `40` | ширина ретрива (Волна 3: было 20) |
+| `CONFLUENCE_ENABLED` | `true` | мастер-выключатель источника Confluence; `false` убирает раздел из UI |
+| `CONFLUENCE_BASE_URL` | `https://confluence.sberbank.ru` | тот же хост должен быть в `07-serviceentry-egress.yaml` |
+| `CONFLUENCE_MAX_CONCURRENCY` | `3` | параллельных страниц на одну синхронизацию |
+| `CONFLUENCE_MIN_AUTO_INTERVAL_MIN` | `30` | нижняя граница интервала автосинхронизации |
+| `CONFLUENCE_AUTO_SYNC_SCHEDULER` | `true` | фоновый планировщик; `false` оставляет только кнопку «Обновить» |
+| `CONFLUENCE_VERIFY_SSL` | `false` | временный escape hatch |
+
+Закомментированы и по умолчанию не действуют: `RAG_MIN_SCORE` (отсечки по косинусу
+намеренно нет — на гибридном поиске абсолютные значения score несопоставимы между
+запросами, отбором занимается грейдер) и `CONFLUENCE_CA_PATH` (3.1).
+`GIGACHAT_KEY_PASSPHRASE` у UI тоже приходит из секрета через `env` в `05-ui.yaml`.
+
+> ⚠️ **ConfigMap UI — это дефолты, а не финальное слово.** Пользователь правит модель,
+> `RAG_*`-ручки и два промпта прямо в морде; сохранённое лежит в
+> `/data/users/<хеш токена>/config.json` и **перекрывает** значения из ConfigMap для
+> этого пользователя. Поэтому после правки, например, `RAG_RERANK_CANDIDATES` в
+> ConfigMap новое значение увидят только те, кто ничего не сохранял. Админ-ключи
+> (адреса, сертификаты, `RAG_MODE`, `RAG_SOURCE`, `GIGACHAT_MODEL_CONTEXT_TOKENS`)
+> из UI править нельзя — они всегда из ConfigMap. И сам `config.json` лежит на
+> `emptyDir`: перезапуск пода UI сбрасывает пользовательские настройки к ConfigMap.
 
 ---
 
@@ -548,19 +742,39 @@ kubectl apply -n $NS -f deploy/dropapp/05-ui.yaml
   и применён фолбэк в один час;
 - `Qdrant client configured` с полями `qdrantAuth`, `qdrantTls`, `qdrantClientCert`,
   `qdrantVerifySsl` — быстрый способ убедиться, что под подхватил именно ту конфигурацию,
-  которую вы задали. `qdrantAuth` принимает три значения: `iam` (Platform V Vector DB,
-  штатный режим), `api-key` (сырой Qdrant со статическим ключом) и `none`.
-  Значения ключа, пароля и токена в лог не попадают никогда;
-- **`Connected to Qdrant`** с версией сервера — подтверждает, что сеть и TLS отработали;
-  на 401/403 эта строка появится, а вот следующий шаг (список коллекций) упадёт —
+  которую вы задали. На этом наборе манифестов должно быть `qdrantAuth: "iam"`
+  (`api-key` — сырой Qdrant со статическим ключом, `none` — аутентификации нет вовсе:
+  оба значения здесь означают, что что-то настроено не так), `qdrantTls: "custom"`,
+  `qdrantClientCert: true`, `qdrantVerifySsl: true`. Значения ключа, пароля и токена
+  в лог не попадают никогда;
+- **`Connected to Qdrant`** с полями `qdrantVersion` и `clientVersion` — подтверждает,
+  что сеть и TLS отработали. Версия сервера должна быть **1.16.x**: гибридный поиск
+  идёт через Query API и разреженные векторы, на старых серверах он не заработает.
+  На 401/403 эта строка появится, а вот следующий шаг (список коллекций) упадёт —
   смотрите раздел 3.5;
+- **только на самом первом старте, на чистом сервере** — `Created Qdrant collection`
+  (поля `collection: "cognivault_v2"`, `dimensions: 2560`) и сразу за ней
+  `Attached Qdrant collection alias` (`alias: "cognivault"`). На последующих
+  перезапусках этих строк нет — это нормально, коллекция уже существует;
 - примерно раз в час — **`Refreshed Qdrant IAM token`** с новым `expiresAt`. Это норма,
   а не признак проблемы: токен живёт час и обновляется сам. Строка
   `Failed to refresh Qdrant IAM token — retrying shortly` означает, что IAM временно
   недоступен; приложение продолжает работать на текущем токене и повторяет попытку
   через 30 секунд;
-- создание/проверка коллекции `cognivault`;
 - `Server listening`.
+
+Чего в логах чистого старта быть **не должно**:
+
+| Строка | Что значит |
+|--------|------------|
+| `"cognivault" exists as a COLLECTION, not as an alias` | на сервере осталась коллекция от старого образа — это не чистый старт, нужна миграция (3.6) |
+| warn `Qdrant collection has no "bm25" sparse vector` | коллекция создана старой схемой: плотный поиск работает, гибридный и лексический — нет. Лечится только пересозданием коллекции и полной переиндексацией |
+| warn `Alias "cognivault" points at an older collection` | алиас смотрит не на `cognivault_v2` (состояние после отката). Сервис продолжает работать на старой коллекции — гибрида в ней нет |
+| warn `Index summaries enabled but GigaChat certificate is missing` | включены `INDEX_*_SUMMARY`, но не заданы `GIGACHAT_CERT_PATH`/`GIGACHAT_KEY_PATH` — аннотации молча отключены (6.5) |
+
+Позже, уже во время индексации (раздел 6.3), в логах пойдут строки
+`Summary generated` с полями `what` (`doc_summary` / `table_summary`), `path` и
+счётчиком `summaryCallCount` — это обращения к chat/completions GigaChat, см. 6.5.
 
 Health-эндпоинты — вкладка **Terminal** соответствующего пода:
 
@@ -597,6 +811,9 @@ python -c "import urllib.request as u; print(u.urlopen('http://cognivault:3000/h
 | `403 … Forbidden: InvalidSignature` | токен подписан не тем секретом (выпущен не IAM'ом) | брать токен только через `POST /auth` |
 | `QDRANT_API_KEY and QDRANT_USERNAME/QDRANT_PASSWORD are mutually exclusive…` | в `04-backend.yaml` активны оба варианта аутентификации | оставить ровно один блок `env`, второй закомментировать |
 | жалоба на `EMBEDDING_DIMENSIONS` | размерность не задана/нечисловая или не совпала с коллекцией | `EMBEDDING_DIMENSIONS: "2560"`; при несовпадении — новая коллекция + reindex |
+| `"cognivault" exists as a COLLECTION, not as an alias` | это не чистый старт: на сервере коллекция от образа до `sha-fd27f9f` | разовая миграция — раздел 3.6 |
+| `uses the legacy UNNAMED vector schema` / `has no "dense" vector` | коллекция, на которую смотрит алиас, создана старой схемой | пересоздать коллекцию (3.6) и переиндексировать (6.3) |
+| `has vector size N, but the active embedding provider produces M` | размерность коллекции не совпала с моделью эмбеддингов | привести `EMBEDDING_DIMENSIONS` к модели либо пересоздать коллекцию + reindex |
 | `UNABLE_TO_VERIFY_LEAF_SIGNATURE` на GigaChat | бандл `cacert.pem` не покрывает цепочку GigaChat | вернуть `GIGACHAT_VERIFY_SSL=false` и снять `GIGACHAT_CA_PATH` (см. 3.1) |
 | `413 Request size exceeded` | шлюз режет тело запроса | снизить `GIGACHAT_MAX_REQUEST_BYTES` / `GIGACHAT_MAX_BATCH_ITEMS` |
 | `Tokens limit exceeded … (max 4096)` | cl100k недосчитывает русские токены | снизить `GIGACHAT_MAX_EMBEDDING_TOKENS` (напр. до 2500) |
@@ -616,14 +833,26 @@ python -c "import urllib.request as u; print(u.urlopen('http://cognivault:3000/h
 
 ### 6.1 Завести пользователя и получить cv-токен
 
-Под бэкенда → вкладка **Terminal**:
+Под бэкенда → вкладка **Terminal**. Сначала **создать каталог волта** — CLI требует,
+чтобы папка уже существовала, а на свежем `emptyDir` её нет и команда упадёт
+с `Vault path is not an existing directory`:
+
+```
+mkdir -p /data/vaults/bob
+```
+
+Затем завести пользователя:
 
 ```
 node dist/cli/index.js add-local-user bob --vault-path /data/vaults/bob
 ```
 
 CLI печатает ключ вида `cv-…` — **сохраните его**, повторно он не показывается.
-Запись идёт в `/data/users.json`, сервер подхватывает изменения на лету.
+Запись идёт в `/data/users.json` (каталог берётся из `COGNIVAULT_DATA_DIR=/data`),
+сервер подхватывает изменения на лету.
+
+> Если `mkdir` в терминале недоступен, тот же результат даёт однострочник на node:
+> `node -e "require('node:fs').mkdirSync('/data/vaults/bob',{recursive:true})"`
 
 ⚠️ И `users.json`, и папка волта `/data/vaults/bob` лежат на `emptyDir` и
 **перезапуск пода не переживают**: после рестарта пользователя (и токен) придётся
@@ -660,6 +889,100 @@ node -e "fetch('http://127.0.0.1:3000/api/admin/reindex/status?jobId=JOB_ID',{he
 Индексация идёт через GigaChat-эмбеддинги, на большом волте это долго — следите за
 `filesProcessed` / `totalFiles` и за `errorCount`.
 
+### 6.4 Проверить, что гибрид реально работает
+
+Пустой ответ поиска и «работающий, но чисто плотный» поиск снаружи выглядят одинаково,
+поэтому после первой переиндексации стоит проверить обе ветви явно. Все однострочники —
+вкладка **Terminal** пода бэкенда, подставьте свой cv-токен вместо `cv-КЛЮЧ`.
+
+**Выберите термин, который плотный вектор размывает:** латиница, код ошибки, артикул,
+имя сервиса — то, что в русскоязычном тексте стоит редко и точечно (`SberOSC`,
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE`, номер договора). Дальше в примерах — `SberOSC`,
+замените на термин, который точно есть в ваших документах.
+
+**1. Лексическая ветвь (BM25).** Эмбеддер здесь не вызывается вовсе — если ответ
+пришёл, значит разреженный вектор `bm25` в коллекции есть и заполнен:
+
+```
+node -e "fetch('http://127.0.0.1:3000/api/vault/search/lexical',{method:'POST',headers:{Authorization:'Bearer cv-КЛЮЧ','Content-Type':'application/json'},body:JSON.stringify({query:'SberOSC',limit:5})}).then(r=>r.json()).then(d=>console.log(d.total,(d.results||[]).map(x=>x.path+' #'+x.chunk_index+' '+x.score.toFixed(3)).join(' | ')))"
+```
+
+**2. Плотная ветвь для сравнения.** Тот же термин через `/semantic` — обычно выдаёт
+«похожие по смыслу», но не тот самый абзац:
+
+```
+node -e "fetch('http://127.0.0.1:3000/api/vault/search/semantic',{method:'POST',headers:{Authorization:'Bearer cv-КЛЮЧ','Content-Type':'application/json'},body:JSON.stringify({query:'SberOSC',limit:5})}).then(r=>r.json()).then(d=>console.log((d.results||[]).map(x=>x.path+' '+x.score.toFixed(3)).join(' | ')))"
+```
+
+**3. Гибрид + parent-child.** Печатает по каждому хиту путь, начало `parent_id` и
+**длину** `section_text` (сам текст не выводим, чтобы не залить терминал):
+
+```
+node -e "fetch('http://127.0.0.1:3000/api/vault/search/hybrid',{method:'POST',headers:{Authorization:'Bearer cv-КЛЮЧ','Content-Type':'application/json'},body:JSON.stringify({query:'SberOSC',limit:5,group_by_section:true,section_max_chars:4000})}).then(r=>r.json()).then(d=>console.log((d.results||[]).map(x=>x.path+' parent='+(x.parent_id||'-').slice(0,8)+' section_text='+x.section_text.length).join(' | ')))"
+```
+
+Как читать результат:
+
+| Что видно | Что это значит |
+|-----------|----------------|
+| `/lexical` вернул непустой список, и нужный файл в нём выше, чем в `/semantic` | лексическая ветвь живёт, ради этого всё и делалось |
+| `/lexical` вернул `0` на термин, который точно есть в тексте | разреженного вектора в коллекции нет (старая схема) либо файл не проиндексирован. Смотрите warn `has no "bm25" sparse vector` в логах (раздел 5) и статус reindex (6.3) |
+| у **markdown**-хитов `section_text` **непустой** (обычно сотни-тысячи символов, максимум `section_max_chars`) | таблица `sections` заполнена, parent-child работает |
+| у **PDF/CSV**-хитов `section_text=0` и `parent=-` | **так и должно быть**: разделы извлекаются только из markdown, у остальных форматов их нет |
+| `section_text=0` **у всех** хитов, включая markdown | забыли `group_by_section:true` в запросе (без него поле всегда пустое) либо волт переиндексирован не этим образом |
+| `/hybrid` и `/semantic` дают идентичную выдачу на любой запрос | слияния не происходит — коллекция без `bm25`, гибрид тихо деградировал в плотный поиск |
+
+> `/lexical` честно возвращает пустоту на запрос из одних стоп-слов («что такое это») —
+> лексического сигнала там нет. Проверять надо редким термином, иначе тест ничего
+> не показывает.
+
+Заодно можно убедиться, что алиас на месте: однострочник из 3.5 с путём `/aliases`
+вместо `/collections` — `cognivault` должен указывать на `cognivault_v2`.
+
+### 6.5 Стоимость GigaChat при индексации
+
+Кроме эмбеддингов индексация теперь ходит в **chat/completions** GigaChat:
+
+- **один вызов на документ** — аннотация («о чём этот файл»), которая подклеивается
+  в начало каждого чанка этого файла перед эмбеддингом (`INDEX_DOC_SUMMARY`);
+- **плюс один вызов на каждую большую таблицу** — ту, которую чанкер разрезал на
+  группы строк; результат кладётся отдельной точкой, чтобы агрегатные вопросы
+  («сколько всего», «какие бывают») находили таблицу целиком (`INDEX_TABLE_SUMMARY`).
+  Таблица, поместившаяся в один чанк, вызова не делает.
+
+Аннотация **кэшируется в SQLite** (`doc_summaries`, ключ — `content_hash` файла):
+повторная индексация неизменённого файла вызовов не делает, а изменённого — делает
+ровно один. Описания таблиц не кэшируются: они пересчитываются при каждой обработке
+файла с большой таблицей.
+
+⚠️ Кэш лежит в `/data/index.db`, а `/data` — `emptyDir`. **После перезапуска пода
+кэша нет**, и полная переиндексация снова платит за аннотацию каждого документа.
+
+Считать вызовы удобно по логам: строка `Summary generated`, поле `what`
+(`doc_summary` / `table_summary`) и сквозной счётчик `summaryCallCount` — он растёт
+с момента старта пода. Сбой вызова **нефатален**: в лог уходит
+`Summary call failed — skipping`, чанк индексируется без аннотации.
+
+**Как выключить.** В `cognivault-config`: `INDEX_DOC_SUMMARY: "false"` и/или
+`INDEX_TABLE_SUMMARY: "false"`, затем **Restart rollout** (ConfigMap сам под не
+перезапускает). Если выключены оба — chat-клиент вообще не создаётся, обращений к
+chat/completions при индексации не будет.
+
+**Чем это грозит.** Аннотация вшита в текст, который эмбеддится и лежит в payload,
+поэтому:
+
+- смена любого из двух флагов действует **только на заново проиндексированные файлы** —
+  чтобы применить её ко всему волту, нужна полная переиндексация (6.3);
+- без `INDEX_DOC_SUMMARY` чанк из середины длинного документа теряет контекст «о чём
+  вообще документ» — заметно хуже находятся куски, где тема названа только в начале файла;
+- без `INDEX_TABLE_SUMMARY` большая таблица представлена только группами строк:
+  вопрос «сколько всего X в таблице» перестаёт находить её целиком.
+
+Суммаризация работает только при `EMBEDDING_PROVIDER: "gigachat"` (авторизует её тот
+же клиентский сертификат). Если сертификат не задан, а флаги включены — в лог уходит
+`Index summaries enabled but GigaChat certificate is missing`, и аннотации молча
+отключаются.
+
 ---
 
 ## 7. Внешний вход
@@ -667,24 +990,31 @@ node -e "fetch('http://127.0.0.1:3000/api/admin/reindex/status?jobId=JOB_ID',{he
 Наружу выставляется **только UI**. REST API остаётся внутренним (ClusterIP) — морда
 ходит в него по `http://cognivault:3000`.
 
-Ingress **`oasis-cognivault-ingress` уже существует в кластере** (создан платформой)
-и уже настроен правильно:
+Нужное состояние объекта `oasis-cognivault-ingress` — одно правило:
 
 ```
 ingressClassName: nginx
 host cognivault-ui.apps.bcayrqks.k8s.delta.sbrf.ru  →  cognivault-ui:8787
 ```
 
-**При штатном обновлении его трогать не надо.** `06-ingress.yaml` импортируется только
-при развёртывании окружения с нуля. Сначала всегда смотрите фактическое состояние:
+**Первым делом посмотрите фактическое состояние:**
 `/k8s/ns/ci05490208-oasis-cognivault/ingresses/oasis-cognivault-ingress/yaml`.
+
+| Что там | Что делать |
+|---------|------------|
+| объекта нет (чистый namespace) | импортировать `06-ingress.yaml` — он и создаёт нужный объект с одним правилом |
+| объект есть и правило ровно одно, на `cognivault-ui:8787` | ничего не делать |
+| объект есть, но правил два (второе — `qdrant.apps…`) | убрать лишнее правило, раздел 7.1 |
+
+Импортировать `06-ingress.yaml` поверх уже существующего объекта тоже можно — он
+приводит его к состоянию с одним правилом.
 
 Проверка: открыть `http://cognivault-ui.apps.bcayrqks.k8s.delta.sbrf.ru/` в браузере,
 залогиниться cv-токеном из шага 6.1.
 
 ### 7.1 Убрать второе правило — публичный Qdrant
 
-У существующего объекта есть **второе правило**: host
+У объекта, доставшегося от прежней инсталляции, есть **второе правило**: host
 `qdrant.apps.bcayrqks.k8s.delta.sbrf.ru` → `qdrant:6333`. Его надо удалить:
 
 1. **У внутрикластерного Qdrant нет никакой аутентификации.** Пока это правило живо,
@@ -737,8 +1067,11 @@ host cognivault-ui.apps.bcayrqks.k8s.delta.sbrf.ru  →  cognivault-ui:8787
 
 - меняется модель эмбеддингов или `EMBEDDING_DIMENSIONS` (нужна новая коллекция
   Qdrant — при несовпадении размерности приложение падает на старте);
-- меняется схема коллекции / стратегия чанкинга (планируется в Волне 3: BM25 и
-  sparse-векторы);
+- меняется схема коллекции / стратегия чанкинга. В образе `sha-fd27f9f` это уже
+  произошло (именованные векторы `dense` + `bm25`, `cognivault_v2` + алиас, таблицы
+  по группам строк) — см. 3.6;
+- меняются `INDEX_DOC_SUMMARY` / `INDEX_TABLE_SUMMARY`: аннотация вшита в
+  проиндексированный текст, старые чанки сами не обновятся (6.5);
 - откатились на внутрикластерный Qdrant на emptyDir и он перезапустился;
 - **перезапустился под бэкенда** — `/data` эфемерный, волт и индекс потеряны;
   сначала залить документы обратно, потом reindex (раздел 10.2);
@@ -748,7 +1081,9 @@ host cognivault-ui.apps.bcayrqks.k8s.delta.sbrf.ru  →  cognivault-ui:8787
 
 - меняется `GIGACHAT_QUERY_INSTRUCTION` — `EmbeddingsGigaR` асимметрична, инструкцию
   несёт только поисковый запрос, документы её не видят;
-- меняются любые `RAG_*` у UI, промпты, температура, лимиты контекста;
+- меняются любые `RAG_*` у UI, промпты, температура, лимиты контекста — это ручки
+  запроса, не индекса (в том числе `RAG_RERANK_CANDIDATES`: он лишь просит у бэкенда
+  больше кандидатов). Помните, что пользователь мог переопределить их в морде — 4.1;
 - меняются таймауты, ретраи, размеры батчей, `LOG_LEVEL`;
 - меняются `QDRANT_CA_PATH` / `QDRANT_CERT_PATH` / `QDRANT_VERIFY_SSL` — это транспорт,
   на содержимое векторов он не влияет;
@@ -782,7 +1117,9 @@ TLS-настройки (`QDRANT_*`) тоже — перехват настрои
 При **каждом** перезапуске или перепланировке пода бэкенда теряются:
 
 - **`/data/users.json`** — то есть **все cv-токены**; пользователей надо заводить заново;
-- **SQLite-индекс `/data/index.db`** — состояние индексации;
+- **SQLite-индекс `/data/index.db`** — состояние индексации, разделы (`sections`)
+  и кэш аннотаций документов (`doc_summaries`, то есть заново оплаченные вызовы
+  GigaChat при переиндексации, 6.5);
 - **содержимое волтов `/data/vaults/*`** — **сами документы**.
 
 Векторы лежат во внешнем Qdrant и рестарт бэкенда переживают, но пользы от этого
@@ -790,8 +1127,10 @@ TLS-настройки (`QDRANT_*`) тоже — перехват настрои
 (Если откатились на внутрикластерный Qdrant из `99-qdrant-inhouse.yaml`, он тоже на
 `emptyDir` — тогда теряются и векторы.)
 
-Тот же диагноз у UI: `/data` в `05-ui.yaml` — `emptyDir`, история чатов и
-`rag_log.jsonl` перезапуск не переживают.
+Тот же диагноз у UI: `/data` в `05-ui.yaml` — `emptyDir`, поэтому история чатов,
+`rag_log.jsonl` и пользовательские настройки
+(`/data/users/<хеш токена>/config.json` — модель, ручки RAG, промпты) перезапуск
+не переживают: настройки откатываются к значениям из ConfigMap (4.1).
 
 **Практический вывод:** держите исходники заметок у себя локально, а cv-токен
 считайте одноразовым — после любого рестарта он невалиден.
@@ -801,8 +1140,14 @@ TLS-настройки (`QDRANT_*`) тоже — перехват настрои
 1. **Под поднялся и подключился к Qdrant.** Страница Deployment `cognivault` — готовность;
    под → **Logs** — ждём `Qdrant client configured`, `Connected to Qdrant`,
    `Server listening`.
-2. **Завести пользователя заново** — под → **Terminal**, выдаётся **НОВЫЙ** cv-токен,
-   сохраните его:
+2. **Завести пользователя заново** — под → **Terminal**. Каталог волта тоже исчез,
+   поэтому сначала создаём его, иначе CLI откажет:
+
+   ```
+   mkdir -p /data/vaults/bob
+   ```
+
+   Выдаётся **НОВЫЙ** cv-токен, сохраните его:
 
    ```
    node dist/cli/index.js add-local-user bob --vault-path /data/vaults/bob
@@ -823,8 +1168,14 @@ TLS-настройки (`QDRANT_*`) тоже — перехват настрои
    node -e "fetch('http://127.0.0.1:3000/api/admin/reindex/status?jobId=JOB_ID',{headers:{Authorization:'Bearer cv-КЛЮЧ'}}).then(r=>r.text()).then(console.log)"
    ```
 
+6. **Проверить гибрид** — раздел 6.4.
+
 Новый cv-токен нужно ввести в UI заново (шаг 7). Подробности по каждому шагу —
 раздел 6.
+
+> Векторы во внешнем Qdrant рестарт пережили, но `/data/index.db` — нет, поэтому
+> бэкенд считает волт непроиндексированным и переиндексирует всё заново, включая
+> платные аннотации документов (кэш `doc_summaries` лежал в том же файле — 6.5).
 
 ### 10.3 Чем это лечится
 
@@ -872,9 +1223,11 @@ spec:
 - **Внешний Qdrant должен быть доступен на старте** — иначе бэкенд не поднимется.
   Проверять связность до выкатки (шаг 3.2).
 - **`GIGACHAT_VERIFY_SSL: "false"`** — временный escape hatch, пока нет CA-бандла.
-- **Внутрикластерный Qdrant — v1.3.0**, единственная версия, прошедшая скан SberOSC.
-  Для Волны 3 (гибридный поиск на стороне Qdrant) понадобится 1.16.3 — её надо
-  заранее провести через скан.
+- **Внутрикластерный Qdrant из `99-qdrant-inhouse.yaml` — v1.3.0** (единственная
+  версия, прошедшая скан SberOSC) и как путь отката **больше не годится**: гибридный
+  поиск идёт через Query API и разреженные векторы, которых в 1.3.0 нет — бэкенд
+  на такой коллекции не поднимется. Чтобы этот откат снова стал рабочим, надо
+  провести через скан 1.16.3 и обновить тег в манифесте.
 - **OpenShift-специфика.** Если когда-нибудь появится доступ к OpenShift-кластеру,
   в нём вместо Ingress используются `Route`, а сборка — `BuildConfig`/`ImageStream`.
   В этом кластере (ванильный Kubernetes + nginx Ingress) они **не применяются**.

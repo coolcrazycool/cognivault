@@ -27,9 +27,12 @@ spec:
   resolution: DNS
   location: MESH_EXTERNAL
 ---
-# Внешний Qdrant (DropApp). Перечислены ОБА узла: QDRANT_URL указывает на один,
-# второй — ручной резерв (клиентской балансировки нет). Порт 6433 — реверс-прокси
-# с HTTP Basic перед Qdrant.
+# Внешний Qdrant (DropApp) — Platform V Vector DB. Перечислены ОБА узла:
+# QDRANT_URL указывает на один, второй — ручной резерв (клиентской балансировки
+# нет). Порт 6433 обслуживает и саму СУБД, и выдачу JWT на /auth, поэтому
+# отдельная запись под IAM не нужна. Если на стенде окажется Vector DB < 2.0.0,
+# где IAM вынесен на 6533, сюда придётся добавить и этот порт (вместе с
+# QDRANT_AUTH_URL в 02-configmap-backend.yaml).
 apiVersion: networking.istio.io/v1beta1
 kind: ServiceEntry
 metadata:

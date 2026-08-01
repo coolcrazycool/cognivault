@@ -1,3 +1,15 @@
+> ## ⚠️ УСТАРЕЛО
+>
+> Актуальный способ развёртывания — набор манифестов
+> **[`deploy/dropapp/`](dropapp/README.md)** (бэкенд + UI + Service + Ingress +
+> egress, пины образов `sha-fd27f9f`). Разворачивайте окружение по нему.
+>
+> Этот файл описывает bare-metal-установку на systemd и оставлен **для истории**:
+> он не знает ни про UI (`cognivault-ui/`), ни про внешний Qdrant Platform V
+> Vector DB (mTLS + JWT от IAM), ни про переменные окружения, добавленные
+> последними волнами. Ничего отсюда не применяйте, не сверившись
+> с `deploy/dropapp/`.
+
 # Deploying CogniVault without Docker
 
 Bare-metal deployment on a Linux server using **systemd**, with **Qdrant as a native
