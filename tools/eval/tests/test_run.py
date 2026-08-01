@@ -246,6 +246,76 @@ def test_hit_degrades_to_section_then_file_and_says_so():
 
 
 # --------------------------------------------------------------------------- #
+# alt_source_paths: страницы-соседи, которые тоже отвечают на вопрос
+# --------------------------------------------------------------------------- #
+
+
+def test_alt_source_path_counts_as_hit_at_file_granularity():
+    """Чанк альтернативной страницы — попадание, а не промах."""
+    row = {"source_path": "a.md", "alt_source_paths": ["b.md"]}
+    assert retrieval_hit(row, [{"path": "b.md"}]) == (True, "file")
+    assert retrieval_hit(row, [{"path": "c.md"}]) == (False, "file")
+    # каноническая страница по-прежнему засчитывается сама по себе
+    assert retrieval_hit(row, [{"path": "a.md"}]) == (True, "file")
+
+
+def test_alt_source_path_counts_as_hit_at_section_granularity():
+    """Раздел размечен относительно source_path — к альтернативе он неприменим,
+    поэтому любой чанк альтернативной страницы засчитывается целиком."""
+    row = {
+        "source_path": "a.md",
+        "section_path": "Док > Раздел",
+        "alt_source_paths": ["b.md"],
+    }
+    # альтернатива без канонической страницы в выдаче
+    assert retrieval_hit(row, [{"path": "b.md", "section_path": "Другой док"}]) == (
+        True,
+        "section",
+    )
+    # каноническая страница попала НЕ ТЕМ разделом, но альтернатива есть
+    sources = [
+        {"path": "a.md", "section_path": "Док > Другой"},
+        {"path": "b.md", "section_path": "Что угодно"},
+    ]
+    assert retrieval_hit(row, sources) == (True, "section")
+    # ни правильного раздела, ни альтернативы — промах, как и раньше
+    assert retrieval_hit(row, [{"path": "a.md", "section_path": "Док > Другой"}]) == (
+        False,
+        "section",
+    )
+
+
+def test_alt_source_path_counts_as_hit_at_chunk_granularity():
+    row = {
+        "source_path": "a.md",
+        "source_chunk_index": 3,
+        "alt_source_paths": ["b.md"],
+    }
+    sources = [
+        {"path": "a.md", "depth": "section", "chunk_indexes": [0, 1]},
+        {"path": "b.md", "depth": "section", "chunk_indexes": [7]},
+    ]
+    assert retrieval_hit(row, sources) == (True, "chunk")
+    assert retrieval_hit(
+        row, [{"path": "a.md", "depth": "section", "chunk_indexes": [0]}]
+    ) == (False, "chunk")
+
+
+def test_alt_source_paths_absent_empty_or_malformed_change_nothing():
+    """Строки без поля (старый набор) и с битой разметкой работают как раньше."""
+    assert retrieval_hit({"source_path": "a.md"}, [{"path": "b.md"}]) == (False, "file")
+    row_empty = {"source_path": "a.md", "alt_source_paths": []}
+    assert retrieval_hit(row_empty, [{"path": "b.md"}]) == (False, "file")
+    row_bad = {"source_path": "a.md", "alt_source_paths": "b.md"}
+    assert retrieval_hit(row_bad, [{"path": "b.md"}]) == (False, "file")
+    row_junk = {"source_path": "a.md", "alt_source_paths": [None, 42, "  "]}
+    assert retrieval_hit(row_junk, [{"path": "b.md"}]) == (False, "file")
+    # ловушка без source_path не начинает мериться из-за одних альтернатив
+    trap = {"source_path": None, "alt_source_paths": ["b.md"]}
+    assert retrieval_hit(trap, [{"path": "b.md"}]) == (None, "none")
+
+
+# --------------------------------------------------------------------------- #
 # Ветка отказа
 # --------------------------------------------------------------------------- #
 

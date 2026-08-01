@@ -615,6 +615,19 @@ def _log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def alt_source_paths(row: dict[str, Any]) -> list[str]:
+    """Альтернативные источники golden-пары (``alt_source_paths``), очищенные.
+
+    Поле необязательное: строки без него (или со старым форматом набора)
+    обязаны работать как раньше. Не-списки и пустые/нестроковые элементы
+    молча отбрасываются — битая разметка не должна ронять прогон.
+    """
+    raw = row.get("alt_source_paths")
+    if not isinstance(raw, list):
+        return []
+    return [p.strip() for p in raw if isinstance(p, str) and p.strip()]
+
+
 def retrieval_hit(
     row: dict[str, Any], sources: Sequence[dict[str, Any]]
 ) -> tuple[bool | None, str]:
@@ -635,12 +648,25 @@ def retrieval_hit(
        помеченное как таковое (оно завышает hit — файл мог попасть другим
        фрагментом).
 
+    ``alt_source_paths`` — страницы, которые ТОЖЕ отвечают на вопрос (в корпусе
+    есть соседи с пересекающимся содержимым: тематическая страница и её
+    «Пользовательская инструкция», реестр, дублирующий строку другого реестра).
+    Любой чанк такой страницы засчитывается как попадание НА ЛЮБОМ уровне
+    лестницы: раздел и чанк размечены относительно ``source_path``, к
+    альтернативе они неприменимы, а сама альтернатива принята в набор целиком —
+    иначе корректный ретрив читался бы как промах и смещал тюнинг.
+    ``granularity`` при этом остаётся уровнем разметки пары (чем ЕЁ можно было
+    мерить), как и раньше, — отчёт о деградации гранулярности не меняется.
+
     ``None`` — у golden-пары нет ``source_path`` (например, вопрос-отказ),
     проверять нечего.
     """
     expected_path = str(row.get("source_path", "") or "")
     if not expected_path:
         return None, "none"
+
+    alt_paths = alt_source_paths(row)
+    alt_hit = any(str(s.get("path", "") or "") in alt_paths for s in sources)
 
     own = [s for s in sources if str(s.get("path", "") or "") == expected_path]
     if not own:
@@ -649,7 +675,7 @@ def retrieval_hit(
             if row.get("source_chunk_index") is not None
             else ("section" if row.get("section_path") else "file")
         )
-        return False, granularity
+        return alt_hit, granularity
 
     expected_chunk = row.get("source_chunk_index")
     if isinstance(expected_chunk, int):
@@ -662,7 +688,7 @@ def retrieval_hit(
                 indexes = [single] if isinstance(single, int) else []
             if expected_chunk in indexes:
                 return True, "chunk"
-        return False, "chunk"
+        return alt_hit, "chunk"
 
     expected_section = str(row.get("section_path", "") or "").strip()
     if expected_section:
@@ -671,7 +697,7 @@ def retrieval_hit(
                 return True, "section"
             if str(source.get("section_path", "") or "").strip() == expected_section:
                 return True, "section"
-        return False, "section"
+        return alt_hit, "section"
 
     return True, "file"
 
@@ -705,6 +731,7 @@ async def run_sample(
         "question": question,
         "ground_truth": ground_truth,
         "source_path": row.get("source_path"),
+        "alt_source_paths": alt_source_paths(row),
         "source_chunk_index": row.get("source_chunk_index"),
         "section_path": row.get("section_path"),
         "expected_refusal": expects_refusal,

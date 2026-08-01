@@ -175,11 +175,17 @@ def build_rows(
         if expected_refusal:
             ground_truth = REFUSAL_GROUND_TRUTH
             source_path = section_path = chunk_index = None
+            alt_source_paths: list[str] = []
         else:
             ground_truth = answer or prev.get("ground_truth") or ""
             source_path = prev.get("source_path")
             section_path = prev.get("section_path")
             chunk_index = prev.get("source_chunk_index")
+            # Альтернативные источники размечаются так же дорого, как source_path
+            # (разбором корпуса), и обязаны переживать регенерацию тем же путём.
+            # Пустой список — осознанное «альтернатив нет», а не отсутствие поля.
+            alt = prev.get("alt_source_paths")
+            alt_source_paths = list(alt) if isinstance(alt, list) else []
 
         rows.append(
             {
@@ -189,6 +195,7 @@ def build_rows(
                 "kind": _KIND_BY_CATEGORY.get(category, "factual"),
                 "category": category,
                 "source_path": source_path,
+                "alt_source_paths": alt_source_paths,
                 "section_path": section_path,
                 "source_chunk_index": chunk_index,
                 "expected_refusal": expected_refusal,
