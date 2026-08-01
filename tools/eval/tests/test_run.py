@@ -20,18 +20,26 @@ from gen_golden import BackendError  # noqa: E402
 
 from run import (  # noqa: E402
     APPROXIMATE_WARNING,
+    CATEGORY_KEY,
     DEFAULT_UI_URL,
+    FALSE_REFUSAL_KEY,
+    FALSE_REFUSAL_RATE_KEY,
     GRANULARITY_WARNING,
     REFUSAL_KEY,
     REPORT_DISCLAIMER,
     RETRIEVAL_KEY,
+    UNCATEGORIZED,
     ChatClient,
     RagLogIndex,
     build_parser,
     build_report,
+    category_of,
+    category_sets,
     collect_chat,
     context_from_log,
     dispersion,
+    false_refusal_rate,
+    group_by_category,
     is_refusal,
     load_golden,
     paired_delta,
@@ -783,3 +791,246 @@ def test_run_params_flag_a_mixed_run():
     ]
     report = _report("x", 0.8, samples=rows)
     assert report["run_params"]["ui_settings"] == "(смешанные)"
+
+
+# --------------------------------------------------------------------------- #
+# Категория вопроса: сквозное поле golden-set → сэмпл → разрез отчёта
+# --------------------------------------------------------------------------- #
+
+REFUSAL_SSE = (
+    'event: meta\ndata: {"chat_id": "20260731-9"}\n\n'
+    'event: token\ndata: {"text": "В доступных мне документах ответа на этот '
+    'вопрос не нашлось."}\n\n'
+    'event: done\ndata: {"finish_reason": "stop"}\n\n'
+)
+
+
+def test_category_of_defaults_absent_and_blank_to_one_bucket():
+    """Старый golden-set поля не знает — такие пары обязаны продолжать работать."""
+    assert category_of({CATEGORY_KEY: "процессы"}) == "процессы"
+    assert category_of({CATEGORY_KEY: "  отпуска  "}) == "отпуска"
+    assert category_of({}) == UNCATEGORIZED
+    assert category_of({CATEGORY_KEY: None}) == UNCATEGORIZED
+    assert category_of({CATEGORY_KEY: "   "}) == UNCATEGORIZED
+
+
+def test_run_sample_carries_the_category_into_the_report_row():
+    row = {
+        "id": "s1",
+        "question": "вопрос?",
+        "ground_truth": "эталон.",
+        CATEGORY_KEY: "регламенты",
+    }
+    sample, _judge = _run_one(row, rag_log=None)
+    assert sample[CATEGORY_KEY] == "регламенты"
+
+    row.pop(CATEGORY_KEY)
+    sample, _judge = _run_one(row, rag_log=None)
+    assert sample[CATEGORY_KEY] == UNCATEGORIZED
+
+
+def test_group_by_category_splits_metrics_and_counts_failures():
+    rows = [
+        _sample("a1", 0.8, category="процессы"),
+        _sample("a2", 0.4, category="процессы"),
+        _sample("b1", 0.0, category="регламенты", failed=True, error="HTTP 500"),
+        _sample("c1", 0.6),  # без категории
+    ]
+    groups = group_by_category(rows)
+
+    assert sorted(groups) == [UNCATEGORIZED, "процессы", "регламенты"]
+    assert groups["процессы"]["n"] == 2
+    assert groups["процессы"]["n_failed"] == 0
+    assert groups["процессы"]["faithfulness_ru"] == 0.6
+    # Упавшая пара считается в n, но её нули в среднее не идут.
+    assert groups["регламенты"] == {
+        "n": 1,
+        "n_failed": 1,
+        "faithfulness_ru": None,
+        "answer_relevancy_ru": None,
+        "context_precision": None,
+        "context_recall": None,
+        RETRIEVAL_KEY: None,
+        REFUSAL_KEY: None,
+        FALSE_REFUSAL_RATE_KEY: None,
+    }
+    assert groups[UNCATEGORIZED]["faithfulness_ru"] == 0.6
+
+
+def test_report_skips_the_category_table_when_nobody_set_a_category():
+    """Golden-set без категорий: одна строка `unclassified` дублировала бы средние."""
+    report = _report("x", 0.0, samples=[_sample("s1", 0.8), _sample("s2", 0.4)])
+    assert set(report["by_category"]) == {UNCATEGORIZED}  # в JSON разрез есть
+    assert "## По категориям" not in render_report_md(report)  # в markdown — шума нет
+    assert "## По категориям" not in render_compare_md(report, report)
+
+
+def test_report_renders_a_category_table_sorted_by_name():
+    rows = [
+        _sample("a1", 0.8, category="процессы"),
+        _sample("b1", 0.4, category="алгоритмы"),
+    ]
+    report = _report("x", 0.0, samples=rows)
+    assert set(report["by_category"]) == {"процессы", "алгоритмы"}
+
+    text = render_report_md(report)
+    body = text.split("## По категориям", 1)[1]
+    assert body.index("| алгоритмы |") < body.index("| процессы |")
+    # …и разрез стоит ПОСЛЕ общих средних, но ДО таблицы по парам.
+    assert text.index("## Средние значения") < text.index("## По категориям")
+    assert text.index("## По категориям") < text.index("## По парам")
+
+
+# --------------------------------------------------------------------------- #
+# Пары-ловушки не портят судейские средние
+# --------------------------------------------------------------------------- #
+
+
+def test_refusal_rows_leave_the_judge_averages_and_get_their_own_bucket():
+    """Правильный отказ получал 0 за answer_relevancy и ронял общее среднее."""
+    rows = [
+        _sample("q1", 0.8),
+        _sample("t1", 0.0, expected_refusal=True, **{REFUSAL_KEY: True}),
+        _sample("t2", 0.0, expected_refusal=True, **{REFUSAL_KEY: True}),
+    ]
+    report = _report("x", 0.0, samples=rows)
+
+    assert report["aggregate"]["faithfulness_ru"] == 0.8  # не 0.267
+    assert report["aggregate_refusal"]["faithfulness_ru"] == 0.0  # но и не потеряны
+    assert report["buckets"] == {"answerable": 1, "refusal": 2}
+    assert report["coverage"]["faithfulness_ru"] == 1
+    assert report["coverage_refusal"]["faithfulness_ru"] == 2
+    assert report["dispersion"]["faithfulness_ru"]["n"] == 1
+    # Ветка отказа считается по-прежнему.
+    assert report["aggregate"][REFUSAL_KEY] == 1.0
+
+
+def test_report_md_states_the_size_of_both_buckets():
+    """39 вопросов против 30 не должны сравниваться незаметно."""
+    rows = [
+        _sample("q1", 0.8),
+        _sample("t1", 0.0, expected_refusal=True, **{REFUSAL_KEY: True}),
+    ]
+    text = render_report_md(_report("x", 0.0, samples=rows))
+    assert "отвечаемых пар: 1, пар-ловушек `expected_refusal`: 1" in text
+    assert "ТОЛЬКО по отвечаемым парам (n=1)" in text
+    assert "(n=2) вынесены" not in text  # n ловушек — своё число
+    assert "Пары-ловушки `expected_refusal` (1)" in text
+
+
+# --------------------------------------------------------------------------- #
+# Ложный отказ: отвечаемый вопрос, на который ассистент зря не ответил
+# --------------------------------------------------------------------------- #
+
+
+def test_run_sample_marks_a_false_refusal_only_on_answerable_rows():
+    answerable_row = {"id": "q1", "question": "вопрос?", "ground_truth": "эталон."}
+    sample, _judge = _run_one(answerable_row, rag_log=None, body=REFUSAL_SSE)
+    assert sample[REFUSAL_KEY] is True
+    assert sample[FALSE_REFUSAL_KEY] is True
+
+    trap = dict(answerable_row, expected_refusal=True)
+    sample, _judge = _run_one(trap, rag_log=None, body=REFUSAL_SSE)
+    assert sample[REFUSAL_KEY] is True
+    assert sample[FALSE_REFUSAL_KEY] is None  # тут отказ и ожидался — мерить нечего
+
+    sample, _judge = _run_one(answerable_row, rag_log=None, body=SSE_BODY)
+    assert sample[FALSE_REFUSAL_KEY] is False
+
+
+def test_false_refusal_rate_is_computed_over_answerable_rows_only():
+    rows = [
+        _sample("q1", 0.8, **{FALSE_REFUSAL_KEY: True}),
+        _sample("q2", 0.8, **{FALSE_REFUSAL_KEY: False}),
+        # Ловушки в знаменатель не входят, хотя отказ там и был.
+        _sample(
+            "t1",
+            0.8,
+            expected_refusal=True,
+            **{REFUSAL_KEY: True, FALSE_REFUSAL_KEY: None},
+        ),
+        # Как и упавшие пары.
+        _sample(
+            "b1", 0.8, failed=True, error="HTTP 500", **{FALSE_REFUSAL_KEY: True}
+        ),
+    ]
+    assert false_refusal_rate(rows) == 0.5
+    assert false_refusal_rate([]) is None
+
+    report = _report("x", 0.0, samples=rows)
+    assert report["aggregate"][FALSE_REFUSAL_RATE_KEY] == 0.5
+    text = render_report_md(report)
+    assert "меньше — лучше" in text
+    assert f"| {FALSE_REFUSAL_RATE_KEY} ↓" in text
+
+
+def test_compare_treats_a_rising_false_refusal_rate_as_a_regression():
+    """Рост доли ложных отказов — регрессия, даже что число «выросло»."""
+    good = [_sample(f"s{i}", 0.5, **{FALSE_REFUSAL_KEY: False}) for i in range(4)]
+    bad = [_sample(f"s{i}", 0.5, **{FALSE_REFUSAL_KEY: True}) for i in range(4)]
+    text = render_compare_md(_report("a", 0.0, samples=good), _report("b", 0.0, samples=bad))
+
+    row = [
+        line for line in text.splitlines() if line.startswith(f"| {FALSE_REFUSAL_RATE_KEY}")
+    ][0]
+    assert "+1.000" in row
+    assert row.endswith("▼ |")  # знак показывает КАЧЕСТВО, а не направление числа
+    assert "меньше — лучше" in row
+
+    # …и обратно: падение доли — улучшение.
+    back = render_compare_md(_report("a", 0.0, samples=bad), _report("b", 0.0, samples=good))
+    row = [
+        line for line in back.splitlines() if line.startswith(f"| {FALSE_REFUSAL_RATE_KEY}")
+    ][0]
+    assert "-1.000" in row and row.endswith("▲ |")
+
+
+# --------------------------------------------------------------------------- #
+# Диф: разрез по категориям и совместимость со старыми отчётами
+# --------------------------------------------------------------------------- #
+
+
+def test_compare_lists_categories_present_in_only_one_run():
+    """Разъехавшийся набор категорий — предупреждение, а не молчаливый пропуск."""
+    report_a = _report(
+        "a",
+        0.0,
+        samples=[_sample("s1", 0.5, category="процессы"), _sample("s2", 0.5, category="старая")],
+    )
+    report_b = _report(
+        "b",
+        0.0,
+        samples=[_sample("s1", 0.9, category="процессы"), _sample("s3", 0.9, category="новая")],
+    )
+    assert category_sets(report_a, report_b) == {
+        "common": ["процессы"],
+        "only_a": ["старая"],
+        "only_b": ["новая"],
+    }
+
+    text = render_compare_md(report_a, report_b)
+    assert "| процессы | 1→1 | +0.400 ▲" in text
+    assert "набор категорий между прогонами изменился" in text
+    assert "`старая`" in text and "`новая`" in text
+
+
+def test_compare_does_not_crash_on_a_report_from_the_old_harness():
+    """Старый отчёт без by_category/aggregate_refusal/false_refusal_rate."""
+    old = _report("old", 0.0, samples=[_sample("s1", 0.5), _sample("s2", 0.5)])
+    for key in ("by_category", "aggregate_refusal", "buckets", "coverage_refusal"):
+        old.pop(key)
+    old["aggregate"].pop(FALSE_REFUSAL_RATE_KEY)
+    for sample in old["samples"]:
+        sample.pop(CATEGORY_KEY, None)
+        sample.pop(FALSE_REFUSAL_KEY, None)
+    new = _report("new", 0.0, samples=[_sample("s1", 0.9, category="процессы")])
+
+    text = render_compare_md(old, new)
+    assert "сделан прежней версией харнесса" in text
+    assert "`by_category`" in text and "`aggregate_refusal`" in text
+    # Категории второго прогона не выдаются за «пропавшие» в первом.
+    assert "нет ключа `by_category`" in text
+    assert "набор категорий между прогонами изменился" not in text
+    assert f"| {FALSE_REFUSAL_RATE_KEY} ↓ (меньше — лучше) | — |" in text
+    # Старый отчёт и сам по себе всё ещё рендерится.
+    assert "# RAG eval — прогон `old`" in render_report_md(old)

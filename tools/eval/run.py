@@ -12,8 +12,12 @@
    недоступен, включается фолбэк: текст восстанавливается из метаданных через
    ``GET /api/vault/content``, и весь прогон помечается ПРИБЛИЖЁННЫМ;
 4. считаются четыре судейские метрики (``metrics.py``); упавшие сэмплы
-   в средние НЕ попадают и выносятся в отчёт отдельной строкой;
-5. пишутся ``report-<label>.json`` и ``report-<label>.md``.
+   в средние НЕ попадают и выносятся в отчёт отдельной строкой; пары-ловушки
+   ``expected_refusal`` тоже вынесены — их средние живут в
+   ``aggregate_refusal``, а их ветку меряют ``refusal_ok`` и обратный к нему
+   ``false_refusal_rate``;
+5. результаты режутся по ``category`` golden-пары (``by_category``);
+6. пишутся ``report-<label>.json`` и ``report-<label>.md``.
 
 Сравнение прогонов::
 
@@ -105,8 +109,44 @@ GRANULARITY_WARNING = (
     "`source_chunk_index` в `golden.jsonl` по выдаче `/api/search`."
 )
 
+BUCKET_NOTE = (
+    "**Четыре судейские метрики посчитаны ТОЛЬКО по отвечаемым парам "
+    "(n={answerable}); пары-ловушки `expected_refusal` (n={refusal}) вынесены "
+    "в отдельную таблицу ниже.** Иначе правильный отказ тянул бы средние вниз: "
+    "судья `answer_relevancy_ru` намеренно ставит 0 уклончивому ответу, и общее "
+    "число зависело бы от ДОЛИ ловушек в наборе, а не от качества. Следствие: "
+    "средние двух прогонов сравнимы, только если совпадают ОБА числа — "
+    "сверьте их перед `--compare`."
+)
+
+FALSE_REFUSAL_NOTE = (
+    "`false_refusal_rate` — **меньше лучше**, это единственное такое число в "
+    "отчёте. Оно ловит обратную ошибку: у вопроса ответ есть, а ассистент "
+    "ответил «в источниках ничего нет». Обычно вырастает от закручивания "
+    "порога грейдера — того самого движения, которым «улучшают» `refusal_ok`."
+)
+
 RETRIEVAL_KEY = "retrieval_hit"
 REFUSAL_KEY = "refusal_ok"
+#: Пер-сэмпловый флаг: отвечаемый вопрос, на который ассистент зря отказался
+#: отвечать (``None`` у пар, где отказ и ожидался — там мерить нечего).
+FALSE_REFUSAL_KEY = "false_refusal"
+#: Его доля в агрегатах. МЕНЬШЕ — ЛУЧШЕ, в отличие от всех остальных чисел отчёта.
+FALSE_REFUSAL_RATE_KEY = "false_refusal_rate"
+
+#: Поле golden-пары с ручной категорией вопроса и заглушка для пар без неё.
+CATEGORY_KEY = "category"
+UNCATEGORIZED = "unclassified"
+
+
+def category_of(row: dict[str, Any]) -> str:
+    """Категория golden-пары (или сэмпла отчёта); пустая → ``unclassified``.
+
+    Поле необязательное: golden-set, сгенерированный `gen_golden.py`, его не
+    знает вовсе, и такие строки обязаны продолжать работать — они просто
+    сходятся в одну корзину.
+    """
+    return str(row.get(CATEGORY_KEY, "") or "").strip() or UNCATEGORIZED
 
 #: Формулировки отказа («в источниках ответа нет») — ветка, которую меряют
 #: golden-пары с ``expected_refusal``. Держать в согласии с `rag.SYSTEM_PROMPT`.
@@ -660,6 +700,8 @@ async def run_sample(
     sample: dict[str, Any] = {
         "id": row.get("id"),
         "kind": row.get("kind"),
+        # Ручная категория из golden-set — по ней строится разрез отчёта.
+        CATEGORY_KEY: category_of(row),
         "question": question,
         "ground_truth": ground_truth,
         "source_path": row.get("source_path"),
@@ -674,6 +716,7 @@ async def run_sample(
         RETRIEVAL_KEY: None,
         "retrieval_granularity": "none",
         REFUSAL_KEY: None,
+        FALSE_REFUSAL_KEY: None,
         "metrics": {},
         "error": "",
         "failed": False,
@@ -716,7 +759,11 @@ async def run_sample(
     sample["sources"] = resolved.sources or outcome.sources
     sample["context_count"] = len(resolved.contexts)
     sample["context_origin"] = resolved.origin
-    sample[REFUSAL_KEY] = is_refusal(outcome.answer, finish_reason=outcome.finish_reason)
+    refused = is_refusal(outcome.answer, finish_reason=outcome.finish_reason)
+    sample[REFUSAL_KEY] = refused
+    # Ложный отказ меряется ТОЛЬКО на отвечаемых парах: на паре-ловушке отказ —
+    # это правильный ответ, и он живёт в `refusal_ok`.
+    sample[FALSE_REFUSAL_KEY] = None if expects_refusal else refused
     hit, granularity = retrieval_hit(row, sample["sources"])
     sample[RETRIEVAL_KEY] = hit
     sample["retrieval_granularity"] = granularity
@@ -790,6 +837,24 @@ def successful(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return [s for s in samples if not is_failed(s)]
 
 
+def answerable(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Пары, у которых есть ответ в корпусе, — только они идут в судейские средние.
+
+    Пара-ловушка (``expected_refusal``) меряется теми же четырьмя метриками
+    против фиксированного эталона отказа, и `answer_relevancy_ru` НАМЕРЕННО
+    ставит 0 уклончивому ответу (`metrics.answer_relevancy_ru`). То есть
+    ПРАВИЛЬНЫЙ отказ тянул общее среднее вниз, и оно зависело от доли ловушек
+    в наборе, а не от качества. Теперь ловушки живут в своей корзине
+    (``aggregate_refusal``), а их ветку меряет `refusal_ok`.
+    """
+    return [s for s in samples if not s.get("expected_refusal")]
+
+
+def refusal_rows(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Пары-ловушки: правильный ответ — отказ."""
+    return [s for s in samples if s.get("expected_refusal")]
+
+
 def retrieval_hit_rate(samples: Sequence[dict[str, Any]]) -> float | None:
     """Доля успешных пар, где нужный фрагмент попал в контекст."""
     hits = [
@@ -808,6 +873,26 @@ def refusal_rate(samples: Sequence[dict[str, Any]]) -> float | None:
         s.get(REFUSAL_KEY)
         for s in successful(samples)
         if s.get("expected_refusal") and isinstance(s.get(REFUSAL_KEY), bool)
+    ]
+    if not values:
+        return None
+    return round(sum(1 for v in values if v) / len(values), 4)
+
+
+def false_refusal_rate(samples: Sequence[dict[str, Any]]) -> float | None:
+    """Доля ОТВЕЧАЕМЫХ пар, где ассистент отказался отвечать зря.
+
+    Обратная и более опасная ошибка, чем выдумка: вопрос ответ имеет, нужный
+    фрагмент мог быть в контексте, а пользователь получил «в источниках
+    ничего нет». Классическая регрессия после закручивания порога грейдера,
+    которую `refusal_ok` не видит вовсе (он смотрит только на ловушки).
+
+    **Меньше — лучше.**
+    """
+    values = [
+        s.get(FALSE_REFUSAL_KEY)
+        for s in successful(answerable(samples))
+        if isinstance(s.get(FALSE_REFUSAL_KEY), bool)
     ]
     if not values:
         return None
@@ -839,6 +924,46 @@ def dispersion(samples: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         sd = round(statistics.stdev(values), 4) if n > 1 else (0.0 if n == 1 else None)
         stderr = round(sd / math.sqrt(n), 4) if sd is not None and n > 1 else None
         out[name] = {"mean": mean, "sd": sd, "n": n, "stderr": stderr}
+    return out
+
+
+def rate_metrics(samples: Sequence[dict[str, Any]]) -> dict[str, float | None]:
+    """Три доли, которые считаются локально, без судьи.
+
+    Одна функция на весь отчёт, чтобы разрез по категориям считался ровно тем
+    же кодом, что и общая строка, — иначе они разойдутся при первой же правке.
+    """
+    return {
+        RETRIEVAL_KEY: retrieval_hit_rate(samples),
+        REFUSAL_KEY: refusal_rate(samples),
+        FALSE_REFUSAL_RATE_KEY: false_refusal_rate(samples),
+    }
+
+
+def group_by_category(
+    samples: Sequence[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Разрез отчёта по ``category`` golden-пары.
+
+    Общее среднее по 39 разнородным вопросам скрывает ровно то, ради чего
+    заводится ручной golden-set: одна категория может провалиться, вторая
+    вырасти, а сумма — не сдвинуться. Категории берутся из данных (какие есть,
+    такие и в отчёте), пары без категории собираются в ``unclassified``.
+
+    Судейские средние внутри категории считаются теми же правилами, что и
+    общие: без упавших сэмплов, без ``None``-оценок и **без пар-ловушек**.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for sample in samples:
+        groups.setdefault(category_of(sample), []).append(sample)
+    out: dict[str, dict[str, Any]] = {}
+    for name in sorted(groups):
+        rows = groups[name]
+        ok = successful(rows)
+        entry: dict[str, Any] = {"n": len(rows), "n_failed": len(rows) - len(ok)}
+        entry.update(aggregate(answerable(ok)))
+        entry.update(rate_metrics(rows))
+        out[name] = entry
     return out
 
 
@@ -922,9 +1047,11 @@ def build_report(
     ok = successful(samples)
     # Средние — ТОЛЬКО по успешным: у упавшего сэмпла нули означают «прогон
     # сломался», и в среднем они читались бы как регрессия качества.
-    aggregates = aggregate(ok)
-    aggregates[RETRIEVAL_KEY] = retrieval_hit_rate(samples)
-    aggregates[REFUSAL_KEY] = refusal_rate(samples)
+    # …и только по ОТВЕЧАЕМЫМ парам: см. :func:`answerable`.
+    ok_answerable = answerable(ok)
+    ok_refusal = refusal_rows(ok)
+    aggregates = aggregate(ok_answerable)
+    aggregates.update(rate_metrics(samples))
     origins: dict[str, int] = {}
     for sample in samples:
         key = str(sample.get("context_origin", "none") or "none")
@@ -948,9 +1075,20 @@ def build_report(
             "failed": len(failed),
             "evaluated": len(ok),
         },
+        # Состав оценённых пар: судейские средние покрывают только `answerable`,
+        # и без этих двух чисел прогон на 39 вопросах молча сравнится с
+        # прогоном на 30.
+        "buckets": {
+            "answerable": len(ok_answerable),
+            "refusal": len(ok_refusal),
+        },
         "aggregate": aggregates,
-        "dispersion": dispersion(samples),
-        "coverage": coverage(ok),
+        # Ловушки не выбрасываются — их метрики считаются и лежат отдельно.
+        "aggregate_refusal": aggregate(ok_refusal),
+        "dispersion": dispersion(answerable(samples)),
+        "coverage": coverage(ok_answerable),
+        "coverage_refusal": coverage(ok_refusal),
+        "by_category": group_by_category(samples),
         "retrieval_granularity": granularity_counts(samples),
         "retrieval_degradation": granularity_degradation(samples),
         "run_params": run_parameters(
@@ -1032,9 +1170,99 @@ def _render_run_params(report: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _bucket_numbers(report: dict[str, Any]) -> dict[str, int]:
+    """``{answerable, refusal}`` — размеры корзин оценённых пар.
+
+    Отчёт СТАРОГО формата ключа ``buckets`` не знает: числа восстанавливаются
+    из сэмплов, чтобы диф со старым отчётом не падал на пустом месте.
+    """
+    buckets = report.get("buckets")
+    if isinstance(buckets, dict):
+        return {
+            "answerable": int(buckets.get("answerable", 0) or 0),
+            "refusal": int(buckets.get("refusal", 0) or 0),
+        }
+    ok = successful([s for s in report.get("samples", []) or [] if isinstance(s, dict)])
+    return {"answerable": len(answerable(ok)), "refusal": len(refusal_rows(ok))}
+
+
+def _false_refusal_denominator(report: dict[str, Any]) -> int:
+    """Сколько отвечаемых пар реально попало в ``false_refusal_rate``."""
+    ok = successful([s for s in report.get("samples", []) or [] if isinstance(s, dict)])
+    return sum(
+        1 for s in answerable(ok) if isinstance(s.get(FALSE_REFUSAL_KEY), bool)
+    )
+
+
+def _render_refusal_bucket(report: dict[str, Any]) -> list[str]:
+    """Таблица судейских метрик по парам-ловушкам — отдельно от общих средних."""
+    aggregates = report.get("aggregate_refusal")
+    n = _bucket_numbers(report)["refusal"]
+    if not isinstance(aggregates, dict) or not n:
+        return []  # в наборе нет ловушек — таблице из прочерков места нет
+    cover = report.get("coverage_refusal") or {}
+    lines = [f"## Пары-ловушки `expected_refusal` ({n})", ""]
+    lines.append(
+        "Эти пары НЕ входят в средние выше. Судейские метрики по ним считаются "
+        "против эталона отказа и приведены только для полноты: осмысленная "
+        f"оценка ветки отказа — `{REFUSAL_KEY}`, а не эти четыре числа "
+        "(`answer_relevancy_ru` по построению ставит 0 правильному отказу)."
+    )
+    lines.append("")
+    lines.append("| Метрика | Значение | Оценено пар |")
+    lines.append("|---|---:|---:|")
+    for name in METRIC_NAMES:
+        lines.append(f"| {name} | {_fmt(aggregates.get(name))} | {cover.get(name, 0)} |")
+    refused = (report.get("aggregate") or {}).get(REFUSAL_KEY)
+    lines.append(f"| {REFUSAL_KEY} | {_fmt(refused)} | {n} |")
+    lines.append("")
+    return lines
+
+
+#: Колонки разреза по категориям: ключ отчёта → заголовок таблицы.
+_CATEGORY_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("faithfulness_ru", "faith"),
+    ("answer_relevancy_ru", "ans_rel"),
+    ("context_precision", "ctx_prec"),
+    ("context_recall", "ctx_rec"),
+    (RETRIEVAL_KEY, "hit"),
+    (REFUSAL_KEY, "refusal_ok"),
+    (FALSE_REFUSAL_RATE_KEY, "false_ref ↓"),
+)
+
+
+def _render_categories(report: dict[str, Any]) -> list[str]:
+    """Таблица по категориям вопросов (пусто, если разреза в отчёте нет)."""
+    groups = report.get("by_category")
+    if not isinstance(groups, dict) or not groups:
+        return []
+    if set(groups) == {UNCATEGORIZED}:
+        return []  # категорий в golden-set нет — строка дублировала бы средние
+    lines = ["## По категориям", ""]
+    lines.append(
+        "Общее среднее по разнородному набору прячет ровно то, ради чего "
+        "категории и заводились: одна группа проседает, вторая растёт, сумма "
+        "стоит на месте. Судейские колонки, как и выше, считаются без "
+        f"пар-ловушек; `{FALSE_REFUSAL_RATE_KEY}` — **меньше лучше**."
+    )
+    lines.append("")
+    header = " | ".join(title for _key, title in _CATEGORY_COLUMNS)
+    lines.append(f"| категория | пар | упало | {header} |")
+    lines.append("|---|---:|---:|" + "---:|" * len(_CATEGORY_COLUMNS))
+    for name in sorted(groups):
+        entry = groups[name] if isinstance(groups[name], dict) else {}
+        cells = " | ".join(_fmt(entry.get(key)) for key, _title in _CATEGORY_COLUMNS)
+        lines.append(
+            f"| {name} | {entry.get('n', 0)} | {entry.get('n_failed', 0)} | {cells} |"
+        )
+    lines.append("")
+    return lines
+
+
 def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
     """Render the markdown report: disclaimer → aggregates → per-sample table."""
     counts = report.get("counts", {})
+    buckets = _bucket_numbers(report)
     aggregates = report.get("aggregate", {})
     cover = report.get("coverage", {})
     spread = report.get("dispersion", {}) or {}
@@ -1075,9 +1303,15 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
     lines.append(
         f"- гранулярность `retrieval_hit`: `{report.get('retrieval_granularity', {})}`"
     )
+    lines.append(
+        f"- отвечаемых пар: {buckets.get('answerable', 0)}, "
+        f"пар-ловушек `expected_refusal`: {buckets.get('refusal', 0)}"
+    )
     lines.append("")
     lines.extend(_render_run_params(report))
     lines.append("## Средние значения")
+    lines.append("")
+    lines.append(BUCKET_NOTE.format(**_bucket_numbers(report)))
     lines.append("")
     lines.append("| Метрика | Значение | Разброс по сэмплам | Оценено пар |")
     lines.append("|---|---:|---|---:|")
@@ -1096,15 +1330,26 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
         f"| {_fmt(aggregates.get(REFUSAL_KEY))} | — | "
         f"{sum(1 for s in report.get('samples', []) if s.get('expected_refusal'))} |"
     )
+    lines.append(
+        f"| {FALSE_REFUSAL_RATE_KEY} ↓ (доля ОТВЕЧАЕМЫХ пар, где ассистент "
+        "отказался зря; **меньше — лучше**) "
+        f"| {_fmt(aggregates.get(FALSE_REFUSAL_RATE_KEY))} | — | "
+        f"{_false_refusal_denominator(report)} |"
+    )
     lines.append("")
+    lines.append(FALSE_REFUSAL_NOTE)
+    lines.append("")
+    lines.extend(_render_refusal_bucket(report))
+    lines.extend(_render_categories(report))
     lines.append(DIAGNOSTIC_RULE)
     lines.append("")
     lines.append("## По парам")
     lines.append("")
     lines.append(
-        "| id | тип | чанк найден | faith | ans_rel | ctx_prec | ctx_rec | вопрос |"
+        "| id | тип | категория | чанк найден | зря отказ | faith | ans_rel "
+        "| ctx_prec | ctx_rec | вопрос |"
     )
-    lines.append("|---|---|---|---:|---:|---:|---:|---|")
+    lines.append("|---|---|---|---|---|---:|---:|---:|---:|---|")
     samples = list(report.get("samples", []))
     for sample in samples[:max_rows]:
         metrics = sample.get("metrics") or {}
@@ -1118,7 +1363,9 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
             question = question[:90] + "…"
         lines.append(
             f"| {sample.get('id')} | {sample.get('kind')} "
+            f"| {category_of(sample)} "
             f"| {_fmt(sample.get(RETRIEVAL_KEY))} "
+            f"| {_fmt(sample.get(FALSE_REFUSAL_KEY))} "
             f"| {score('faithfulness_ru')} | {score('answer_relevancy_ru')} "
             f"| {score('context_precision')} | {score('context_recall')} "
             f"| {question} |"
@@ -1203,6 +1450,156 @@ def delta_sign(delta: float | None, stderr: float | None, noise: float) -> str:
     return "▲" if delta > 0 else "▼"
 
 
+#: Метрики, где РОСТ — это ухудшение. Знак ▲/▼ в дифе показывает качество,
+#: поэтому для них он инвертируется относительно знака самой дельты.
+LOWER_IS_BETTER = (FALSE_REFUSAL_RATE_KEY,)
+
+
+def quality_sign(
+    name: str, delta: float | None, stderr: float | None, noise: float
+) -> str:
+    """``delta_sign``, развёрнутый в сторону КАЧЕСТВА, а не величины числа."""
+    oriented = None if delta is None else (-delta if name in LOWER_IS_BETTER else delta)
+    return delta_sign(oriented, stderr, noise)
+
+
+def category_sets(
+    report_a: dict[str, Any], report_b: dict[str, Any]
+) -> dict[str, list[str]]:
+    """``{common, only_a, only_b}`` — категории обоих прогонов.
+
+    Категории берутся из данных, а данные между прогонами меняются: если набор
+    разъехался, сравнивать построчно можно только пересечение, а про остальные
+    диф обязан сказать вслух — молча выброшенная категория читается как
+    «её не было».
+    """
+    a = report_a.get("by_category") or {}
+    b = report_b.get("by_category") or {}
+    return {
+        "common": sorted(set(a) & set(b)),
+        "only_a": sorted(set(a) - set(b)),
+        "only_b": sorted(set(b) - set(a)),
+    }
+
+
+def _legacy_keys(report: dict[str, Any]) -> list[str]:
+    """Ключи нового формата, которых в отчёте нет (сделан старым харнессом)."""
+    missing: list[str] = []
+    if not isinstance(report.get("by_category"), dict):
+        missing.append("by_category")
+    if not isinstance(report.get("aggregate_refusal"), dict):
+        missing.append("aggregate_refusal")
+    # Именно ОТСУТСТВИЕ ключа, а не `None`: в новом формате `None` — законное
+    # значение (в наборе нет ни одной отвечаемой пары).
+    if FALSE_REFUSAL_RATE_KEY not in (report.get("aggregate") or {}):
+        missing.append(FALSE_REFUSAL_RATE_KEY)
+    return missing
+
+
+def _render_legacy_note(report_a: dict[str, Any], report_b: dict[str, Any]) -> list[str]:
+    """Предупредить, что часть разрезов недоступна из-за старого отчёта."""
+    lines: list[str] = []
+    for report in (report_a, report_b):
+        missing = _legacy_keys(report)
+        if not missing:
+            continue
+        lines.append(
+            f"> **Отчёт `{report.get('label', '?')}` сделан прежней версией "
+            "харнесса:** в нём нет "
+            + ", ".join(f"`{key}`" for key in missing)
+            + ". Соответствующие строки ниже показаны как `—`, а не додуманы. "
+            "Важное следствие: его судейские средние посчитаны ВМЕСТЕ с "
+            "парами-ловушками, поэтому они не сопоставимы со средними нового "
+            "формата напрямую — перегоните прогон, если нужна честная дельта."
+        )
+        lines.append("")
+    return lines
+
+
+def _render_category_compare(
+    report_a: dict[str, Any], report_b: dict[str, Any], *, noise: float
+) -> list[str]:
+    """Дельты по категориям + честный список категорий, которых нет в паре."""
+    sets = category_sets(report_a, report_b)
+    if not any(sets.values()):
+        return []
+    if set(sum(sets.values(), [])) == {UNCATEGORIZED}:
+        return []  # ни в одном прогоне категорий нет — сравнивать нечего
+    label_a = str(report_a.get("label", "A"))
+    label_b = str(report_b.get("label", "B"))
+    groups_a = report_a.get("by_category") or {}
+    groups_b = report_b.get("by_category") or {}
+
+    # Отчёт старого формата категорий не знает вовсе — это НЕ «набор категорий
+    # изменился», и выдавать его категории за «пропавшие» нельзя.
+    stale = [
+        str(report.get("label", "?"))
+        for report in (report_a, report_b)
+        if not isinstance(report.get("by_category"), dict)
+    ]
+    if stale:
+        return [
+            "## По категориям",
+            "",
+            "Разбивка недоступна: в отчёте "
+            + ", ".join(f"`{name}`" for name in stale)
+            + " нет ключа `by_category` (сделан прежней версией харнесса). "
+            "Категории второго прогона показывать в одиночку бессмысленно — "
+            "сравнивать их не с чем.",
+            "",
+        ]
+
+    lines = ["## По категориям", ""]
+    lines.append(
+        "Дельты здесь — разность СРЕДНИХ по категории, а не парная: внутри "
+        "категории пар мало, и такое число слабее общей парной дельты. "
+        f"Знак показывает качество (`{FALSE_REFUSAL_RATE_KEY}` — меньше лучше, "
+        "знак для него инвертирован)."
+    )
+    lines.append("")
+    if sets["common"]:
+        header = " | ".join(title for _key, title in _CATEGORY_COLUMNS)
+        lines.append(f"| категория | пар {label_a}→{label_b} | {header} |")
+        lines.append("|---|---:|" + "---:|" * len(_CATEGORY_COLUMNS))
+        for name in sets["common"]:
+            entry_a = groups_a.get(name) or {}
+            entry_b = groups_b.get(name) or {}
+            cells: list[str] = []
+            for key, _title in _CATEGORY_COLUMNS:
+                value_a, value_b = entry_a.get(key), entry_b.get(key)
+                if isinstance(value_a, (int, float)) and isinstance(
+                    value_b, (int, float)
+                ):
+                    delta = round(float(value_b) - float(value_a), 4)
+                    cells.append(
+                        f"{delta:+.3f} {quality_sign(key, delta, None, noise)}"
+                    )
+                else:
+                    cells.append("—")
+            lines.append(
+                f"| {name} | {entry_a.get('n', 0)}→{entry_b.get('n', 0)} "
+                f"| {' | '.join(cells)} |"
+            )
+        lines.append("")
+    else:
+        lines.append(
+            "Общих категорий у прогонов нет — сравнивать построчно нечего."
+        )
+        lines.append("")
+    if sets["only_a"] or sets["only_b"]:
+        only_a = ", ".join(f"`{c}`" for c in sets["only_a"]) or "—"
+        only_b = ", ".join(f"`{c}`" for c in sets["only_b"]) or "—"
+        lines.append(
+            "> **ВНИМАНИЕ: набор категорий между прогонами изменился.** Только "
+            f"в `{label_a}`: {only_a}. Только в `{label_b}`: {only_b}. Эти "
+            "категории в таблицу выше не попали (сравнивать не с чем), а раз "
+            "состав набора разъехался — общие средние и парная дельта тоже "
+            "считаны по РАЗНЫМ наборам вопросов и недостоверны."
+        )
+        lines.append("")
+    return lines
+
+
 def render_compare_md(
     report_a: dict[str, Any], report_b: dict[str, Any], *, noise: float = 0.02
 ) -> str:
@@ -1257,6 +1654,18 @@ def render_compare_md(
             "ниже; дельта отражает их сумму, а не одно изменение."
         )
         lines.append("")
+    buckets_a = _bucket_numbers(report_a)
+    buckets_b = _bucket_numbers(report_b)
+    if buckets_a != buckets_b:
+        lines.append(
+            "> **ВНИМАНИЕ: состав набора разный.** Отвечаемых пар "
+            f"{buckets_a['answerable']} → {buckets_b['answerable']}, "
+            f"пар-ловушек {buckets_a['refusal']} → {buckets_b['refusal']}. "
+            "Судейские средние считаются только по отвечаемым парам, поэтому "
+            "сравнивать их можно лишь при совпадении обоих чисел."
+        )
+        lines.append("")
+    lines.extend(_render_legacy_note(report_a, report_b))
 
     lines.append(
         f"| Метрика | {label_a} | {label_b} | Δ (парная) | ±sd | пар | Знак |"
@@ -1273,15 +1682,17 @@ def render_compare_md(
             f"| {pair['n']} | {delta_sign(delta, pair['stderr'], noise)} |"
         )
     # Доли (hit/refusal) парного разложения не имеют — только среднее по прогону.
-    for name in (RETRIEVAL_KEY, REFUSAL_KEY):
+    for name in (RETRIEVAL_KEY, REFUSAL_KEY, FALSE_REFUSAL_RATE_KEY):
         value_a, value_b = agg_a.get(name), agg_b.get(name)
         if isinstance(value_a, (int, float)) and isinstance(value_b, (int, float)):
             delta = round(float(value_b) - float(value_a), 4)
-            delta_text, sign = f"{delta:+.3f}", delta_sign(delta, None, noise)
+            delta_text = f"{delta:+.3f}"
+            sign = quality_sign(name, delta, None, noise)
         else:
             delta_text, sign = "—", "—"
+        title = f"{name} ↓ (меньше — лучше)" if name in LOWER_IS_BETTER else name
         lines.append(
-            f"| {name} | {_fmt(value_a)} | {_fmt(value_b)} | {delta_text} | — | — "
+            f"| {title} | {_fmt(value_a)} | {_fmt(value_b)} | {delta_text} | — | — "
             f"| {sign} |"
         )
     lines.append("")
@@ -1292,6 +1703,14 @@ def render_compare_md(
         f"({noise:.2f}), и двух стандартных ошибок парной дельты."
     )
     lines.append("")
+    lines.append(
+        f"Знак означает КАЧЕСТВО, а не направление числа: у `{FALSE_REFUSAL_RATE_KEY}` "
+        "(доля отвечаемых вопросов, на которых ассистент зря отказался) меньше — "
+        "лучше, поэтому ▲ у него стоит при ПАДЕНИИ доли. Четыре судейские "
+        "метрики выше посчитаны без пар-ловушек `expected_refusal` — правильный "
+        "отказ больше не тянет средние вниз."
+    )
+    lines.append("")
     counts_a = report_a.get("counts", {}) or {}
     counts_b = report_b.get("counts", {}) or {}
     lines.append(
@@ -1300,6 +1719,7 @@ def render_compare_md(
         f"{counts_b.get('failed', 0)}."
     )
     lines.append("")
+    lines.extend(_render_category_compare(report_a, report_b, noise=noise))
     lines.append("## Параметры прогонов")
     lines.append("")
     lines.append(f"### `{label_a}`")
@@ -1540,6 +1960,11 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         fh.write(render_report_md(report))
 
     _log(f"отчёты: {json_path}, {md_path}")
+    buckets = report["buckets"]
+    _log(
+        f"  судейские средние — по {buckets['answerable']} отвечаемым парам; "
+        f"пар-ловушек {buckets['refusal']} (их средние: aggregate_refusal)"
+    )
     for name, value in report["aggregate"].items():
         _log(f"  {name}: {_fmt(value)}")
     failed = report["counts"]["failed"]
