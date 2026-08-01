@@ -379,6 +379,47 @@ async def list_files(
     return out
 
 
+async def catalog(
+    cv: dict[str, Any] | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    timeout: float | None = None,
+) -> dict[str, Any]:
+    """GET ``/api/vault/catalog`` — the per-document annotations written at index time.
+
+    Returns the response verbatim: ``{status, summaries_enabled, reason,
+    documents, total, offset, documents_with_summary, document_extensions}``.
+    Every field is load-bearing for the caller and nothing is normalised here —
+    in particular ``document_extensions`` IS the service's definition of
+    "document" and must not be second-guessed by a client-side allowlist.
+
+    ``limit``/``offset`` are omitted from the query when unset, so an older
+    backend sees the bare request it always saw; ``timeout`` exists for the same
+    reason as :func:`list_files`' — this is called from the chat hot path and
+    must not be able to add 30s to a turn.
+    """
+    base, token = _resolve_cv(cv)
+    url = f"{base}/api/vault/catalog"
+    headers = _auth_headers(token)
+    params: dict[str, str] = {}
+    if limit is not None:
+        params["limit"] = str(limit)
+    if offset is not None:
+        params["offset"] = str(offset)
+    async with httpx.AsyncClient(
+        timeout=timeout if timeout is not None else 30.0
+    ) as client:
+        resp = await client.get(url, params=params, headers=headers)
+    if resp.status_code != 200:
+        raise CogniVaultError(
+            f"catalog failed ({resp.status_code})",
+            resp.status_code,
+            _excerpt(resp.text),
+        )
+    data = resp.json()
+    return data if isinstance(data, dict) else {}
+
+
 async def clear_vault(cv: dict[str, Any] | None = None) -> dict[str, Any]:
     """Delete every file in the vault (best-effort). Used by replace mode.
 

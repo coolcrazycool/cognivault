@@ -38,7 +38,15 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import cognivault, corpus_map, corpus_scope, rag, rag_pipeline, settings  # noqa: E402
+from app import (  # noqa: E402
+    catalog,
+    cognivault,
+    corpus_map,
+    corpus_scope,
+    rag,
+    rag_pipeline,
+    settings,
+)
 from app.config import AppPaths  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.routes import chat_routes  # noqa: E402
@@ -254,14 +262,37 @@ def _corpus() -> list[str]:
 
 
 def _install_listing(monkeypatch, paths: list[str] | None) -> None:
+    """Оба шва структуры: листинг вольта и каталог.
+
+    Каталог тут нужен ровно за одним полем — `document_extensions`: без него
+    `corpus_map` не знает, что считать документом, и честно не строит блок
+    вовсе (см. `tests/test_corpus_map.py`). Дерево разделов из шага 3 из этой
+    заглушки не соберётся — в ней нет `documents`, — и это специально: мета-ветка
+    обязана работать и на голом листинге, флаг `corpus_tree_enabled` выключен.
+    """
+
     async def fake_list_files(cv=None, recursive=True, timeout=None):
         if paths is None:
             raise cognivault.CogniVaultError("list files failed (503)", 503, "")
         return paths
 
+    async def fake_catalog(cv=None):
+        return {
+            "status": "summaries_pending",
+            "summaries_enabled": True,
+            "reason": None,
+            "documents": [],
+            "total": 0,
+            "offset": 0,
+            "documents_with_summary": 0,
+            "document_extensions": ["md", "pdf", "canvas", "excalidraw", "csv"],
+        }
+
     monkeypatch.setattr(corpus_map, "files", _REAL_FILES)
     monkeypatch.setattr(cognivault, "list_files", fake_list_files)
+    monkeypatch.setattr(catalog, "payload", fake_catalog)
     corpus_map.reset_cache()
+    catalog.reset_cache()
 
 
 def _install_retrieval(monkeypatch) -> list[str]:

@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import cognivault, corpus_map, rag, rag_pipeline, settings  # noqa: E402
+from app import catalog, cognivault, corpus_map, rag, rag_pipeline, settings  # noqa: E402
 from app.config import AppPaths  # noqa: E402
 from app.main import create_app  # noqa: E402
 from app.routes import chat_routes  # noqa: E402
@@ -40,10 +40,51 @@ from app.tokens import estimate_tokens  # noqa: E402
 _REAL_FILES = corpus_map.files
 
 
+# Что этот сервис считает документом. Не список этого файла и не список
+# `corpus_map` — так его отдаёт бэкенд в `GET /api/vault/catalog`
+# (`DOCUMENT_EXTENSIONS` в `src/lib/indexer.ts`). Ни `txt`, ни `markdown` в нём
+# нет: их индексатор не сканирует вовсе.
+_EXTENSIONS = ("md", "pdf", "canvas", "excalidraw", "csv")
+
+
+def _catalog_payload(extensions=_EXTENSIONS, documents=()) -> dict:
+    return {
+        "status": "ok" if documents else "summaries_pending",
+        "summaries_enabled": True,
+        "reason": None,
+        "documents": list(documents),
+        "total": len(documents),
+        "offset": 0,
+        "documents_with_summary": 0,
+        "document_extensions": (
+            list(extensions) if isinstance(extensions, (list, tuple)) else extensions
+        ),
+    }
+
+
 @pytest.fixture(autouse=True)
 def _local_mode(monkeypatch):
     monkeypatch.setattr(settings, "is_server", lambda: False)
     monkeypatch.setattr(corpus_map, "files", _REAL_FILES)
+    # Каталог доступен: без него блок «состав базы» не строится вообще —
+    # именно оттуда берётся определение документа (см. `_install_catalog`).
+    _install_catalog(monkeypatch, _catalog_payload())
+
+
+def _install_catalog(monkeypatch, payload=None) -> None:
+    """Подменить шов каталога. ``payload=None`` — «каталог недоступен»."""
+
+    async def fake_payload(cv=None):
+        return payload
+
+    catalog.reset_cache()
+    monkeypatch.setattr(
+        catalog, "payload", fake_payload if payload is not None else _unavailable
+    )
+
+
+async def _unavailable(cv=None):
+    return None
 
 
 # Реалистичный корпус: 127 документов, архив, пустые страницы-контейнеры,
@@ -72,7 +113,7 @@ def _corpus() -> list[str]:
 
 
 def test_block_reports_totals_and_top_sections():
-    block = corpus_map.render(_corpus(), n_sources=5)
+    block = corpus_map.render(_corpus(), n_sources=5, extensions=frozenset(_EXTENSIONS))
 
     assert block is not None
     # 54 + 31 + 24 + 14 + 4 корневых = 127; вложения не в счёт.
@@ -94,6 +135,7 @@ def test_block_counts_only_documents():
     """Картинки и вложения не документы: 40 png не превращаются в раздел."""
     block = corpus_map.render(
         ["Заметки/а.md", "Confluence/attachments/1/x.png", "logo.svg"],
+        extensions=frozenset(_EXTENSIONS),
     )
     assert block is not None
     assert "Всего документов в базе: 1." in block
@@ -101,7 +143,7 @@ def test_block_counts_only_documents():
 
 
 def test_block_omits_source_count_when_unknown():
-    block = corpus_map.render(["Заметки/а.md", "б.md"])
+    block = corpus_map.render(["Заметки/а.md", "б.md"], extensions=frozenset(_EXTENSIONS))
     assert "Всего документов в базе: 2." in block
     assert "Источники" not in block.split("\n")[1]
 
@@ -109,7 +151,7 @@ def test_block_omits_source_count_when_unknown():
 def test_single_root_folds_one_level_deeper():
     """Вольт из Confluence-синка весь лежит под ``Confluence/`` — спускаемся."""
     paths = [f"Confluence/ПРОСТРАНСТВО {i % 3}/Раздел {i % 2}/Стр {i}.md" for i in range(30)]
-    block = corpus_map.render(paths, n_sources=3)
+    block = corpus_map.render(paths, n_sources=3, extensions=frozenset(_EXTENSIONS))
 
     assert block is not None
     assert "Разделы внутри «Confluence»" in block
@@ -137,7 +179,7 @@ def test_descent_continues_through_every_single_folder_level():
         + ["Confluence/OASISEXT/OASIS External Home/Разработка.md"]
     )
 
-    block = corpus_map.render(paths, n_sources=5)
+    block = corpus_map.render(paths, n_sources=5, extensions=frozenset(_EXTENSIONS))
 
     assert block is not None
     assert "Всего документов в базе: 127." in block
@@ -150,21 +192,21 @@ def test_descent_continues_through_every_single_folder_level():
 
 def test_descent_stops_before_swallowing_the_documents_themselves():
     """Спуск не уходит в уровень, где остались одни файлы: ``A/x.md`` — это «A»."""
-    block = corpus_map.render(["A/x.md", "A/y.md"])
+    block = corpus_map.render(["A/x.md", "A/y.md"], extensions=frozenset(_EXTENSIONS))
     assert "- A — 2" in block
     assert "внутри" not in block
 
 
 def test_no_descent_when_top_level_already_branches():
-    block = corpus_map.render(["A/x.md", "B/y.md"])
+    block = corpus_map.render(["A/x.md", "B/y.md"], extensions=frozenset(_EXTENSIONS))
     assert "Разделы верхнего уровня" in block
     assert "внутри" not in block
 
 
 def test_empty_or_documentless_listing_yields_no_block():
-    assert corpus_map.render([]) is None
-    assert corpus_map.render(["a.png", "b.zip"]) is None
-    assert corpus_map.render([None, 42]) is None  # мусор в листинге не роняет
+    assert corpus_map.render([], extensions=frozenset(_EXTENSIONS)) is None
+    assert corpus_map.render(["a.png", "b.zip"], extensions=frozenset(_EXTENSIONS)) is None
+    assert corpus_map.render([None, 42], extensions=frozenset(_EXTENSIONS)) is None  # мусор в листинге не роняет
 
 
 # --------------------------------------------------------------------------- #
@@ -174,13 +216,14 @@ def test_empty_or_documentless_listing_yields_no_block():
 
 def test_block_size_does_not_grow_with_the_corpus():
     """Корпус в 40 раз больше — блок того же порядка и под потолком."""
-    small = corpus_map.render(_corpus(), n_sources=5)
+    small = corpus_map.render(_corpus(), n_sources=5, extensions=frozenset(_EXTENSIONS))
     huge = corpus_map.render(
         [
             f"Раздел {i % 40}/Подраздел {i % 300}/Глубже/Док {i}.md"
             for i in range(5000)
         ],
         n_sources=5,
+        extensions=frozenset(_EXTENSIONS),
     )
 
     assert small is not None and huge is not None
@@ -195,12 +238,70 @@ def test_block_size_does_not_grow_with_the_corpus():
 
 def test_truncation_keeps_every_document_accounted_for():
     paths = [f"Раздел {i}/док.md" for i in range(60)]
-    block = corpus_map.render(paths, max_chars=400)
+    block = corpus_map.render(paths, max_chars=400, extensions=frozenset(_EXTENSIONS))
     assert "Всего документов в базе: 60." in block
     assert len(block) <= 400
     # Урезано до нескольких разделов, но недосчитанных документов нет.
     shown = block.count("\n- ") - 1
     assert f"ещё {60 - shown} " in block
+
+
+# --------------------------------------------------------------------------- #
+# Что считается документом — D8, вторая половина
+# --------------------------------------------------------------------------- #
+#
+# Список расширений больше не живёт в `corpus_map`. Он приходит полем
+# `document_extensions` из `GET /api/vault/catalog`, где выводится из той же
+# константы, по которой поллер сканирует вольт. Прежний локальный список врал в
+# обе стороны сразу: `txt` и `markdown` индексатор не сканирует, не чанкует и не
+# эмбеддит — каждый `.txt` считался документом, про который можно спросить и
+# который поиск никогда не вернёт.
+
+
+def test_document_count_follows_the_service_definition_not_a_local_list():
+    """Вольт из `a.md` и `b.txt` — это ОДИН документ, а не два."""
+    block = corpus_map.render(
+        ["a.md", "b.txt"], extensions=frozenset(_EXTENSIONS)
+    )
+    assert block is not None
+    assert "Всего документов в базе: 1." in block
+
+
+def test_txt_is_not_a_document_end_to_end(monkeypatch):
+    """То же самое через оба сетевых шва: считает каталог, не модуль."""
+    _install_listing(monkeypatch, ["a.md", "b.txt"])
+    assert asyncio.run(corpus_map.document_count(None)) == 1
+    block = asyncio.run(corpus_map.corpus_block(None, 1))
+    assert "Всего документов в базе: 1." in block
+
+
+def test_extensions_are_taken_from_the_catalogue_verbatim(monkeypatch):
+    """Другой вольт — другое определение документа; модуль своего не имеет."""
+    _install_listing(monkeypatch, ["a.md", "b.txt"], extensions=("md", "txt"))
+    assert asyncio.run(corpus_map.document_count(None)) == 2
+
+
+def test_unavailable_catalogue_yields_no_block_rather_than_a_guess(monkeypatch):
+    """Определения документа нет — блока нет. Встроенного списка не осталось."""
+    _install_listing(monkeypatch, _corpus())
+    _install_catalog(monkeypatch, None)
+
+    assert asyncio.run(corpus_map.corpus_block(None, 5)) is None
+    assert asyncio.run(corpus_map.overview_block(None)) is None
+    assert asyncio.run(corpus_map.document_count(None)) is None
+
+
+def test_malformed_extension_list_is_not_a_definition(monkeypatch):
+    """Пустой/битый `document_extensions` — это «неизвестно», а не «всё подряд»."""
+    _install_listing(monkeypatch, _corpus())
+    for broken in ([], "md", [""], [1, 2], None):
+        _install_catalog(monkeypatch, _catalog_payload(extensions=broken))
+        assert asyncio.run(corpus_map.corpus_block(None, 5)) is None
+
+
+def test_module_no_longer_owns_an_extension_list():
+    """Сторож: локальный список удалён и не должен вернуться."""
+    assert not hasattr(corpus_map, "_DOC_EXTENSIONS")
 
 
 # --------------------------------------------------------------------------- #
@@ -299,7 +400,9 @@ def _install_retrieval(monkeypatch, hits: list[dict]) -> None:
     )
 
 
-def _install_listing(monkeypatch, paths: list[str] | None) -> None:
+def _install_listing(
+    monkeypatch, paths: list[str] | None, extensions=_EXTENSIONS
+) -> None:
     async def fake_list_files(cv=None, recursive=True, timeout=None):
         if paths is None:
             raise cognivault.CogniVaultError("list files failed (503)", 503, "")
@@ -307,6 +410,7 @@ def _install_listing(monkeypatch, paths: list[str] | None) -> None:
 
     monkeypatch.setattr(cognivault, "list_files", fake_list_files)
     corpus_map.reset_cache()
+    _install_catalog(monkeypatch, _catalog_payload(extensions=extensions))
 
 
 def _build(query: str) -> rag.RagContext:

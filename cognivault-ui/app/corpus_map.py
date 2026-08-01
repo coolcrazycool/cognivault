@@ -16,11 +16,21 @@ Design constraints, all load-bearing:
   with counts, capped at :data:`_MAX_SECTIONS` sections, :data:`_MAX_CHILDREN`
   sub-sections each, and hard-capped at :data:`_MAX_MAP_CHARS` characters. A
   corpus ten times bigger renders the same size block with bigger numbers.
-* **Zero model calls.** Everything here is one cached ``GET /api/vault/files``
-  plus pure Python.
+* **Zero model calls.** Everything here is one cached ``GET /api/vault/files``,
+  one cached ``GET /api/vault/catalog`` (for the definition of "document" —
+  see below) plus pure Python.
 * **Silent degradation.** :func:`corpus_block` returns ``None`` on *any* failure
-  (endpoint down, malformed payload, empty vault); the caller then renders the
-  turn exactly as it did before this module existed.
+  (either endpoint down, malformed payload, empty vault); the caller then renders
+  the turn exactly as it did before this module existed.
+* **No local idea of what a document is.** The set of counted extensions is
+  *fetched* (``document_extensions``, :mod:`app.catalog`), never authored here.
+  The list this module used to carry — ``md, markdown, txt, pdf, csv, canvas,
+  excalidraw`` — was wrong in both directions the block exists to prevent:
+  ``txt`` and ``markdown`` are never scanned, chunked or embedded, so every
+  ``.txt`` in a vault was counted as a document the model could be asked about
+  and search could never return. When the definition cannot be fetched the block
+  is omitted; falling back to a built-in allowlist would be re-authoring the
+  same lie.
 * **Code-owned text, not a prompt.** The caption that forbids citing the block
   travels *with* the block. Delivering it as prompt wording would never reach a
   user who has already saved a custom ``prompts.system`` — their copy is frozen
@@ -38,15 +48,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import cognivault
-
-# Extensions that count as a *document*. Deliberately narrower than "every file
-# in the vault": a Confluence sync also writes attachments
-# (``Confluence/attachments/<page-id>/<file>``), and counting a folder of PNGs as
-# a section of the knowledge base would make the block lie about its scale.
-_DOC_EXTENSIONS = frozenset(
-    {"md", "markdown", "txt", "pdf", "csv", "canvas", "excalidraw"}
-)
+from . import catalog, cognivault
 
 # Label for documents that sit directly at the folded level (no sub-folder).
 _ROOT_LABEL = "(корень)"
@@ -133,8 +135,17 @@ def _plural(n: int, forms: tuple[str, str, str]) -> str:
     return forms[2]
 
 
-def _documents(paths: list[Any]) -> list[list[str]]:
+def _documents(paths: list[Any], extensions: frozenset[str]) -> list[list[str]]:
     """Split a vault listing into path segments, keeping documents only.
+
+    ``extensions`` is the service's own ``document_extensions`` — the extensions
+    the indexer actually scans, minus images. It is a REQUIRED argument, with no
+    default, so no caller can accidentally reintroduce a local allowlist: a file
+    whose extension is not in it is never indexed, and counting it would promise
+    a document search can never return. It also does the job the old hard-coded
+    list did — a Confluence sync writes attachments
+    (``Confluence/attachments/<page-id>/<file>``), and a folder of PNGs must not
+    read as a section of the knowledge base.
 
     Tolerant by design — the listing is upstream data: non-strings, Windows
     separators, leading slashes, ``.`` segments and non-document extensions are
@@ -151,7 +162,7 @@ def _documents(paths: list[Any]) -> list[list[str]]:
             continue
         name = segments[-1]
         ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-        if ext not in _DOC_EXTENSIONS:
+        if ext not in extensions:
             continue
         docs.append(segments)
     return docs
@@ -336,9 +347,11 @@ def _squeeze(
     )
 
 
-def _folded(paths: list[Any]) -> tuple[int, list[_Section], str] | None:
+def _folded(
+    paths: list[Any], extensions: frozenset[str]
+) -> tuple[int, list[_Section], str] | None:
     """``(total, sections, prefix)`` for a listing, or ``None`` if it says nothing."""
-    docs = _documents(paths)
+    docs = _documents(paths, extensions)
     if not docs:
         return None
     sections, prefix = _fold(docs)
@@ -351,14 +364,18 @@ def render(
     paths: list[Any],
     n_sources: int | None = None,
     max_chars: int = _MAX_MAP_CHARS,
+    *,
+    extensions: frozenset[str],
 ) -> str | None:
     """Render the corpus footprint block, or ``None`` if there is nothing to say.
 
     ``n_sources`` is the number of blocks in the «Источники» section of the same
     message; it is what turns the block from trivia into a scale statement
     («127 documents, you were given 5 fragments»). ``None`` omits that sentence.
+
+    ``extensions`` is keyword-only and required — see :func:`_documents`.
     """
-    folded = _folded(paths)
+    folded = _folded(paths, extensions)
     if folded is None:
         return None
     total, sections, prefix = folded
@@ -376,7 +393,10 @@ def render(
 
 
 def render_overview(
-    paths: list[Any], max_chars: int = _MAX_OVERVIEW_CHARS
+    paths: list[Any],
+    max_chars: int = _MAX_OVERVIEW_CHARS,
+    *,
+    extensions: frozenset[str],
 ) -> str | None:
     """Render the base's structure as the ANSWER material, or ``None``.
 
@@ -386,7 +406,7 @@ def render_overview(
     the sources but the only grounded thing the model has: retrieval was not run,
     and there is no document in the corpus that lists the corpus.
     """
-    folded = _folded(paths)
+    folded = _folded(paths, extensions)
     if folded is None:
         return None
     total, sections, prefix = folded
@@ -457,20 +477,41 @@ async def files(cv: dict[str, Any] | None = None) -> list[str] | None:
     return paths
 
 
+async def _listing(
+    cv: dict[str, Any] | None,
+) -> tuple[list[str], frozenset[str]] | None:
+    """``(paths, document_extensions)`` for ``cv``, or ``None`` if either is unknown.
+
+    Both halves are required and neither has a substitute. The listing says which
+    files exist; the catalogue says which of them the indexer treats as
+    documents. Without the second half this module could only guess — and the
+    guess it used to ship counted files that are never indexed. The listing is
+    fetched first so a vault that has no listing never pays for a catalogue call.
+    """
+    paths = await files(cv)
+    if not paths:
+        return None
+    extensions = await catalog.document_extensions(cv)
+    if not extensions:
+        return None
+    return paths, extensions
+
+
 async def corpus_block(
     cv: dict[str, Any] | None = None, n_sources: int | None = None
 ) -> str | None:
     """The rendered footprint block for this turn, or ``None``.
 
     The single entry point used by :mod:`app.rag`. Every failure mode — listing
-    unavailable, empty vault, nothing but attachments, an unexpected payload —
-    collapses to ``None`` and the turn proceeds exactly as before.
+    unavailable, catalogue unavailable, empty vault, nothing but attachments, an
+    unexpected payload — collapses to ``None`` and the turn proceeds exactly as
+    before.
     """
-    paths = await files(cv)
-    if not paths:
+    listing = await _listing(cv)
+    if listing is None:
         return None
     try:
-        return render(paths, n_sources)
+        return render(listing[0], n_sources, extensions=listing[1])
     except Exception:  # noqa: BLE001 — pure code, but the turn is worth more
         return None
 
@@ -483,11 +524,11 @@ async def overview_block(cv: dict[str, Any] | None = None) -> str | None:
     did before this feature existed (retrieval + grader) rather than answer from
     the model's own imagination.
     """
-    paths = await files(cv)
-    if not paths:
+    listing = await _listing(cv)
+    if listing is None:
         return None
     try:
-        return render_overview(paths)
+        return render_overview(listing[0], extensions=listing[1])
     except Exception:  # noqa: BLE001 — pure code, but the turn is worth more
         return None
 
@@ -495,14 +536,16 @@ async def overview_block(cv: dict[str, Any] | None = None) -> str | None:
 async def document_count(cv: dict[str, Any] | None = None) -> int | None:
     """How many documents the vault holds, or ``None`` when unknown.
 
-    Reads the SAME cached listing as :func:`corpus_block`, so asking for the
-    number next to the footprint costs no extra request. Used by the evidence
-    hedge, which says "one document out of N" and must not invent N.
+    Reads the SAME cached listing and the SAME cached catalogue as
+    :func:`corpus_block`, so asking for the number next to the footprint costs no
+    extra request. Used by the evidence hedge, which says "one document out of N"
+    and must not invent N — and must not inflate N with files that are never
+    indexed, which is why the extension set is fetched rather than assumed.
     """
-    paths = await files(cv)
-    if not paths:
+    listing = await _listing(cv)
+    if listing is None:
         return None
     try:
-        return len(_documents(paths)) or None
+        return len(_documents(listing[0], listing[1])) or None
     except Exception:  # noqa: BLE001 — the turn is worth more than the number
         return None

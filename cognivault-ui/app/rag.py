@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import cognivault, corpus_map, corpus_scope, rag_pipeline
+from . import cognivault, corpus_map, corpus_scope, corpus_tree, rag_pipeline
 from .tokens import CHARS_PER_TOKEN, estimate_messages_tokens
 
 log = logging.getLogger("cognivault-ui.rag")
@@ -464,11 +464,15 @@ def _render_context_message(
     that middle section; the section order and the «Источники:» / «Вопрос:»
     headers stay fixed.
 
-    ``corpus`` is the :mod:`app.corpus_map` block (``None`` when the vault
-    listing was unavailable — then this renders exactly what it always did).
-    It sits ABOVE «Источники:» on purpose: the model has to read "127
-    documents" and "here are 5 fragments" as one statement, so the two cannot be
-    separated by the whole dialogue history.
+    ``corpus`` is the structural head block — the section tree
+    (:mod:`app.corpus_tree`) or the footprint (:mod:`app.corpus_map`), see
+    :func:`_head_block`; ``None`` when neither was available, and then this
+    renders exactly what it always did. It sits ABOVE «Источники:» on purpose:
+    the model has to read "127 documents" and "here are 5 fragments" as one
+    statement, so the two cannot be separated by the whole dialogue history.
+    Its size is deliberately outside ``context_chars`` and outside the budget the
+    source blocks were selected under — it is added after selection and can
+    therefore never cost a fragment its place.
 
     Returns ``(message, context_chars)`` where ``context_chars`` measures only
     the sources block (not the boilerplate, not the footprint).
@@ -497,8 +501,36 @@ def _system_message(prompt: str | None = None) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+async def _head_block(
+    rcfg: dict[str, Any], cv: dict[str, Any] | None, n_sources: int | None
+) -> str | None:
+    """The structural block that opens the final user turn, or ``None``.
+
+    Two renderings of the same fact, one slot. With ``rag.corpus_tree_enabled``
+    on and a reachable catalogue it is the full section tree
+    (:mod:`app.corpus_tree`) — every indexed document by name, marked where the
+    names hide something; otherwise it is the constant-size footprint
+    (:mod:`app.corpus_map`), which is what every install had before this flag.
+
+    They are alternatives rather than neighbours because the tree is a superset:
+    it carries the same "N documents, you were given K fragments" sentence, and
+    rendering both would spend ~700 characters restating a shorter, coarser fold
+    of a list already printed in full below it.
+
+    What this block is NOT is a source. It is added to the message AFTER the
+    «Источники» block has been selected and rendered under its own budget, so it
+    can neither displace a retrieved fragment nor shrink one, and a turn the
+    grader refused never gets here at all.
+    """
+    if corpus_tree.enabled(rcfg):
+        tree = await corpus_tree.tree_block(cv, n_sources)
+        if tree:
+            return tree
+    return await corpus_map.corpus_block(cv, n_sources)
+
+
 async def _build_meta(
-    query: str, kind: str, cv: dict[str, Any] | None
+    query: str, kind: str, rcfg: dict[str, Any], cv: dict[str, Any] | None
 ) -> RagContext | None:
     """Context for a recognised meta question, or ``None`` to fall through.
 
@@ -512,8 +544,18 @@ async def _build_meta(
     plus the question. The user's ``prompts.system`` is *not* applied here on
     purpose — it is the ruleset for answering from «Источники», and this turn has
     none; applying it would order the model to refuse.
+
+    The material is the richest structure available: the catalogue tree when
+    ``rag.corpus_tree_enabled`` is on and the catalogue answers, the folded
+    listing otherwise. The fallback matters more here than next to the sources —
+    with no «Источники» block, an unavailable tree would leave the turn with
+    nothing at all, and ``None`` (route it normally) is the only honest outcome.
     """
-    overview = await corpus_map.overview_block(cv)
+    overview: str | None = None
+    if corpus_tree.enabled(rcfg):
+        overview = await corpus_tree.overview_block(cv)
+    if not overview:
+        overview = await corpus_map.overview_block(cv)
     if not overview:
         log.info(
             "meta-вопрос (%s) распознан, но структура базы недоступна — "
@@ -564,7 +606,7 @@ async def _build_auto(
     # answer is built from the real tree rather than generated freely.
     meta_kind = corpus_scope.match_meta(query)
     if meta_kind:
-        meta = await _build_meta(query, meta_kind, cv)
+        meta = await _build_meta(query, meta_kind, rcfg, cv)
         if meta is not None:
             return meta
 
@@ -787,9 +829,11 @@ async def _build_auto(
             scope=scope,
         )
 
-    # Corpus footprint: fetched only now, so a turn that ended in a refusal or
-    # found nothing never pays for it. Cached per vault; `None` on any failure.
-    corpus = await corpus_map.corpus_block(cv, len(sources))
+    # Structural head block — the section tree, or the footprint. Fetched only
+    # now, so a turn that ended in a refusal or found nothing never pays for it.
+    # Cached per vault; `None` on any failure, and then the message is exactly
+    # what it was before either feature existed.
+    corpus = await _head_block(rcfg, cv, len(sources))
 
     # Evidence-concentration caveat. Pure Python, zero tokens, and — because
     # `scope` is `document` unless the model explicitly said otherwise — it
@@ -893,7 +937,7 @@ async def _build_legacy(
     if not sources:
         return RagContext()
 
-    corpus = await corpus_map.corpus_block(cv, len(sources))
+    corpus = await _head_block(rcfg, cv, len(sources))
     user_message, context_chars = _render_context_message(
         blocks,
         query,

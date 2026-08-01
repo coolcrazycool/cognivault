@@ -810,6 +810,7 @@
     { key: "grader_keep_top", id: "cfg-rag-grader-keep-top", type: "int", label: "Оставлять лучших" },
     { key: "condense_enabled", id: "cfg-rag-condense-enabled", type: "bool", label: "Уточнение вопроса" },
     { key: "condense_first_turn", id: "cfg-rag-condense-first-turn", type: "bool", label: "Разбор первого вопроса" },
+    { key: "corpus_tree_enabled", id: "cfg-rag-corpus-tree-enabled", type: "bool", label: "Дерево разделов в контексте" },
     { key: "max_context_chars", id: "cfg-rag-max-context-chars", type: "int", label: "Бюджет контекста" },
     { key: "file_full_chars", id: "cfg-rag-file-full-chars", type: "int", label: "Файл целиком до" },
     { key: "section_max_chars", id: "cfg-rag-section-max-chars", type: "int", label: "Раздел не длиннее" },

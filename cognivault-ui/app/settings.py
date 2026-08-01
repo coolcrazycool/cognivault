@@ -184,6 +184,9 @@ def server_config() -> dict[str, Any]:
             "condense_first_turn": _env_bool(
                 "RAG_CONDENSE_FIRST_TURN", bool(rag["condense_first_turn"])
             ),
+            "corpus_tree_enabled": _env_bool(
+                "RAG_CORPUS_TREE_ENABLED", bool(rag["corpus_tree_enabled"])
+            ),
             "grader_enabled": _env_bool(
                 "RAG_GRADER_ENABLED", bool(rag["grader_enabled"])
             ),
@@ -256,6 +259,7 @@ USER_EDITABLE_KEYS: tuple[str, ...] = (
     "rag.max_expanded_files",
     "rag.condense_enabled",
     "rag.condense_first_turn",
+    "rag.corpus_tree_enabled",
     "rag.grader_enabled",
     "rag.grader_threshold",
     "rag.grader_keep_top",
@@ -440,6 +444,7 @@ def validate_user_overrides(
             "default_on",
             "condense_enabled",
             "condense_first_turn",
+            "corpus_tree_enabled",
             "grader_enabled",
         ):
             if key in rag:

@@ -988,6 +988,7 @@ kubectl apply -n $NS -f deploy/dropapp/06-ingress.yaml
 | `RAG_SOURCE` | `hybrid` | эндпоинт поиска: `/api/vault/search/hybrid` |
 | `RAG_CONDENSE_ENABLED` | `true` | вызов 1: интент + condense |
 | `RAG_GRADER_ENABLED` | `true` | вызов 2: батч-грейдер (он же реранкер) |
+| `RAG_CORPUS_TREE_ENABLED` | `false` | дерево разделов базы в контексте вместо блока «состав базы»: ноль вызовов модели, ~3 400 токенов на ход |
 | `RAG_GRADER_THRESHOLD` | `4` | порог оценки 1–5 |
 | `RAG_GRADER_KEEP_TOP` | `2` | сколько топ-хитов проходят всегда |
 | `RAG_RERANK_CANDIDATES` | `40` | ширина ретрива (Волна 3: было 20) |
