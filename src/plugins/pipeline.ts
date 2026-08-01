@@ -8,7 +8,7 @@ import matter from 'gray-matter';
 import { v5 as uuidv5 } from 'uuid';
 import { config } from '../config.js';
 import { docSummaries, indexedFiles, type NewSection, sections } from '../db/schema.js';
-import { BM25_VECTOR_NAME, buildSparseVector, DENSE_VECTOR_NAME } from '../lib/bm25.js';
+import { BM25_VECTOR_NAME, buildDocumentSparseVector, DENSE_VECTOR_NAME } from '../lib/bm25.js';
 import { chunkCanvas } from '../lib/canvas-chunker.js';
 import { isChunkParseError } from '../lib/chunk-errors.js';
 import type { MarkdownSection } from '../lib/chunker.js';
@@ -380,7 +380,7 @@ async function embedAndUpsert(
     // Named vectors: dense embedding for semantic recall, BM25 sparse vector for lexical.
     vector: {
       [DENSE_VECTOR_NAME]: embeddings[i] as number[],
-      [BM25_VECTOR_NAME]: buildSparseVector(chunk.lexicalText ?? chunk.text),
+      [BM25_VECTOR_NAME]: buildDocumentSparseVector(chunk.lexicalText ?? chunk.text),
     },
     payload: {
       path: event.path,

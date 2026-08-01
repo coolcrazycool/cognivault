@@ -36,7 +36,10 @@ sparse `bm25` vector. Both are written for every point at index time.
 - **`/api/vault/search/lexical`** — sparse only. `src/lib/bm25.ts` tokenizes the query,
   stems Russian words with a vendored Snowball stemmer (Latin words, digits and acronyms
   are left alone — that is the whole point of the lexical branch) and hashes each term
-  with FNV-1a into a `u32` index. Only the term-frequency part of BM25 is computed here;
+  with FNV-1a into a `u32` index. A compound identifier also yields its **joined** form on
+  top of its fragments (`afpc_sss_src.cards_event` → the five fragments *and*
+  `afpcssssrccardsevent`): the fragments are shared by every sibling page of a registry,
+  the joined term is not. Only the term-frequency part of BM25 is computed here;
   the IDF factor is applied by Qdrant via `sparse_vectors: { bm25: { modifier: 'idf' } }`.
 - **`/api/vault/search/hybrid`** — one `client.query` call with two `prefetch` branches
   (dense + bm25, each oversampled to `max(2 × limit, 40)` candidates) and
@@ -50,6 +53,12 @@ changed by the rescaling. Only `semantic` returns an absolute score.
 
 The index-time and query-time sparse vectors **must** come from the same functions in
 `src/lib/bm25.ts`, or terms stop lining up and the lexical branch silently returns nothing.
+The index side calls `buildDocumentSparseVector`, which counts the chunk's breadcrumb
+(its first line) `BM25_BREADCRUMB_BOOST` times over — sibling pages of a registry often
+differ in nothing but their title. That is a *weighting* difference only: the terms still
+come from the same `tokenize`, so the two sides agree term for term. Both facts are pinned
+by `BM25_SCHEME_VERSION`; bumping it means old vectors are no longer comparable to new
+ones and the collection has to be rebuilt.
 
 ## Quick Start
 

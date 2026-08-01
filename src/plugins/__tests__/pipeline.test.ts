@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { docSummaries, sections } from '../../db/schema.js';
-import { buildSparseVector } from '../../lib/bm25.js';
+import { buildDocumentSparseVector, buildSparseVector } from '../../lib/bm25.js';
 import { ChunkParseError } from '../../lib/chunk-errors.js';
 import { countTokens, DOC_SUMMARY_MAX_TOKENS } from '../../lib/chunker.js';
 import type { FileChangeEvent } from '../../lib/indexer.js';
@@ -1113,7 +1113,9 @@ describe('pipeline plugin (per-user)', () => {
 
       expect(embedded).toContain('Аннотация документа: ');
       expect(chunkText).not.toContain('Аннотация документа');
-      expect(point?.vector.bm25).toEqual(buildSparseVector(chunkText));
+      // The document builder, not the plain one: the indexed side boosts the chunk's
+      // breadcrumb, and only the annotation is supposed to be missing from the input.
+      expect(point?.vector.bm25).toEqual(buildDocumentSparseVector(chunkText));
       // A term that occurs only in the annotation must not be in the sparse vector.
       const annotationOnly = buildSparseVector('сертификаты взаимодействия');
       const sparse = point?.vector.bm25 as { indices: number[] };

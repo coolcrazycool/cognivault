@@ -27,8 +27,10 @@ export const DENSE_VECTOR_NAME = 'dense';
  * silently mismatched.
  *
  * v2 — {@link BM25_AVG_LEN} corrected to the measured corpus average.
+ * v3 — {@link tokenize} emits the whole compound identifier alongside its fragments,
+ *      and {@link buildDocumentSparseVector} boosts the breadcrumb's term frequencies.
  */
-export const BM25_SCHEME_VERSION = 2;
+export const BM25_SCHEME_VERSION = 3;
 
 // --- BM25 term-frequency saturation parameters -------------------------------
 // value = tf * (k1 + 1) / (tf + k1 * (1 - b + b * len / AVG_LEN))
@@ -51,6 +53,27 @@ export const BM25_B = 0.75;
  */
 export const BM25_AVG_LEN = 128;
 
+/**
+ * How many times a document's breadcrumb counts towards its term frequencies —
+ * the "title field weight" of BM25F, expressed as plain token repetition so the
+ * scoring formula itself stays untouched. Applied by
+ * {@link buildDocumentSparseVector} only; a query has no breadcrumb.
+ *
+ * Measured, not guessed. On the customer's Confluence corpus (920 chunks, 230
+ * golden questions, `tools/rag_audit/audit_retrieval.py`) the lexical branch's
+ * hit@1 over the 160 answerable generated questions runs 0.806 at x1, 0.838 at
+ * x4, 0.844 at x5, 0.838 at x6 and 0.844 at x8: a broad plateau from x4 to x8
+ * with the peak at x5, so the value is not on a knife edge. The gain is
+ * concentrated exactly where the hypothesis predicted — sibling registry pages
+ * that differ only in their title: `definition` 0.75 -> 1.00, `procedure`
+ * 0.86 -> 1.00, `table` 0.82 -> 0.89. Pushing further starts drowning body terms
+ * (`synthesis` falls back at x6+).
+ *
+ * Costs nothing in index size: the breadcrumb's terms are already in the vector,
+ * only their values change.
+ */
+export const BM25_BREADCRUMB_BOOST = 5;
+
 /** Sparse vector in Qdrant wire format: parallel arrays of u32 indices and weights. */
 export interface SparseVector {
   indices: number[];
@@ -65,6 +88,34 @@ const NON_WORD = /[^\p{L}\p{N}]+/u;
 
 /** A token made purely of lowercase Cyrillic letters — the only thing we stem. */
 const CYRILLIC_WORD = /^[а-я]+$/;
+
+/**
+ * A compound identifier: two or more alphanumeric parts joined by `_` or `.` with no
+ * whitespace between them — `epk_id`, `afpc_sss_src.cards_event`, `build.sbt`.
+ * Letters of any script, because the corpus contains identifiers with a stray Cyrillic
+ * letter typed inside an otherwise Latin name (`afсc_inc_distr.event`).
+ *
+ * The lookbehind is load-bearing for SPEED, not for matching: it forbids starting a
+ * match in the middle of an alphanumeric run. Without it, a long run of letters with no
+ * separator (a base64 blob, a wall of table text) makes the leading `+` backtrack over
+ * its whole length at EVERY offset — quadratic, and minutes on a 100 kB chunk. A match
+ * that would start mid-run is always subsumed by one starting at the run's first
+ * character, and matching is leftmost, so no match is lost.
+ */
+const IDENTIFIER_RUN = /(?<![\p{L}\p{N}])[\p{L}\p{N}]+(?:[._][\p{L}\p{N}]+)+/gu;
+
+/** Splits a compound identifier into its parts. */
+const IDENTIFIER_SEPARATOR = /[._]/;
+
+/** Any letter — a run without one is a version or a decimal (`0.99`, `1.2.3`), not a name. */
+const HAS_LETTER = /\p{L}/u;
+
+/**
+ * Shortest joined identifier worth emitting. Below this the joined form is an
+ * abbreviation rather than a name — `т.д`, `т.е`, `p.s` — and carries no more signal
+ * than the fragments it came from.
+ */
+const MIN_JOINED_LENGTH = 4;
 
 /**
  * Short function-word list (ru + en). Deliberately not a full corpus: these are the
@@ -252,6 +303,14 @@ function stemRussian(input: string): string {
  * Folding "ё" is a deliberate deviation from stock Snowball (which treats "ё" as a
  * separate letter): it makes "развёрнутый" and "развернутый" collide, and it is
  * applied identically at index and query time, so the two sides still agree.
+ *
+ * A compound identifier additionally yields its JOINED form on top of its fragments:
+ * `afpc_sss_inc_safp_rsa_mapping` produces the six fragments AND
+ * `afpcsssincsafprsamapping`. Splitting alone made the identifier indistinguishable
+ * from its dozens of sibling registry pages, which share every fragment; the joined
+ * term is unique to the one page and so carries near-maximal IDF. The fragments stay
+ * because queries naming only part of an identifier must keep working — and because
+ * both sides run through this same function, the extra term lines up automatically.
  */
 export function tokenize(text: string): string[] {
   if (text.length === 0) return [];
@@ -259,12 +318,21 @@ export function tokenize(text: string): string[] {
   const normalized = text.toLowerCase().replaceAll('ё', 'е');
   const tokens: string[] = [];
 
-  for (const raw of normalized.split(NON_WORD)) {
-    if (raw.length < MIN_TOKEN_LENGTH) continue;
-    if (STOP_WORDS.has(raw)) continue;
+  const push = (raw: string): void => {
+    if (raw.length < MIN_TOKEN_LENGTH) return;
+    if (STOP_WORDS.has(raw)) return;
     const token = CYRILLIC_WORD.test(raw) ? stemRussian(raw) : raw;
-    if (token.length === 0) continue;
+    if (token.length === 0) return;
     tokens.push(token);
+  };
+
+  for (const raw of normalized.split(NON_WORD)) push(raw);
+
+  for (const match of normalized.matchAll(IDENTIFIER_RUN)) {
+    const joined = match[0].split(IDENTIFIER_SEPARATOR).join('');
+    if (joined.length < MIN_JOINED_LENGTH) continue;
+    if (!HAS_LETTER.test(joined)) continue;
+    push(joined);
   }
 
   return tokens;
@@ -307,7 +375,40 @@ export function hashToken(token: string): number {
  * lexical branch" rather than sending it to Qdrant.
  */
 export function buildSparseVector(text: string): SparseVector {
+  return vectorFromTokens(tokenize(text));
+}
+
+/**
+ * Builds the BM25 sparse vector for an INDEXED chunk, whose breadcrumb counts
+ * {@link BM25_BREADCRUMB_BOOST} times over.
+ *
+ * Every chunk the chunker emits is `<breadcrumb>\n\n<body>` (`withBreadcrumb`), so the
+ * breadcrumb is exactly the first line — no extra plumbing needed to locate it. Sibling
+ * pages of a registry routinely differ in nothing but their title, and at tf = 1 the
+ * title's terms are outvoted by a body they all share; repeating them is the "title
+ * field weight" of BM25F without leaving the plain BM25 formula.
+ *
+ * Only the DOCUMENT side does this — a question has no breadcrumb — but the terms still
+ * come from the same {@link tokenize}, so index and query indices line up exactly as
+ * before. Anything without a newline (and every query) falls through to
+ * {@link buildSparseVector}.
+ */
+export function buildDocumentSparseVector(text: string): SparseVector {
+  const newline = text.indexOf('\n');
+  if (newline <= 0 || BM25_BREADCRUMB_BOOST <= 1) return buildSparseVector(text);
+
   const tokens = tokenize(text);
+  if (tokens.length === 0) return { indices: [], values: [] };
+
+  // The full text already counts the breadcrumb once; add the remaining copies.
+  const breadcrumb = tokenize(text.slice(0, newline));
+  for (let copy = 1; copy < BM25_BREADCRUMB_BOOST; copy++) tokens.push(...breadcrumb);
+
+  return vectorFromTokens(tokens);
+}
+
+/** Term frequencies -> BM25 tf weights. The shared tail of both builders above. */
+function vectorFromTokens(tokens: readonly string[]): SparseVector {
   if (tokens.length === 0) return { indices: [], values: [] };
 
   const frequencies = new Map<number, number>();
