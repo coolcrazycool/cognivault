@@ -389,3 +389,126 @@ async def clear_vault(cv: dict[str, Any] | None = None) -> dict[str, Any]:
         except CogniVaultError as exc:
             failed.append((path, exc.status))
     return {"deleted": deleted, "failed": failed, "total": len(files)}
+
+
+# --------------------------------------------------------------------------- #
+# Admin: vault reindex + collection rebuild
+# --------------------------------------------------------------------------- #
+#
+# Both are long-running JOBS, not requests: the POST enqueues and answers
+# ``202 {jobId, status, message}`` immediately, and progress is read back from a
+# separate status endpoint. Nothing here blocks for the duration of the work.
+#
+# Every helper raises :class:`CogniVaultError` on a non-2xx, carrying the
+# upstream ``status`` and a body excerpt — the three statuses that MEAN something
+# are left for the caller to interpret rather than being swallowed here:
+#
+# * **409** — a job of that kind is already running (attach to it, don't retry);
+# * **400** ``CONFIRM_MISMATCH`` — the typed collection name did not match;
+# * **404** — an older backend without ``/api/admin/collection*`` at all.
+
+_ADMIN_START_TIMEOUT = 30.0  # POST that only enqueues a job
+_ADMIN_READ_TIMEOUT = 15.0  # status / info polls
+
+
+def _admin_error(name: str, resp: httpx.Response) -> CogniVaultError:
+    return CogniVaultError(
+        f"{name} failed ({resp.status_code})",
+        resp.status_code,
+        _excerpt(resp.text),
+    )
+
+
+async def reindex(
+    scope: str = "full", cv: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """POST ``/api/admin/reindex`` — re-chunk and re-embed the caller's vault.
+
+    Non-destructive to the vault files. Returns the ``202`` body
+    ``{jobId, status, message}``; raises with ``status == 409`` when a reindex is
+    already running.
+    """
+    base, token = _resolve_cv(cv)
+    url = f"{base}/api/admin/reindex"
+    body = json.dumps({"scope": scope}, ensure_ascii=False).encode("utf-8")
+    headers = _auth_headers(token, {"Content-Type": "application/json; charset=utf-8"})
+    async with httpx.AsyncClient(timeout=_ADMIN_START_TIMEOUT) as client:
+        resp = await client.post(url, content=body, headers=headers)
+    if not (200 <= resp.status_code < 300):
+        raise _admin_error("reindex", resp)
+    return resp.json()
+
+
+async def reindex_status(
+    job_id: str, cv: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """GET ``/api/admin/reindex/status?jobId=…``.
+
+    Returns ``{jobId, scope, status, filesProcessed, totalFiles, errors,
+    errorCount, startedAt, finishedAt}``. A **404** (unknown/expired job) is
+    raised like any other non-2xx so the caller can decide it means "no job".
+    """
+    base, token = _resolve_cv(cv)
+    url = f"{base}/api/admin/reindex/status"
+    headers = _auth_headers(token)
+    async with httpx.AsyncClient(timeout=_ADMIN_READ_TIMEOUT) as client:
+        resp = await client.get(url, params={"jobId": job_id}, headers=headers)
+    if resp.status_code != 200:
+        raise _admin_error("reindex status", resp)
+    return resp.json()
+
+
+async def collection_info(cv: dict[str, Any] | None = None) -> dict[str, Any]:
+    """GET ``/api/admin/collection`` — physical collection + scheme version.
+
+    Returns ``{collection, alias, schemeVersion, expectedSchemeVersion,
+    pointsCount}``. Raises with ``status == 404`` on a backend that predates the
+    collection endpoints; the caller degrades instead of failing.
+    """
+    base, token = _resolve_cv(cv)
+    url = f"{base}/api/admin/collection"
+    headers = _auth_headers(token)
+    async with httpx.AsyncClient(timeout=_ADMIN_READ_TIMEOUT) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code != 200:
+        raise _admin_error("collection info", resp)
+    return resp.json()
+
+
+async def rebuild_collection(
+    confirm: str, cv: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """POST ``/api/admin/collection/rebuild`` — drop and rebuild the collection.
+
+    Destructive and cluster-wide. ``confirm`` must be the physical collection
+    name; the backend is the authority on the match and answers **400**
+    ``CONFIRM_MISMATCH`` when it differs. **409** means a rebuild is already
+    running. Returns the ``202`` body ``{jobId, status, message}``.
+    """
+    base, token = _resolve_cv(cv)
+    url = f"{base}/api/admin/collection/rebuild"
+    body = json.dumps({"confirm": confirm}, ensure_ascii=False).encode("utf-8")
+    headers = _auth_headers(token, {"Content-Type": "application/json; charset=utf-8"})
+    async with httpx.AsyncClient(timeout=_ADMIN_START_TIMEOUT) as client:
+        resp = await client.post(url, content=body, headers=headers)
+    if not (200 <= resp.status_code < 300):
+        raise _admin_error("collection rebuild", resp)
+    return resp.json()
+
+
+async def rebuild_status(
+    job_id: str, cv: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """GET ``/api/admin/collection/rebuild/status?jobId=…``.
+
+    Returns ``{jobId, status, phase, collection, schemeVersion, usersTotal,
+    usersDone, filesProcessed, errors, errorCount, startedAt, finishedAt}``.
+    """
+    base, token = _resolve_cv(cv)
+    url = f"{base}/api/admin/collection/rebuild/status"
+    headers = _auth_headers(token)
+    async with httpx.AsyncClient(timeout=_ADMIN_READ_TIMEOUT) as client:
+        resp = await client.get(url, params={"jobId": job_id}, headers=headers)
+    if resp.status_code != 200:
+        raise _admin_error("rebuild status", resp)
+    return resp.json()

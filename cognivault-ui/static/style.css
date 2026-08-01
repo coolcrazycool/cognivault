@@ -176,6 +176,8 @@ button,input,textarea,select{font:inherit;color:inherit}
 .linkbtn:hover{border-color:var(--accent);color:var(--accent)}
 .btn{height:38px;padding:0 16px;border-radius:var(--r-input);border:0;cursor:pointer;font-weight:600;font-family:var(--font-display)}
 .btn.primary{background:var(--accent);color:var(--accent-fg)} .btn.ghost{background:transparent;border:1px solid var(--border);color:var(--fg)}
+.btn.danger{background:transparent;border:1px solid var(--err);color:var(--err)}
+.btn.danger:not(:disabled):hover{background:var(--err-weak)}
 .btn:disabled{opacity:.5;cursor:not-allowed}
 .saved{font-size:12px;color:var(--ok);margin-top:8px}
 .section-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px}
@@ -210,6 +212,12 @@ button,input,textarea,select{font:inherit;color:inherit}
 .conf-validate-result .pill{height:auto;min-height:28px;white-space:normal;text-align:left}
 .conf-sync-counter{margin-top:10px;font-size:12px;color:var(--fg-muted);font-variant-numeric:tabular-nums}
 #confluence-console{margin-top:12px}
+
+/* Индекс и поиск — reindex / collection rebuild */
+#reindex-console,#rebuild-console{margin-top:12px}
+#rebuild-block{margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
+#rebuild-confirm{margin-top:12px}
+#rebuild-collection-name{font-family:var(--font-mono);font-size:11.5px;color:var(--fg)}
 .conf-status{margin-top:12px;font-size:12px;color:var(--fg-muted)}
 .chip a.ct{display:inline-flex;align-items:center;gap:4px;text-decoration:none;color:var(--accent)}
 .chip a.ct:hover{text-decoration:underline}

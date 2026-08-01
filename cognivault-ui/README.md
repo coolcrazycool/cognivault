@@ -215,6 +215,34 @@ Confluence.
 Поскольку ручки грейдера и ширина ретрива живут в конфиге пользователя, A/B двух
 наборов настроек делается без пересборки образа — см. `tools/eval/README.md`.
 
+## Индекс и поиск (переиндексация и пересоздание коллекции)
+
+У оператора нет доступа ни к шеллу, ни к векторной базе, поэтому обе операции
+обслуживания живут в панели настроек, блок **«Индекс и поиск»**:
+
+- **«Переиндексировать вольт»** — заново разбирает и векторизует документы
+  пользователя. Файлы не трогает. Показывает `обработано N из M файлов` и в
+  конце — сводку с пофайловыми ошибками.
+- **«Пересоздать коллекцию»** — разрушающая операция на весь кластер: удаляет
+  векторы **всех** пользователей и собирает коллекцию заново. Единственная
+  защита — подтверждение: предупреждение прямым текстом (что удаляются векторы
+  всех, что до конца перестройки поиск ничего не находит) плюс поле, куда надо
+  **вручную ввести название коллекции** (берётся из `GET /api/admin/collection`,
+  в поле не подставляется). Показывает этап, `пользователей X из Y` и ошибки.
+
+Рядом одной фразой сказано состояние схемы индекса: при
+`schemeVersion != expectedSchemeVersion` — «поиск по словам работает хуже
+обычного, пока коллекция не пересоздана» (номера версий не печатаются).
+
+Обе операции — **задачи на сервере**, а не запросы: `POST` возвращает `jobId`,
+прогресс читается опросом статуса раз в 2.5 с. Поэтому задача переживает
+закрытие вкладки, а вернувшийся оператор при открытии панели снова цепляется к
+тому, что ещё идёт. Двойной клик безопасен: `409` от бэкенда не показывается
+ошибкой, а подключает к уже идущей задаче. `jobId` живёт в памяти процесса
+(`admin_routes._JOBS`), не в пользовательском `config.json`. На старом бэкенде
+без `/api/admin/collection*` прокси отвечает `501 COLLECTION_API_UNAVAILABLE`,
+UI прячет пересоздание и объясняет почему — переиндексация продолжает работать.
+
 ## API surface
 
 | Method | Path                        | Purpose                                       |
@@ -230,6 +258,11 @@ Confluence.
 | GET    | `/api/history/{id}`         | load a chat                                    |
 | DELETE | `/api/history/{id}`         | delete a chat                                  |
 | POST   | `/api/upload`               | forward a vault zip to CogniVault              |
+| POST   | `/api/admin/reindex`        | start a vault reindex → `{jobId, attached}`    |
+| GET    | `/api/admin/reindex/status` | reindex progress (`jobId` optional → remembered job, else idle) |
+| GET    | `/api/admin/collection`     | collection name/alias, scheme version, points  |
+| POST   | `/api/admin/collection/rebuild` | rebuild the collection (`confirm` = collection name) |
+| GET    | `/api/admin/collection/rebuild/status` | rebuild phase / users done / errors |
 | GET    | `/api/confluence/config`    | current Confluence source config (no secrets)  |
 | PUT    | `/api/confluence/config`    | save Confluence credentials + root link        |
 | POST   | `/api/confluence/validate`  | check credentials / resolve the root page      |

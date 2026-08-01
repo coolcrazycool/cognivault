@@ -378,6 +378,58 @@
       <div class="conf-status" id="conf-status"></div>
     </section>
 
+    <!-- §3.7 Индекс и поиск -->
+    <section class="section" id="section-index" aria-labelledby="s-index">
+      <span class="eyebrow" id="s-index">Индекс и поиск</span>
+      <div class="conf-status" id="index-collection-state">Состояние индекса загружается…</div>
+      <p class="warn-hint" id="index-scheme-warn" hidden></p>
+
+      <small class="hint">
+        Переиндексация заново разбирает и векторизует ваши документы. Сами файлы не меняются.
+        Задача выполняется на сервере: страницу можно закрыть, прогресс не потеряется.
+      </small>
+      <div class="section-actions">
+        <button type="button" class="btn ghost" id="reindex-btn">Переиндексировать вольт</button>
+      </div>
+      <div class="conf-sync-counter" id="reindex-progress" hidden></div>
+      <div class="console" id="reindex-console" aria-live="polite" aria-label="Журнал переиндексации" hidden></div>
+
+      <!-- Пересоздание коллекции: разрушающая операция на весь кластер -->
+      <div id="rebuild-block" hidden>
+        <p class="warn-hint" id="rebuild-unavailable" hidden></p>
+        <div id="rebuild-controls">
+          <small class="hint">
+            Пересоздание нужно, когда изменилась схема индекса: коллекция удаляется и собирается заново
+            для всех пользователей сразу.
+          </small>
+          <div class="section-actions">
+            <button type="button" class="btn danger" id="rebuild-btn">Пересоздать коллекцию</button>
+          </div>
+          <div id="rebuild-confirm" hidden>
+            <p class="warn-hint">
+              Это удалит векторы ВСЕХ пользователей, а не только ваши. Пока идёт пересоздание,
+              поиск по базе знаний не находит ничего — ни у вас, ни у остальных. Сами документы
+              не удаляются, но операция может занять много времени.
+            </p>
+            <div class="field">
+              <label for="rebuild-confirm-input">
+                Чтобы подтвердить, введите название коллекции <code id="rebuild-collection-name"></code>
+              </label>
+              <input class="input" id="rebuild-confirm-input" autocomplete="off" spellcheck="false"
+                     placeholder="название коллекции">
+              <small class="hint">Поле не заполняется автоматически — название нужно ввести вручную.</small>
+            </div>
+            <div class="section-actions">
+              <button type="button" class="btn danger" id="rebuild-go" disabled>Пересоздать</button>
+              <button type="button" class="btn ghost" id="rebuild-cancel">Отмена</button>
+            </div>
+          </div>
+          <div class="conf-sync-counter" id="rebuild-progress" hidden></div>
+          <div class="console" id="rebuild-console" aria-live="polite" aria-label="Журнал пересоздания коллекции" hidden></div>
+        </div>
+      </div>
+    </section>
+
     <!-- §4 Окружение -->
     <section class="section" id="section-env" aria-labelledby="s-env">
       <span class="eyebrow" id="s-env">Окружение</span>

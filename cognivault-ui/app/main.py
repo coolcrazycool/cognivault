@@ -23,6 +23,7 @@ from . import deps, settings
 from .config import PATHS
 from .deps import ApiError, api_error_handler
 from .routes import (
+    admin_routes,
     chat_routes,
     config_routes,
     confluence_routes,
@@ -131,6 +132,9 @@ def create_app() -> FastAPI:
     app.include_router(history_routes.router, dependencies=auth)
     app.include_router(feedback_routes.router, dependencies=auth)
     app.include_router(upload_routes.router, dependencies=auth)
+    # Index maintenance (reindex / collection rebuild). Both modes: the operator
+    # has no shell or vector-DB access, so the drawer is the only surface.
+    app.include_router(admin_routes.router, dependencies=auth)
     # Confluence source: per-user data, registered in BOTH modes behind the same
     # bearer-token gate. The CONFLUENCE_ENABLED admin flag (default on) lets a
     # server deployment turn the surface off entirely.

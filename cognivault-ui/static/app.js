@@ -22,6 +22,16 @@
     confPasswordVisible: false,
     confPatVisible: false,
     confSyncing: false,    // a confluence sync SSE is in flight
+    collection: null,      // last successful GET /api/admin/collection
+    reindexJob: null,      // jobId of the vault reindex we are watching
+    reindexTimer: null,    // setTimeout handle of the reindex poll loop
+    reindexBusy: false,    // a start request is in flight (double-click guard)
+    reindexWatching: false, // we saw this job running → announce its result
+    rebuildJob: null,      // jobId of the collection rebuild we are watching
+    rebuildTimer: null,
+    rebuildBusy: false,
+    rebuildWatching: false,
+    rebuildPhase: null,    // last phase logged, so transitions log once
   };
 
   /* ============================ DOM ============================ */
@@ -119,6 +129,23 @@
     confSyncCounter: $("conf-sync-counter"),
     confConsole: $("confluence-console"),
     confStatus: $("conf-status"),
+    // §3.7 index maintenance (reindex / collection rebuild)
+    indexCollectionState: $("index-collection-state"),
+    indexSchemeWarn: $("index-scheme-warn"),
+    reindexBtn: $("reindex-btn"),
+    reindexProgress: $("reindex-progress"),
+    reindexConsole: $("reindex-console"),
+    rebuildBlock: $("rebuild-block"),
+    rebuildUnavailable: $("rebuild-unavailable"),
+    rebuildControls: $("rebuild-controls"),
+    rebuildBtn: $("rebuild-btn"),
+    rebuildConfirm: $("rebuild-confirm"),
+    rebuildConfirmInput: $("rebuild-confirm-input"),
+    rebuildCollectionName: $("rebuild-collection-name"),
+    rebuildGo: $("rebuild-go"),
+    rebuildCancel: $("rebuild-cancel"),
+    rebuildProgress: $("rebuild-progress"),
+    rebuildConsole: $("rebuild-console"),
     // server-mode sections (hidden in server mode / shown read-only)
     sectionServerInfo: $("section-server-info"),
     sectionConn: $("section-conn"),
@@ -975,6 +1002,8 @@
     document.addEventListener("keydown", drawerKeydown, true);
     // Load the Confluence source config each time the drawer opens (both modes).
     loadConfluenceConfig();
+    // …and the index state, reattaching to a reindex/rebuild already running.
+    loadIndexState();
     const first = dom.drawer.querySelector("button, input, select, a[href], textarea");
     if (first) first.focus();
   }
@@ -1396,6 +1425,332 @@
       state.confSyncing = false;
       dom.confSync.disabled = false;
     }
+  }
+
+  /* ============================ INDEX MAINTENANCE ============================
+   * Reindex (this user's documents, non-destructive) and collection rebuild
+   * (destructive, every user). Both are server-side JOBS: the POST returns a
+   * jobId immediately and we POLL the status endpoint — the work outlives this
+   * page, so reopening the drawer reattaches to whatever is still running
+   * instead of starting anything.
+   */
+  const ADMIN_POLL_MS = 2500;
+  const REBUILD_PHASE = {
+    dropping: "удаление векторов",
+    creating: "создание коллекции",
+    indexing: "индексация документов",
+    done: "завершение",
+  };
+
+  function num(n) {
+    if (typeof n !== "number" || !isFinite(n)) return null;
+    try { return n.toLocaleString("ru-RU"); } catch (_) { return String(n); }
+  }
+
+  function indexLog(node, kind, text) {
+    if (!node) return;
+    const cls = kind === "error" ? "ln lv-err"
+      : kind === "done" ? "step lv-ok"
+      : kind === "step" ? "step"
+      : "ln lv-dim";
+    const line = el("span", cls);
+    line.textContent = ((kind === "step" || kind === "done") ? "▸ " : "") + text;
+    node.hidden = false;
+    node.appendChild(line);
+    node.scrollTop = node.scrollHeight;
+  }
+
+  // Per-file errors arrive either as plain strings or as {path, error} objects.
+  function jobErrorText(e) {
+    if (e == null) return "";
+    if (typeof e === "string") return e;
+    const path = e.path || e.file || e.name || "";
+    const msg = e.error || e.message || e.reason || "";
+    if (path && msg) return path + " — " + msg;
+    if (path || msg) return path || msg;
+    try { return JSON.stringify(e); } catch (_) { return String(e); }
+  }
+
+  function logJobErrors(node, errors) {
+    const list = Array.isArray(errors) ? errors : [];
+    list.forEach((e) => indexLog(node, "error", jobErrorText(e)));
+  }
+
+  /* ---- collection state + scheme version ---- */
+  function renderCollectionState(info) {
+    state.collection = info || null;
+    if (!info) return;
+    const parts = [];
+    if (info.collection) parts.push("Коллекция " + info.collection);
+    if (info.alias && info.alias !== info.collection) parts.push("алиас " + info.alias);
+    const points = num(info.pointsCount);
+    if (points != null) {
+      parts.push(points + " " + pluralRu(info.pointsCount, "фрагмент", "фрагмента", "фрагментов"));
+    }
+    dom.indexCollectionState.textContent = parts.join(" · ");
+
+    // One sentence about what a scheme mismatch MEANS — not two version numbers.
+    // A null schemeVersion (collection carries no marker) is stale too, so the
+    // test is "not equal to expected", not "both present and different".
+    const stale = info.expectedSchemeVersion != null
+      && info.schemeVersion !== info.expectedSchemeVersion;
+    dom.indexSchemeWarn.hidden = !stale;
+    dom.indexSchemeWarn.textContent = stale
+      ? "Индекс собран по устаревшей схеме: поиск по словам работает хуже обычного, пока коллекция не пересоздана."
+      : "";
+    if (dom.rebuildCollectionName) dom.rebuildCollectionName.textContent = info.collection || "";
+  }
+
+  function showRebuildUnavailable(message) {
+    state.collection = null;
+    dom.rebuildBlock.hidden = false;
+    dom.rebuildControls.hidden = true;
+    dom.rebuildUnavailable.hidden = false;
+    dom.rebuildUnavailable.textContent = message;
+  }
+
+  async function loadCollectionInfo() {
+    try {
+      const info = await apiSend("/api/admin/collection", "GET");
+      renderCollectionState(info || {});
+      dom.rebuildBlock.hidden = false;
+      dom.rebuildControls.hidden = false;
+      dom.rebuildUnavailable.hidden = true;
+    } catch (e) {
+      if (e.handled) return;
+      if (e.code === "COLLECTION_API_UNAVAILABLE" || e.status === 501) {
+        dom.indexCollectionState.textContent = "";
+        dom.indexSchemeWarn.hidden = true;
+        showRebuildUnavailable(e.message || "Пересоздание коллекции недоступно в этой версии сервиса");
+        return;
+      }
+      dom.indexCollectionState.textContent = "Не удалось получить состояние индекса: " + e.message;
+      dom.rebuildBlock.hidden = true;
+    }
+  }
+
+  /* ---- vault reindex ---- */
+  function setReindexRunning(on) {
+    dom.reindexBtn.disabled = on || state.reindexBusy;
+    dom.reindexBtn.textContent = on ? "Переиндексация идёт…" : "Переиндексировать вольт";
+  }
+
+  function renderReindexProgress(st) {
+    const done = num(st.filesProcessed) || "0";
+    const total = num(st.totalFiles);
+    const bits = ["Обработано " + done + (total != null ? " из " + total : "") + " файлов"];
+    if (st.errorCount) bits.push("ошибок " + st.errorCount);
+    if (st.status === "running") bits.push("задача идёт на сервере — окно можно закрыть");
+    dom.reindexProgress.hidden = false;
+    dom.reindexProgress.textContent = bits.join(" · ");
+  }
+
+  function stopReindexPoll() {
+    if (state.reindexTimer) clearTimeout(state.reindexTimer);
+    state.reindexTimer = null;
+  }
+
+  async function pollReindex() {
+    stopReindexPoll();
+    let st;
+    try {
+      const q = state.reindexJob ? "?jobId=" + encodeURIComponent(state.reindexJob) : "";
+      st = await apiSend("/api/admin/reindex/status" + q, "GET");
+    } catch (e) {
+      if (!e.handled) indexLog(dom.reindexConsole, "error", "Не удалось получить статус: " + e.message);
+      setReindexRunning(false);
+      return;
+    }
+    st = st || {};
+    if (!st.status || st.status === "idle") {
+      state.reindexJob = null;
+      state.reindexWatching = false;
+      setReindexRunning(false);
+      return;
+    }
+    state.reindexJob = st.jobId || state.reindexJob;
+    renderReindexProgress(st);
+    if (st.status === "running") {
+      state.reindexWatching = true;
+      setReindexRunning(true);
+      state.reindexTimer = setTimeout(pollReindex, ADMIN_POLL_MS);
+      return;
+    }
+    // terminal — announce it only in the tab that actually watched the job run
+    setReindexRunning(false);
+    state.reindexJob = null;
+    if (!state.reindexWatching) return;
+    state.reindexWatching = false;
+    const summary = "Обработано " + (num(st.filesProcessed) || "0") + " файлов, ошибок " + (st.errorCount || 0);
+    logJobErrors(dom.reindexConsole, st.errors);
+    if (st.status === "failed") {
+      indexLog(dom.reindexConsole, "error", "Переиндексация завершилась с ошибкой. " + summary);
+      toast("err", "Переиндексация не удалась", summary);
+    } else {
+      indexLog(dom.reindexConsole, "done", "Переиндексация завершена. " + summary);
+      toast("ok", "Переиндексация завершена", summary);
+    }
+    loadCollectionInfo();
+  }
+
+  async function startReindex() {
+    if (state.reindexBusy || state.reindexTimer) return; // double-click guard
+    state.reindexBusy = true;
+    dom.reindexBtn.disabled = true;
+    dom.reindexConsole.hidden = false;
+    dom.reindexConsole.textContent = "";
+    indexLog(dom.reindexConsole, "step", "Запуск переиндексации…");
+    try {
+      const res = await apiSend("/api/admin/reindex", "POST", { scope: "full" });
+      state.reindexJob = (res && res.jobId) || null;
+      if (res && res.attached) indexLog(dom.reindexConsole, "step", "Переиндексация уже шла — подключились к ней.");
+    } catch (e) {
+      if (!e.handled) {
+        indexLog(dom.reindexConsole, "error", e.message);
+        toast("err", "Не удалось запустить переиндексацию", e.message);
+      }
+      state.reindexBusy = false;
+      setReindexRunning(false);
+      return;
+    }
+    state.reindexBusy = false;
+    state.reindexWatching = true;
+    setReindexRunning(true);
+    pollReindex();
+  }
+
+  /* ---- collection rebuild ---- */
+  function setRebuildRunning(on) {
+    dom.rebuildBtn.disabled = on || state.rebuildBusy;
+    dom.rebuildBtn.textContent = on ? "Пересоздание идёт…" : "Пересоздать коллекцию";
+    if (on) closeRebuildConfirm();
+  }
+
+  function openRebuildConfirm() {
+    if (state.rebuildTimer) return;
+    dom.rebuildConfirm.hidden = false;
+    dom.rebuildConfirmInput.value = ""; // never pre-filled: it must be typed
+    dom.rebuildGo.disabled = true;
+    dom.rebuildConfirmInput.focus();
+  }
+
+  function closeRebuildConfirm() {
+    dom.rebuildConfirm.hidden = true;
+    dom.rebuildConfirmInput.value = "";
+    dom.rebuildGo.disabled = true;
+  }
+
+  function checkRebuildConfirm() {
+    const expected = (state.collection && state.collection.collection) || "";
+    dom.rebuildGo.disabled = !expected || dom.rebuildConfirmInput.value.trim() !== expected;
+  }
+
+  function renderRebuildProgress(st) {
+    const bits = [];
+    const phase = REBUILD_PHASE[st.phase] || st.phase;
+    if (phase) bits.push("Этап: " + phase);
+    if (st.usersTotal != null) bits.push("пользователей " + (st.usersDone || 0) + " из " + st.usersTotal);
+    const files = num(st.filesProcessed);
+    if (files != null) bits.push("файлов " + files);
+    if (st.errorCount) bits.push("ошибок " + st.errorCount);
+    if (st.status === "running") bits.push("задача идёт на сервере — окно можно закрыть");
+    dom.rebuildProgress.hidden = false;
+    dom.rebuildProgress.textContent = bits.join(" · ");
+  }
+
+  function stopRebuildPoll() {
+    if (state.rebuildTimer) clearTimeout(state.rebuildTimer);
+    state.rebuildTimer = null;
+  }
+
+  async function pollRebuild() {
+    stopRebuildPoll();
+    let st;
+    try {
+      const q = state.rebuildJob ? "?jobId=" + encodeURIComponent(state.rebuildJob) : "";
+      st = await apiSend("/api/admin/collection/rebuild/status" + q, "GET");
+    } catch (e) {
+      if (!e.handled) indexLog(dom.rebuildConsole, "error", "Не удалось получить статус: " + e.message);
+      setRebuildRunning(false);
+      return;
+    }
+    st = st || {};
+    if (!st.status || st.status === "idle") {
+      state.rebuildJob = null;
+      state.rebuildWatching = false;
+      setRebuildRunning(false);
+      return;
+    }
+    state.rebuildJob = st.jobId || state.rebuildJob;
+    if (st.phase && st.phase !== state.rebuildPhase) {
+      state.rebuildPhase = st.phase;
+      indexLog(dom.rebuildConsole, "step", REBUILD_PHASE[st.phase] || st.phase);
+    }
+    renderRebuildProgress(st);
+    if (st.status === "running") {
+      state.rebuildWatching = true;
+      setRebuildRunning(true);
+      state.rebuildTimer = setTimeout(pollRebuild, ADMIN_POLL_MS);
+      return;
+    }
+    setRebuildRunning(false);
+    state.rebuildJob = null;
+    state.rebuildPhase = null;
+    if (!state.rebuildWatching) return;
+    state.rebuildWatching = false;
+    const summary = "Обработано файлов " + (num(st.filesProcessed) || "0")
+      + ", пользователей " + (st.usersDone || 0) + " из " + (st.usersTotal != null ? st.usersTotal : "?")
+      + ", ошибок " + (st.errorCount || 0);
+    logJobErrors(dom.rebuildConsole, st.errors);
+    if (st.status === "failed") {
+      indexLog(dom.rebuildConsole, "error", "Пересоздание завершилось с ошибкой. " + summary);
+      toast("err", "Пересоздание не удалось", summary);
+    } else {
+      indexLog(dom.rebuildConsole, "done", "Коллекция пересоздана. " + summary);
+      toast("ok", "Коллекция пересоздана", summary);
+    }
+    loadCollectionInfo();
+  }
+
+  async function startRebuild() {
+    if (state.rebuildBusy || state.rebuildTimer) return; // double-click guard
+    const confirmName = dom.rebuildConfirmInput.value.trim();
+    if (!confirmName) return;
+    state.rebuildBusy = true;
+    dom.rebuildGo.disabled = true;
+    dom.rebuildBtn.disabled = true;
+    dom.rebuildConsole.hidden = false;
+    dom.rebuildConsole.textContent = "";
+    state.rebuildPhase = null;
+    indexLog(dom.rebuildConsole, "step", "Запуск пересоздания коллекции…");
+    try {
+      const res = await apiSend("/api/admin/collection/rebuild", "POST", { confirm: confirmName });
+      state.rebuildJob = (res && res.jobId) || null;
+      if (res && res.attached) indexLog(dom.rebuildConsole, "step", "Пересоздание уже шло — подключились к нему.");
+      closeRebuildConfirm();
+    } catch (e) {
+      if (!e.handled) {
+        indexLog(dom.rebuildConsole, "error", e.message);
+        toast("err", "Не удалось запустить пересоздание", e.message);
+      }
+      state.rebuildBusy = false;
+      setRebuildRunning(false);
+      checkRebuildConfirm();
+      return;
+    }
+    state.rebuildBusy = false;
+    state.rebuildWatching = true;
+    setRebuildRunning(true);
+    pollRebuild();
+  }
+
+  // Drawer open: reattach to anything already running (this browser or not) and
+  // refresh the collection state. Never starts a job.
+  async function loadIndexState() {
+    if (!dom.reindexBtn) return;
+    await loadCollectionInfo();
+    if (!state.reindexTimer) pollReindex();
+    if (!state.rebuildTimer && !dom.rebuildControls.hidden) pollRebuild();
   }
 
   /* ============================ CHAT ============================ */
@@ -1983,6 +2338,18 @@
     if (dom.confSave) dom.confSave.addEventListener("click", saveConfluenceConfig);
     if (dom.confValidate) dom.confValidate.addEventListener("click", validateConfluence);
     if (dom.confSync) dom.confSync.addEventListener("click", syncConfluence);
+
+    // index maintenance — same null-guard discipline as the Confluence block
+    if (dom.reindexBtn) dom.reindexBtn.addEventListener("click", startReindex);
+    if (dom.rebuildBtn) dom.rebuildBtn.addEventListener("click", openRebuildConfirm);
+    if (dom.rebuildCancel) dom.rebuildCancel.addEventListener("click", closeRebuildConfirm);
+    if (dom.rebuildGo) dom.rebuildGo.addEventListener("click", startRebuild);
+    if (dom.rebuildConfirmInput) {
+      dom.rebuildConfirmInput.addEventListener("input", checkRebuildConfirm);
+      dom.rebuildConfirmInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !dom.rebuildGo.disabled) { e.preventDefault(); startRebuild(); }
+      });
+    }
 
     // server-mode login / logout
     if (dom.loginSubmit) dom.loginSubmit.addEventListener("click", submitLogin);
