@@ -118,6 +118,43 @@ def test_single_root_folds_one_level_deeper():
     assert "Всего документов в базе: 30." in block
 
 
+def test_descent_continues_through_every_single_folder_level():
+    """Настоящий вольт Confluence-синка ветвится только на ГЛУБИНЕ 4.
+
+    `build_vault_path` (app/confluence/convert.py) кладёт страницу в
+    ``Confluence/<пространство>/<предки…>/<Заголовок>.md``, и на боевой выгрузке
+    подряд идут три папки-коридора: ``Confluence`` → ``OASISEXT`` → ``OASIS
+    External Home``. Спуск ровно на один уровень оставлял блок со строкой
+    ``- Confluence — 127 (OASISEXT: 127)`` — то есть платой за блок, который про
+    форму базы не говорит НИЧЕГО.
+    """
+    root = "Confluence/OASISEXT/OASIS External Home/Разработка"
+    paths = (
+        [f"{root}/Продукты/Стр {i}.md" for i in range(110)]
+        + [f"{root}/Архив/Стр {i}.md" for i in range(10)]
+        + [f"{root}/База знаний/Стр {i}.md" for i in range(3)]
+        + [f"{root}/{name}.md" for name in ("Продукты", "Архив", "База знаний")]
+        + ["Confluence/OASISEXT/OASIS External Home/Разработка.md"]
+    )
+
+    block = corpus_map.render(paths, n_sources=5)
+
+    assert block is not None
+    assert "Всего документов в базе: 127." in block
+    # Коридор целиком уехал в заголовок, а не съел единственный раздел.
+    assert "Разделы внутри «Confluence/OASISEXT/OASIS External Home»" in block
+    assert "- Разработка — 126" in block
+    assert "Продукты: 110" in block and "Архив: 10" in block
+    assert len(block) <= corpus_map._MAX_MAP_CHARS
+
+
+def test_descent_stops_before_swallowing_the_documents_themselves():
+    """Спуск не уходит в уровень, где остались одни файлы: ``A/x.md`` — это «A»."""
+    block = corpus_map.render(["A/x.md", "A/y.md"])
+    assert "- A — 2" in block
+    assert "внутри" not in block
+
+
 def test_no_descent_when_top_level_already_branches():
     block = corpus_map.render(["A/x.md", "B/y.md"])
     assert "Разделы верхнего уровня" in block

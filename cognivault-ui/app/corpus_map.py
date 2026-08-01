@@ -57,6 +57,11 @@ _MAX_SECTIONS = 12
 _MAX_CHILDREN = 4
 _MAX_MAP_CHARS = 700
 
+# How many single-folder levels the fold may descend through before it gives up
+# (see :func:`_fold`). A guard against a pathological vault, not a design limit:
+# a Confluence sync needs 4.
+_MAX_DESCENT = 8
+
 # Listing cache. A vault listing changes on the indexer's timescale, not the
 # turn's; the failure TTL is shorter so a brief outage self-heals quickly.
 _CACHE_TTL_SECONDS = 300.0
@@ -164,21 +169,41 @@ def _group(docs: list[list[str]], depth: int) -> list[_Section]:
 
 
 def _fold(docs: list[list[str]]) -> tuple[list[_Section], str]:
-    """Fold the corpus into top sections, descending one level if needed.
+    """Fold the corpus into top sections, descending while the level is a corridor.
 
     Returns ``(sections, prefix)``. Depth 1 is the default; a vault whose
-    documents ALL live under one folder (a Confluence sync puts everything under
-    ``Confluence/``) would render a single useless section, so in that case the
-    fold descends to depth 2 and reports the swallowed folder as ``prefix``.
-    Descending is safe there precisely because every document has that folder as
-    its first segment — no document is dropped.
+    documents ALL live under one folder would render a single useless section,
+    so the fold descends and reports the swallowed folders as ``prefix``.
+
+    The descent LOOPS rather than taking a single step, because a real
+    Confluence sync nests several levels before it branches:
+    ``Confluence/<space>/<ancestor>/…`` (``build_vault_path`` in
+    ``app.confluence.convert``). On the corpus this module was built for the
+    branch point is at depth 4 — one step short of it left the block reporting
+    ``- Confluence — 127 (OASISEXT: 127)`` and nothing else, i.e. paying for a
+    block that says nothing about the shape of the base.
+
+    Descending is safe at every step precisely because the level has exactly one
+    folder and every document is under it — no document is dropped. It stops as
+    soon as the level branches, and it never descends INTO the files themselves:
+    a level whose only entry is :data:`_ROOT_LABEL` is worse than the folder
+    above it, so the previous level is kept.
     """
     sections = _group(docs, 0)
-    if len(sections) == 1 and sections[0].label != _ROOT_LABEL:
-        deeper = _group(docs, 1)
-        if len(deeper) > 1:
-            return deeper, sections[0].label
-    return sections, ""
+    prefix: list[str] = []
+    depth = 0
+    while (
+        len(sections) == 1
+        and sections[0].label != _ROOT_LABEL
+        and depth < _MAX_DESCENT
+    ):
+        deeper = _group(docs, depth + 1)
+        if not deeper or (len(deeper) == 1 and deeper[0].label == _ROOT_LABEL):
+            break
+        prefix.append(sections[0].label)
+        sections = deeper
+        depth += 1
+    return sections, "/".join(prefix)
 
 
 def _children_suffix(section: _Section) -> str:

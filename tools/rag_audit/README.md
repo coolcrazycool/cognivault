@@ -458,8 +458,9 @@ python3 tools/rag_audit/audit_retrieval.py \
 `--hooks`, `--list-variants` (платформа вариантов — ниже).
 
 **Два золотых набора, один замер.** Приёмочный набор заказчика (`tools/eval/golden.jsonl`,
-строки без поля `origin` = `customer`) и сгенерированный (`tools/eval/golden.corpus.jsonl`,
-`origin: "generated"`) подаются вместе двумя `--golden`, но отчитываются РАЗДЕЛЬНО: каждая
+строки без поля `origin` = `customer`) и второй файл (`tools/eval/golden.corpus.jsonl`, в
+нём ДВА origin: 191 строка `generated` и 21 строка `authored` — класс `corpus_scope`,
+см. ниже) подаются вместе двумя `--golden`, но отчитываются РАЗДЕЛЬНО: каждая
 метрика дополнительно разрезается по `origin` (`file_by_origin`, `section_by_origin`,
 `file_by_origin_category`, `refusal.*.by_origin`), чтобы приёмочное число заказчика не
 разбавлялось сгенерированными вопросами. Шум в дельте и свипе считается на n СВОЕГО
@@ -1037,7 +1038,8 @@ PYTHONPATH=tools/rag_audit python3 tools/rag_audit/audit_retrieval.py \
    попадает ни в каком виде. `resolveDimensions` не затрагивается: размерность не меняется,
    так что коллекция совместима и падения на старте быть не должно.
 4. **Чем мерить.** `tools/eval/` на живом стенде, оба набора: `tools/eval/golden.jsonl`
-   (приёмочный, 39 строк, 28 отвечаемых) и `tools/eval/golden.corpus.jsonl` (191 строка),
+   (приёмочный, 39 строк, 28 отвечаемых) и `tools/eval/golden.corpus.jsonl` (212 строк:
+   191 `generated` + 21 `authored`),
    ОТДЕЛЬНО — на 28 вопросах заказчика один сменивший ранг стоит ±0.036, на сгенерированных
    ±0.006.
 5. **Что сравнивать.** Попадание по файлу hit@1/3/5/10 и MRR по каждой ветке отдельно
