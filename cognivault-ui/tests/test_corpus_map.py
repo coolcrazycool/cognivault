@@ -1,0 +1,387 @@
+"""Блок «состав базы знаний» — итерация 1, шаг 1.
+
+Покрывает:
+
+* :mod:`app.corpus_map` — свёртка листинга в разделы со счётчиками, спуск на
+  уровень ниже у вольта с единственным корнем, отсев вложений, постоянный
+  размер блока, кэш листинга и молчаливая деградация;
+* :func:`app.rag.build_rag_context` — блок стоит ПЕРЕД «Источниками», хвост
+  (напоминание → вопрос) не сдвигается, ``context_chars`` по-прежнему меряет
+  только блок источников, а при недоступном листинге сообщение совпадает с
+  прежним посимвольно;
+* :func:`app.routes.chat_routes._rendered_context` — в лог по-прежнему уезжает
+  ровно блок источников, без карты;
+* :func:`app.routes.chat_routes._invalid_citations` — что валидатор цитат
+  ловит, а что нет, если модель всё-таки сошлётся на карту.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+
+import pytest
+from fastapi.testclient import TestClient
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app import cognivault, corpus_map, rag, rag_pipeline, settings  # noqa: E402
+from app.config import AppPaths  # noqa: E402
+from app.main import create_app  # noqa: E402
+from app.routes import chat_routes  # noqa: E402
+from app.tokens import estimate_tokens  # noqa: E402
+
+
+# Настоящий загрузчик листинга, снятый ДО того, как общая фикстура
+# `conftest._no_vault_listing` подменит его заглушкой: в этом файле проверяется
+# как раз он сам (кэш, таймаут, деградация), поэтому здесь он возвращается на
+# место.
+_REAL_FILES = corpus_map.files
+
+
+@pytest.fixture(autouse=True)
+def _local_mode(monkeypatch):
+    monkeypatch.setattr(settings, "is_server", lambda: False)
+    monkeypatch.setattr(corpus_map, "files", _REAL_FILES)
+
+
+# Реалистичный корпус: 127 документов, архив, пустые страницы-контейнеры,
+# вложения Confluence рядом с заметками.
+def _corpus() -> list[str]:
+    paths: list[str] = []
+    for i in range(54):
+        sub = ["Fincert", "ППРБ", "PSI", "Витрины", "Отчётность", "Прочее"][i % 6]
+        paths.append(f"Продукты/{sub}/Страница {i}.md")
+    for i in range(31):
+        paths.append(f"Архив/Проекты {i}.md")
+    for i in range(24):
+        paths.append(f"Регламенты/Раздел {i % 3}/Док {i}.md")
+    for i in range(14):
+        paths.append(f"Процессы/Док {i}.md")
+    paths += ["Продукты.md", "Индекс.md", "README.md", "Глоссарий.md"]
+    # Не документы: вложения и картинки в счёт идти не должны.
+    paths += [f"Confluence/attachments/1234/файл{i}.png" for i in range(40)]
+    paths += ["Confluence/attachments/1234/смета.xlsx"]
+    return paths
+
+
+# --------------------------------------------------------------------------- #
+# Сборка блока из листинга
+# --------------------------------------------------------------------------- #
+
+
+def test_block_reports_totals_and_top_sections():
+    block = corpus_map.render(_corpus(), n_sources=5)
+
+    assert block is not None
+    # 54 + 31 + 24 + 14 + 4 корневых = 127; вложения не в счёт.
+    assert "Всего документов в базе: 127." in block
+    assert "Ниже в блоке «Источники» — 5 фрагментов" in block
+    # Разделы верхнего уровня с числом документов, по убыванию объёма.
+    assert "- Продукты — 54" in block
+    assert "- Архив — 31" in block
+    assert "- Регламенты — 24" in block
+    assert "- (корень) — 4" in block
+    assert block.index("- Продукты") < block.index("- Архив") < block.index("- Процессы")
+    # Подразделы — со своими счётчиками.
+    assert "Fincert: 9" in block
+    # Явная пометка: не источник, ссылаться нельзя.
+    assert "НЕ источник" in block and "ссылаться на него нельзя" in block
+
+
+def test_block_counts_only_documents():
+    """Картинки и вложения не документы: 40 png не превращаются в раздел."""
+    block = corpus_map.render(
+        ["Заметки/а.md", "Confluence/attachments/1/x.png", "logo.svg"],
+    )
+    assert block is not None
+    assert "Всего документов в базе: 1." in block
+    assert "attachments" not in block
+
+
+def test_block_omits_source_count_when_unknown():
+    block = corpus_map.render(["Заметки/а.md", "б.md"])
+    assert "Всего документов в базе: 2." in block
+    assert "Источники" not in block.split("\n")[1]
+
+
+def test_single_root_folds_one_level_deeper():
+    """Вольт из Confluence-синка весь лежит под ``Confluence/`` — спускаемся."""
+    paths = [f"Confluence/ПРОСТРАНСТВО {i % 3}/Раздел {i % 2}/Стр {i}.md" for i in range(30)]
+    block = corpus_map.render(paths, n_sources=3)
+
+    assert block is not None
+    assert "Разделы внутри «Confluence»" in block
+    assert "- ПРОСТРАНСТВО 0 — 10" in block
+    # Ни один документ не потерян при спуске.
+    assert "Всего документов в базе: 30." in block
+
+
+def test_no_descent_when_top_level_already_branches():
+    block = corpus_map.render(["A/x.md", "B/y.md"])
+    assert "Разделы верхнего уровня" in block
+    assert "внутри" not in block
+
+
+def test_empty_or_documentless_listing_yields_no_block():
+    assert corpus_map.render([]) is None
+    assert corpus_map.render(["a.png", "b.zip"]) is None
+    assert corpus_map.render([None, 42]) is None  # мусор в листинге не роняет
+
+
+# --------------------------------------------------------------------------- #
+# Постоянный размер
+# --------------------------------------------------------------------------- #
+
+
+def test_block_size_does_not_grow_with_the_corpus():
+    """Корпус в 40 раз больше — блок того же порядка и под потолком."""
+    small = corpus_map.render(_corpus(), n_sources=5)
+    huge = corpus_map.render(
+        [
+            f"Раздел {i % 40}/Подраздел {i % 300}/Глубже/Док {i}.md"
+            for i in range(5000)
+        ],
+        n_sources=5,
+    )
+
+    assert small is not None and huge is not None
+    for block in (small, huge):
+        assert len(block) <= corpus_map._MAX_MAP_CHARS
+        # ~150 токенов по проектной (заведомо пессимистичной) оценке 2.5 симв/токен.
+        assert estimate_tokens(block) <= 280
+    # Урезанные разделы не исчезают из арифметики.
+    assert "Всего документов в базе: 5000." in huge
+    assert "ещё" in huge
+
+
+def test_truncation_keeps_every_document_accounted_for():
+    paths = [f"Раздел {i}/док.md" for i in range(60)]
+    block = corpus_map.render(paths, max_chars=400)
+    assert "Всего документов в базе: 60." in block
+    assert len(block) <= 400
+    # Урезано до нескольких разделов, но недосчитанных документов нет.
+    shown = block.count("\n- ") - 1
+    assert f"ещё {60 - shown} " in block
+
+
+# --------------------------------------------------------------------------- #
+# Кэш и деградация
+# --------------------------------------------------------------------------- #
+
+
+def test_listing_is_fetched_once_per_ttl(monkeypatch):
+    calls: list[dict] = []
+
+    async def fake_list_files(cv=None, recursive=True, timeout=None):
+        calls.append({"recursive": recursive, "timeout": timeout})
+        return ["Заметки/а.md", "б.md"]
+
+    monkeypatch.setattr(cognivault, "list_files", fake_list_files)
+    corpus_map.reset_cache()
+
+    first = asyncio.run(corpus_map.corpus_block(None, 2))
+    second = asyncio.run(corpus_map.corpus_block(None, 3))
+
+    assert first is not None and second is not None
+    assert len(calls) == 1
+    # Короткий таймаут: зависший вольт не должен добавляться к каждому ходу.
+    assert calls[0]["timeout"] == corpus_map._LIST_TIMEOUT
+
+
+def test_listing_is_cached_per_vault(monkeypatch):
+    """Токен — это арендатор: чужой листинг не должен подставиться."""
+    seen: list[str] = []
+
+    async def fake_list_files(cv=None, recursive=True, timeout=None):
+        token = (cv or {}).get("token", "")
+        seen.append(token)
+        return [f"{token}/док.md", f"{token}/ещё.md"]
+
+    monkeypatch.setattr(cognivault, "list_files", fake_list_files)
+    corpus_map.reset_cache()
+
+    a = asyncio.run(corpus_map.corpus_block({"base_url": "http://x", "token": "aaa"}))
+    b = asyncio.run(corpus_map.corpus_block({"base_url": "http://x", "token": "bbb"}))
+
+    assert seen == ["aaa", "bbb"]
+    assert "aaa" in a and "bbb" in b
+
+
+def test_failed_listing_degrades_silently(monkeypatch):
+    async def boom(cv=None, recursive=True, timeout=None):
+        raise cognivault.CogniVaultError("list files failed (503)", 503, "")
+
+    monkeypatch.setattr(cognivault, "list_files", boom)
+    corpus_map.reset_cache()
+
+    assert asyncio.run(corpus_map.corpus_block(None, 5)) is None
+    # Отказ тоже кэшируется — упавший вольт не зовётся на каждом ходе.
+    assert asyncio.run(corpus_map.corpus_block(None, 5)) is None
+
+
+# --------------------------------------------------------------------------- #
+# Место в собранном промпте
+# --------------------------------------------------------------------------- #
+
+
+def _hit(i: int) -> dict:
+    return {
+        "path": f"doc{i}.md",
+        "title": f"Документ {i}",
+        "section_path": "",
+        "score": 1.0 - i / 100,
+        "text": f"содержимое фрагмента номер {i}",
+        "chunk_index": i,
+        "rank": i,
+    }
+
+
+def _install_retrieval(monkeypatch, hits: list[dict]) -> None:
+    async def fake_hybrid(query, limit, cv=None, **kwargs):
+        return {"results": hits}
+
+    async def fake_content(path, cv=None):
+        raise RuntimeError("content unavailable")
+
+    async def fake_complete_json(messages, gcfg, **kwargs):
+        prompt = messages[-1]["content"]
+        if "Определи тип реплики" in prompt:
+            tail = prompt.split("Последняя реплика пользователя: ", 1)[1]
+            return {
+                "intent": "kb_question",
+                "standalone_question": tail.split("\n", 1)[0],
+            }
+        return {"grades": [{"id": i, "score": 5} for i in range(1, 41)]}
+
+    monkeypatch.setattr(rag.cognivault, "hybrid_search", fake_hybrid)
+    monkeypatch.setattr(rag.cognivault, "content", fake_content)
+    monkeypatch.setattr(
+        rag_pipeline.gigachat, "complete_json", fake_complete_json, raising=False
+    )
+
+
+def _install_listing(monkeypatch, paths: list[str] | None) -> None:
+    async def fake_list_files(cv=None, recursive=True, timeout=None):
+        if paths is None:
+            raise cognivault.CogniVaultError("list files failed (503)", 503, "")
+        return paths
+
+    monkeypatch.setattr(cognivault, "list_files", fake_list_files)
+    corpus_map.reset_cache()
+
+
+def _build(query: str) -> rag.RagContext:
+    return asyncio.run(
+        rag.build_rag_context(
+            query, {"mode": "auto", "max_expanded_files": 0}, None, {}, None
+        )
+    )
+
+
+def test_block_precedes_sources_and_reminder_keeps_the_tail(monkeypatch):
+    _install_retrieval(monkeypatch, [_hit(1), _hit(2)])
+    _install_listing(monkeypatch, _corpus())
+
+    ctx = _build("вопрос про архитектуру сервиса")
+    content = ctx.user_message["content"]
+
+    assert content.startswith("Состав базы знаний")
+    assert content.index("Состав базы знаний") < content.index("Источники:")
+    assert content.index("Источники:") < content.index("Напоминание:")
+    assert content.index("Напоминание:") < content.index("Вопрос:")
+    # Модель видит, сколько фрагментов ей дали из скольких документов.
+    assert "Всего документов в базе: 127." in content
+    assert f"— {len(ctx.sources)} " in content
+
+
+def test_context_chars_still_measures_only_the_sources_block(monkeypatch):
+    _install_retrieval(monkeypatch, [_hit(1), _hit(2)])
+    _install_listing(monkeypatch, _corpus())
+    ctx = _build("вопрос про архитектуру сервиса")
+
+    logged = chat_routes._rendered_context(ctx.user_message, ctx.context_chars)
+    assert logged.startswith("### Источник 1:")
+    assert "Состав базы знаний" not in logged
+    assert len(logged) == ctx.context_chars
+
+
+def test_answer_context_is_unchanged_when_listing_is_unavailable(monkeypatch):
+    """Ход без листинга совпадает с прежним посимвольно."""
+    _install_retrieval(monkeypatch, [_hit(1), _hit(2)])
+
+    _install_listing(monkeypatch, None)
+    without = _build("вопрос про архитектуру сервиса")
+    _install_listing(monkeypatch, _corpus())
+    with_map = _build("вопрос про архитектуру сервиса")
+
+    assert without.user_message["content"].startswith("Источники:")
+    assert without.context_chars == with_map.context_chars
+    assert without.sources == with_map.sources
+    # Единственная разница — приписанный сверху блок.
+    block = with_map.user_message["content"][
+        : with_map.user_message["content"].index("Источники:")
+    ]
+    assert with_map.user_message["content"] == block + without.user_message["content"]
+
+
+def test_cost_per_turn_stays_inside_the_char_budget(monkeypatch):
+    """Цена блока — доли процента от ``max_context_chars`` (24000 по умолчанию)."""
+    _install_retrieval(monkeypatch, [_hit(1), _hit(2)])
+    _install_listing(monkeypatch, _corpus())
+    ctx = _build("вопрос про архитектуру сервиса")
+
+    content = ctx.user_message["content"]
+    overhead = len(content) - len(content[content.index("Источники:") :])
+    assert overhead <= corpus_map._MAX_MAP_CHARS + 2  # + "\n\n"
+    assert overhead < 0.05 * 24000
+
+
+def test_block_reaches_the_model_and_survives_trimming(monkeypatch, tmp_path):
+    """Сквозь маршрут: блок доезжает до GigaChat и не срезается урезанием истории."""
+    captured: list[list[dict]] = []
+
+    async def fake_stream_chat(messages, gcfg):
+        captured.append([dict(m) for m in messages])
+        yield "ответ"
+
+    _install_retrieval(monkeypatch, [_hit(1), _hit(2)])
+    _install_listing(monkeypatch, _corpus())
+    monkeypatch.setattr(
+        chat_routes, "resolve_paths", lambda request: AppPaths(root=tmp_path / "ui")
+    )
+    monkeypatch.setattr(chat_routes.gigachat, "stream_chat", fake_stream_chat)
+    monkeypatch.setattr(chat_routes.gigachat, "_files_present", lambda gcfg: None)
+
+    history = [
+        {"role": "user", "content": f"вопрос {i} " * 200} for i in range(30)
+    ]
+    with TestClient(create_app()) as client:
+        resp = client.post(
+            "/api/chat",
+            json={
+                "messages": [*history, {"role": "user", "content": "о каких проектах знаешь"}],
+                "rag": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    last = captured[0][-1]["content"]
+    assert last.startswith("Состав базы знаний")
+    assert last.index("Всего документов в базе: 127.") < last.index("Источники:")
+    assert last.endswith("Вопрос: о каких проектах знаешь")
+
+
+# --------------------------------------------------------------------------- #
+# Что ловит валидатор цитат, если модель всё-таки сошлётся на карту
+# --------------------------------------------------------------------------- #
+
+
+def test_citation_validator_catches_only_out_of_range_numbers():
+    # Модель придумала шестой источник при пяти — поймано.
+    assert chat_routes._invalid_citations("факт [Источник 6]", 5) == [6]
+    assert chat_routes._invalid_citations("факт [Источник 0]", 5) == [0]
+    # Но приписать сведения из карты существующему номеру она может свободно:
+    # валидатор проверяет ДИАПАЗОН, а не происхождение утверждения.
+    assert chat_routes._invalid_citations("в базе 127 документов [Источник 1]", 5) == []

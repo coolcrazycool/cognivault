@@ -331,19 +331,26 @@ async def delete_note(path: str, cv: dict[str, Any] | None = None) -> str:
 
 
 async def list_files(
-    cv: dict[str, Any] | None = None, recursive: bool = True
+    cv: dict[str, Any] | None = None,
+    recursive: bool = True,
+    timeout: float | None = None,
 ) -> list[str]:
     """GET ``/api/vault/files`` and return the file entry paths (files only).
 
     Tolerates several response shapes: a bare list, or a dict with ``files`` /
     ``entries`` / ``results``; entries may be plain path strings or objects with
-    a ``path``/``name`` (directory-typed entries are filtered out).
+    a ``path``/``name`` (directory-typed entries are filtered out — the backend
+    DOES return them, ``{name, path, type: 'file' | 'directory'}``).
+
+    ``timeout`` overrides the default 30s. A caller on the chat hot path
+    (:mod:`app.corpus_map`) must not be able to inherit a 30s stall on every
+    turn, while the bulk callers (``clear_vault``) keep the patient default.
     """
     base, token = _resolve_cv(cv)
     url = f"{base}/api/vault/files"
     headers = _auth_headers(token)
     params = {"recursive": "true" if recursive else "false"}
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=timeout if timeout is not None else 30.0) as client:
         resp = await client.get(url, params=params, headers=headers)
     if resp.status_code != 200:
         raise CogniVaultError(

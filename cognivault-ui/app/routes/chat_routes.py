@@ -44,9 +44,12 @@ _SSE_HEADERS = {
 # вызывался — значит подставить его `last_finish_reason` нечем, код наш.
 _NO_CONTEXT_FINISH_REASON = "no_context"
 
-# Префикс отрендеренного user-сообщения (`rag._render_context_message`). Блок
-# источников идёт сразу за ним и имеет ровно `ctx.context_chars` символов —
-# по этому инварианту он вырезается обратно в лог без парсинга разметки.
+# Заголовок блока источников в отрендеренном user-сообщении
+# (`rag._render_context_message`). Сам блок идёт сразу за ним и имеет ровно
+# `ctx.context_chars` символов — по этому инварианту он вырезается обратно в
+# лог без парсинга разметки. Ищется поиском, а не по началу строки: перед
+# источниками может стоять блок «состав базы» (`app.corpus_map`), и он в лог
+# контекста не входит — там должно остаться ровно то, что оценивает eval.
 _SOURCES_PREFIX = "Источники:\n\n"
 
 # Инструментирование стадий конвейера. Роут владеет только своими вызовами, а
@@ -253,16 +256,18 @@ def _rendered_context(user_message: dict[str, Any] | None, context_chars: int) -
     """The «Источники» block exactly as it went to the model.
 
     Cut by length, not by parsing: ``context_chars`` is by construction the
-    length of the rendered block that follows :data:`_SOURCES_PREFIX`. If the
-    message does not start with the prefix (a custom renderer), the whole
-    content is logged rather than a wrong slice of it.
+    length of the rendered block that follows :data:`_SOURCES_PREFIX`. The
+    prefix is *located* rather than assumed to be at position 0 — the corpus
+    footprint block may precede it — and if it is absent altogether (a custom
+    renderer) the whole content is logged rather than a wrong slice of it.
     """
     if not isinstance(user_message, dict):
         return ""
     content = str(user_message.get("content", "") or "")
-    if not content.startswith(_SOURCES_PREFIX) or context_chars <= 0:
+    start = content.find(_SOURCES_PREFIX)
+    if start < 0 or context_chars <= 0:
         return content
-    start = len(_SOURCES_PREFIX)
+    start += len(_SOURCES_PREFIX)
     return content[start : start + context_chars]
 
 

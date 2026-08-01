@@ -2,10 +2,11 @@
 
 Given a user query and config, retrieve fragments from CogniVault and build two
 messages: a **system** message carrying only the answering *rules*, and a final
-**user** message carrying the numbered «Источники» block, a short reminder and
-the question itself. Keeping the retrieved text in the last user turn (instead
-of the system prompt) measurably improves instruction following and citation
-discipline on long contexts.
+**user** message carrying the corpus footprint (:mod:`app.corpus_map`), the
+numbered «Источники» block, a short reminder and the question itself. Keeping
+the retrieved text in the last user turn (instead of the system prompt)
+measurably improves instruction following and citation discipline on long
+contexts.
 
 The default ``mode == "auto"`` path performs *smart context expansion*: intent
 routing + query condensing (:mod:`app.rag_pipeline`), hybrid retrieval, a batched
@@ -21,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import cognivault, rag_pipeline
+from . import cognivault, corpus_map, rag_pipeline
 from .tokens import CHARS_PER_TOKEN, estimate_messages_tokens
 
 # Order in which grouped ``/context`` buckets are flattened.
@@ -139,9 +140,11 @@ class RagContext:
       nothing usable). Also set — with :data:`NO_RAG_SYSTEM_PROMPT` and *without*
       a ``user_message`` — on the deliberate no-retrieval intents, so a
       misrouted turn still cannot be answered from the model's own knowledge;
-    * ``user_message`` — the final user turn: «Источники» → напоминание →
-      вопрос. Set only when there is a sources block; a ``user_message`` always
-      implies a ``system_message``, but not the other way round;
+    * ``user_message`` — the final user turn: [состав базы] → «Источники» →
+      напоминание → вопрос. Set only when there is a sources block; a
+      ``user_message`` always implies a ``system_message``, but not the other
+      way round. The leading footprint block (:mod:`app.corpus_map`) is absent
+      whenever the vault listing was unavailable;
     * ``sources`` — UI/citation metadata, ``n`` matching the block numbers,
       ``grade`` carrying the grader's 1..5 score (``None`` when not graded);
     * ``notice`` — user-visible reason RAG was skipped (retrieval failure);
@@ -401,21 +404,33 @@ def _resolve_prompt(prompts: dict[str, Any] | None, key: str, default: str) -> s
 
 
 def _render_context_message(
-    blocks: list[str], query: str, reminder: str | None = None
+    blocks: list[str],
+    query: str,
+    reminder: str | None = None,
+    corpus: str | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Render the final user turn from rendered ``blocks`` and the question.
 
-    Order is load-bearing: sources first, then the reminder, then the question
-    last — models follow the instruction closest to the end of the prompt.
-    A custom ``reminder`` only replaces the text of the middle section; the
-    section order and the «Источники:» / «Вопрос:» headers stay fixed.
+    Order is load-bearing: the corpus footprint first, then the sources, then
+    the reminder, then the question last — models follow the instruction
+    closest to the end of the prompt, so the reminder keeps the tail and the
+    footprint takes the head. A custom ``reminder`` only replaces the text of
+    that middle section; the section order and the «Источники:» / «Вопрос:»
+    headers stay fixed.
+
+    ``corpus`` is the :mod:`app.corpus_map` block (``None`` when the vault
+    listing was unavailable — then this renders exactly what it always did).
+    It sits ABOVE «Источники:» on purpose: the model has to read "127
+    documents" and "here are 5 fragments" as one statement, so the two cannot be
+    separated by the whole dialogue history.
 
     Returns ``(message, context_chars)`` where ``context_chars`` measures only
-    the sources block (not the boilerplate).
+    the sources block (not the boilerplate, not the footprint).
     """
     context_block = "".join(blocks).rstrip()
     text = reminder if reminder is not None else CONTEXT_REMINDER
-    content = f"Источники:\n\n{context_block}\n\n{text}\n\nВопрос: {query}"
+    head = f"{corpus}\n\n" if corpus else ""
+    content = f"{head}Источники:\n\n{context_block}\n\n{text}\n\nВопрос: {query}"
     return {"role": "user", "content": content}, len(context_block)
 
 
@@ -664,8 +679,15 @@ async def _build_auto(
             grades=grades_meta,
         )
 
+    # Corpus footprint: fetched only now, so a turn that ended in a refusal or
+    # found nothing never pays for it. Cached per vault; `None` on any failure.
+    corpus = await corpus_map.corpus_block(cv, len(sources))
+
     user_message, context_chars = _render_context_message(
-        blocks, rq, _resolve_prompt(prompts, "context_reminder", CONTEXT_REMINDER)
+        blocks,
+        rq,
+        _resolve_prompt(prompts, "context_reminder", CONTEXT_REMINDER),
+        corpus,
     )
     return RagContext(
         system_message=_system_message(
@@ -750,8 +772,12 @@ async def _build_legacy(
     if not sources:
         return RagContext()
 
+    corpus = await corpus_map.corpus_block(cv, len(sources))
     user_message, context_chars = _render_context_message(
-        blocks, query, _resolve_prompt(prompts, "context_reminder", CONTEXT_REMINDER)
+        blocks,
+        query,
+        _resolve_prompt(prompts, "context_reminder", CONTEXT_REMINDER),
+        corpus,
     )
     return RagContext(
         system_message=_system_message(
