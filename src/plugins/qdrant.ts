@@ -881,10 +881,10 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
 
     async describe(): Promise<QdrantCollectionInfo> {
       const live = holder.current;
-      let pointsCount: number | null = null;
+      let rawCount: number | null = null;
       try {
         const info = await live.getCollection(collection);
-        pointsCount = info.points_count ?? null;
+        rawCount = info.points_count ?? null;
       } catch (err: unknown) {
         // A dropped collection (mid-rebuild) is the expected reason. Reporting null beats
         // failing the status call the operator is watching the rebuild through.
@@ -894,6 +894,12 @@ async function qdrantPlugin(fastify: FastifyInstance): Promise<void> {
         );
       }
       const recorded = await readSchemeVersion(live, collection, fastify.log);
+      // The scheme marker is a point, so a freshly created collection holds exactly one and
+      // would report "1 fragment" — indistinguishable at a glance from a small healthy vault,
+      // and precisely the state a pod restart mid-rebuild leaves behind: scheme current, no
+      // warning, nothing indexed. Count what was indexed, not what is stored.
+      const pointsCount =
+        rawCount === null ? null : recorded === null ? rawCount : Math.max(0, rawCount - 1);
       return {
         collection,
         alias: COLLECTION_NAME,

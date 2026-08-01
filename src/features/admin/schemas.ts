@@ -96,7 +96,8 @@ export const CollectionInfoResponseSchema = Type.Object({
       'BM25 scheme version this build produces. A difference means lexical retrieval is degraded until the collection is rebuilt.',
   }),
   pointsCount: Type.Union([Type.Integer(), Type.Null()], {
-    description: 'Points in the collection; null while it is dropped or unreadable.',
+    description:
+      'Indexed chunks, excluding the internal scheme marker: a freshly created collection reports 0, not 1. Null while the collection is dropped or unreadable.',
   }),
 });
 

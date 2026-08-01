@@ -789,8 +789,32 @@ describe('qdrantPlugin', () => {
         alias: ALIAS,
         schemeVersion: 2,
         expectedSchemeVersion: BM25_SCHEME_VERSION,
-        pointsCount: 1234,
+        // 1234 stored minus the scheme marker, which is a point but not content.
+        pointsCount: 1233,
       });
+
+      await app.close();
+    });
+
+    it('a freshly created collection reports 0 chunks, not the marker as one', async () => {
+      // The trap this guards: the marker is a point, so a collection holding nothing else
+      // read as "1 fragment" — indistinguishable from a small healthy vault, and exactly the
+      // state a pod restart mid-rebuild leaves behind, with the scheme current and no warning.
+      provisioned();
+      mockGetCollection.mockResolvedValue({
+        points_count: 1,
+        config: {
+          params: {
+            vectors: { dense: { size: 1536, distance: 'Cosine', on_disk: true } },
+            sparse_vectors: { bm25: { modifier: 'idf' } },
+          },
+        },
+      });
+      mockRetrieve.mockResolvedValue([{ id: MARKER, payload: { bm25_scheme_version: 3 } }]);
+
+      const app = await boot();
+
+      expect((await app.qdrantAdmin.describe()).pointsCount).toBe(0);
 
       await app.close();
     });
