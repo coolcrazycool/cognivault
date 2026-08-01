@@ -19,8 +19,8 @@ Namespace: `ci05490208-oasis-cognivault`.
 
 | Компонент | Образ |
 |-----------|-------|
-| бэкенд | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-e30dc81` |
-| UI | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-e30dc81` |
+| бэкенд | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-c53781a` |
+| UI | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-c53781a` |
 
 ---
 
@@ -459,6 +459,42 @@ collections 200 {"result":{"collections":[{"name":"cognivault"}]},"status":"ok",
 `Qdrant client configured` покажет выбранную схему: `iam`, `api-key` или `none`.
 Ни пароль, ни токен в логи не попадают — токен описывается только длиной и сроком
 истечения (`Obtained Qdrant IAM token`, поля `tokenLength`, `expiresAt`).
+---
+
+## 3.6. Миграция коллекции Qdrant — разово, перед первой выкаткой образа `sha-c53781a`
+
+Гибридный поиск требует, чтобы плотный и разреженный векторы лежали на одной точке, а для
+этого оба должны быть **именованными**. Старая коллекция создавалась с безымянным вектором,
+поэтому схема сменилась: физическая коллекция теперь `cognivault_v2`, а `cognivault` —
+**алиас** на неё.
+
+Приложение **намеренно не стартует**, если `cognivault` существует как коллекция, а не как
+алиас, и пишет в лог:
+
+```
+Qdrant name "cognivault" exists as a COLLECTION, not as an alias
+```
+
+Это защита: без неё сервис молча писал бы в старую схему, а гибрид тихо деградировал бы до
+плотного поиска. Порядок разовой миграции:
+
+1. **Остановить бэкенд** — Deployment `cognivault` → **Actions** → масштаб в 0 реплик.
+2. **Убрать старую коллекцию** во внешнем Qdrant. Безопаснее переименовать, а не удалять —
+   тогда останется путь отката. Через вкладку **Terminal** любого пода (нужен токен IAM,
+   см. 3.5):
+
+   ```
+   node -e 'const https=require("node:https"),fs=require("node:fs");const o={host:new URL(process.env.QDRANT_URL).hostname,port:6433,cert:fs.readFileSync("/certs/client_crt.crt"),key:fs.readFileSync("/certs/client_key.key"),ca:fs.readFileSync("/certs/cacert.pem"),passphrase:process.env.GIGACHAT_KEY_PASSPHRASE};const b=JSON.stringify({username:process.env.QDRANT_USERNAME,password:process.env.QDRANT_PASSWORD});const rq=(op,body,h)=>new Promise(r=>{const q=https.request({...o,...op,headers:h},s=>{let d="";s.on("data",c=>d+=c);s.on("end",()=>r([s.statusCode,d]))});q.on("error",e=>r(["ERR",e.message]));if(body)q.write(body);q.end()});(async()=>{const[,a]=await rq({path:"/auth",method:"POST"},b,{"Content-Type":"application/json","Content-Length":Buffer.byteLength(b)});const t=JSON.parse(a).result.token;const H={Authorization:"Bearer "+t};console.log("collections",...(await rq({path:"/collections",method:"GET"},null,H)));console.log("delete",...(await rq({path:"/collections/cognivault",method:"DELETE"},null,H)))})()'
+   ```
+
+   Команда сначала печатает список коллекций — **сверьтесь с ним**, прежде чем удалять.
+3. **Поднять бэкенд** обратно в 1 реплику. На старте он создаст `cognivault_v2` и повесит
+   алиас; в логах появится `Created Qdrant collection` и `Connected to Qdrant`.
+4. **Переиндексировать** — раздел 6. Без этого поиск вернёт пустоту: новая коллекция пуста.
+
+Проверить результат можно тем же однострочником, заменив путь на `/aliases` — алиас
+`cognivault` должен указывать на `cognivault_v2`.
+
 ---
 
 ## 4. Порядок применения
