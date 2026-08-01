@@ -168,16 +168,49 @@ def test_panel_macro_uses_title_or_default():
 # ---------------------------------------------------------------------------
 
 
-def test_expand_becomes_heading_plus_body():
+def test_expand_becomes_bold_title_plus_body():
+    """Title expand'а — жирный абзац, НЕ заголовок: заголовок рвёт разделы.
+
+    Замер по дампу (127 страниц): у 77 из 158 titled expand-семейства за
+    макросом идёт текст, который к блоку не относится, — заголовок приписывал
+    его к разделу expand'а (см. `_handle_expand`).
+    """
     md = _md(
         '<ac:structured-macro ac:name="expand">'
         '<ac:parameter ac:name="title">Детали</ac:parameter>'
         "<ac:rich-text-body><p>скрытый текст</p></ac:rich-text-body>"
         "</ac:structured-macro>"
     )
-    assert re.search(r"^#+\s+Детали$", md, re.MULTILINE)
+    assert "**Детали**" in md
+    assert not re.search(r"^#+\s+Детали$", md, re.MULTILINE)
     assert "скрытый текст" in md
     assert "<details>" not in md
+
+
+def test_expand_title_does_not_capture_trailing_siblings():
+    """Текст ПОСЛЕ expand'а не должен уходить в «раздел» его title'а.
+
+    Реальный паттерн из «Пользовательская инструкция. АРМ DS»: expand с
+    примером стоит посреди нумерованной инструкции, и шаги после него
+    принадлежат внешнему разделу, а не сворачиваемому блоку.  Заголовков,
+    кроме H1 страницы и настоящего заголовка раздела, в выходе быть не должно
+    — иначе чанкер отнесёт хвост к разделу expand'а.
+    """
+    md = _md(
+        "<h2>Вкладка модели</h2>"
+        "<p>5.1. Открыть карточку.</p>"
+        '<ac:structured-macro ac:name="expand">'
+        '<ac:parameter ac:name="title">Пример разметки</ac:parameter>'
+        "<ac:rich-text-body><p>SELECT 1</p></ac:rich-text-body>"
+        "</ac:structured-macro>"
+        "<p>5.2. Заполнить примечания.</p>"
+    )
+    headings = re.findall(r"^(#+)\s", md, re.MULTILINE)
+    # Только H1 страницы и H2→H3 раздела (demote): title заголовком не стал.
+    assert sorted(len(h) for h in headings) == [1, 3]
+    assert "**Пример разметки**" in md
+    # Тело и хвост оба на месте, порядок сохранён.
+    assert md.index("SELECT 1") < md.index("5\\.2\\.")
 
 
 def test_status_becomes_inline_strong():
@@ -485,7 +518,7 @@ def test_colspan_duplicate_kept_once_when_columns_are_real():
 
 
 def test_heading_inside_cell_does_not_weld_words():
-    """`expand` внутри ячейки становится h3 — без разделителя слова слипались."""
+    """Подпись `expand` внутри ячейки — блок: без разделителя слова слипались."""
     md = _md(
         "<table><tbody>"
         "<tr><th>Шаг</th><th>Описание</th></tr>"
@@ -498,7 +531,7 @@ def test_heading_inside_cell_does_not_weld_words():
         "</tbody></table>"
     )
     assert "реквизитовCN" not in md
-    assert "Пример реквизитов<br>CN=CI06076835-IFT-armds" in md
+    assert "**Пример реквизитов**<br>CN=CI06076835-IFT-armds" in md
 
 
 def test_emoticon_alone_in_cell_becomes_word():
@@ -768,15 +801,23 @@ def test_unknown_macro_plain_body_kept_verbatim_not_parsed():
     assert "```" in md
 
 
-def test_ui_expand_title_becomes_a_heading():
-    """Заголовок `ui-*` — метка раздела и якорь поиска; терять его нельзя."""
+def test_ui_expand_title_becomes_bold_text():
+    """Заголовок `ui-*` — якорь поиска; терять нельзя, но и НЕ заголовок.
+
+    Жирный абзац остаётся в тексте чанка (плотный и лексический индекс видят
+    его оба), а markdown-заголовок ломал бы дерево разделов — за `ui-expand`
+    в 48% случаев по дампу идёт текст чужого раздела.
+    """
     md = _md(
         '<ac:structured-macro ac:name="ui-expand">'
         '<ac:parameter ac:name="title">Логика окрашивания вершин потоков</ac:parameter>'
         "<ac:rich-text-body><p>Синий — поток работает стабильно</p>"
         "</ac:rich-text-body></ac:structured-macro>"
     )
-    assert re.search(r"^#{2,6} Логика окрашивания вершин потоков$", md, re.MULTILINE)
+    assert "**Логика окрашивания вершин потоков**" in md
+    assert not re.search(
+        r"^#{2,6} Логика окрашивания вершин потоков$", md, re.MULTILINE
+    )
     assert "Синий — поток работает стабильно" in md
 
 

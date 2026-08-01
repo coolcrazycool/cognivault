@@ -557,15 +557,34 @@ def _handle_panel(macro: Tag, name: str) -> None:
 
 
 def _handle_expand(macro: Tag) -> None:
+    """Заголовок `expand` — жирный абзац, НЕ markdown-заголовок.
+
+    Исторически title становился `<h3>`, но заголовок для чанкера — граница
+    РАЗДЕЛА: раздел владеет всем до следующего заголовка того же уровня. А
+    title у expand подписывает сворачиваемый блок, и после блока в том же
+    родителе часто идёт текст, который к блоку не относится. Замер по дампу
+    (127 страниц): у 77 из 158 titled expand-семейства за макросом следует
+    именно такой «хвост» — с заголовком он приписывался к разделу expand'а,
+    и поиск возвращал чужой breadcrumb и чужой section_text. Жирный абзац
+    оставляет title в тексте чанка (индексируется и плотно, и лексически),
+    но не рвёт дерево разделов.
+    """
     title = (_param(macro, "title") or "").strip() or "Подробнее"
-    heading = _new_tag(macro, "h3")
-    heading.string = title
-    macro.insert_before(heading)
+    _insert_bold_title(macro, title)
     body = macro.find("ac:rich-text-body")
     if body is not None:
         for child in list(body.children):
             macro.insert_before(child.extract())
     macro.decompose()
+
+
+def _insert_bold_title(macro: Tag, title: str) -> None:
+    """`<p><strong>title</strong></p>` перед макросом — как подпись у кода."""
+    cap = _new_tag(macro, "p")
+    strong = _new_tag(macro, "strong")
+    strong.string = title
+    cap.append(strong)
+    macro.insert_before(cap)
 
 
 def _handle_status(macro: Tag, ctx: _Context) -> None:
@@ -649,14 +668,16 @@ def _handle_unknown_macro(macro: Tag, ctx: _Context) -> None:
     name = (macro.get("ac:name") or "unknown").lower()
     ctx.coverage.append(name)
 
-    # Заголовок макроса — не украшение, а метка раздела («Логика окрашивания
+    # Заголовок макроса — не украшение, а якорь поиска («Логика окрашивания
     # вершин потоков»).  У `ui-expand` их 98 против 68 у обработанного `expand`,
     # и раньше все они пропадали: у неизвестного макроса брали только тело.
+    # Именно жирный абзац, а не `<h3>`: markdown-заголовок для чанкера — граница
+    # раздела, а `ui-expand`/`ui-tab` подписывают сворачиваемый блок, за которым
+    # в том же родителе часто идёт чужой текст (48% ui-expand в дампе) — см.
+    # объяснение замера в `_handle_expand`.
     title = (_param(macro, "title") or "").strip()
     if title:
-        heading = _new_tag(macro, "h3")
-        heading.string = title
-        macro.insert_before(heading)
+        _insert_bold_title(macro, title)
 
     body = macro.find("ac:rich-text-body")
     if body is not None:
@@ -1148,10 +1169,11 @@ def _inline_render(node: Tag, ctx: _Context) -> str:
         elif name == "img":
             out.append(f"![{child.get('alt', '')}]({child.get('src', '')})")
         elif name in ("p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6"):
-            # Заголовок внутри ячейки — тоже блок: без разделителя его текст
-            # слипался со следующим ("…реквизитовCN=CI06…"), и склеенное слово
-            # переставало находиться лексическим поиском.  Заголовки попадают
-            # в ячейки не из storage, а из макроса `expand` (см. `_handle_expand`).
+            # Блок внутри ячейки: без разделителя его текст слипался со
+            # следующим ("…реквизитовCN=CI06…"), и склеенное слово переставало
+            # находиться лексическим поиском.  Так в ячейку попадает и подпись
+            # `expand`-макроса — теперь это `<p><strong>` (см. `_handle_expand`),
+            # h1–h6 оставлены на случай заголовков прямо в storage-ячейке.
             inner = _inline_render(child, ctx).strip()
             if inner:
                 out.append(inner + "<br>")
