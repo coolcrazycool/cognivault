@@ -409,6 +409,214 @@ def test_incremental_version_only_bump_is_skipped():
 
 
 # --------------------------------------------------------------------------- #
+# Тесты: переезд страницы и переименование предка
+#
+# Путь в вольте — `Confluence/<пространство>/<предки…>/<Заголовок>.md`, то есть
+# в него зашита ВСЯ цепочка предков.  Значит переехать может страница, тело
+# которой не менялось ни на байт, — и целое поддерево, чьи версии не менялись
+# вовсе.
+# --------------------------------------------------------------------------- #
+
+
+_ROOT_HOME = "Confluence/ENG/Root Space Home.md"
+_GUIDE = "Confluence/ENG/Root Space Home/Guide.md"
+
+
+def test_reparented_page_with_identical_body_moves_and_old_file_is_deleted():
+    """Перенос к другому родителю: тело то же, путь другой.
+
+    Хеш-ворота раньше стояли ДО расчёта пути и обрывали обработку: новый файл
+    не записывался, старый не удалялся — страница навсегда оставалась в вольте
+    по старому адресу.
+    """
+    conf, cvm, paths = ConfMock(), CVMock(), _tmp_paths()
+    _run_sync(conf, cvm, paths)
+    assert _GUIDE in cvm.vault
+    cvm.calls.clear()
+
+    # 102 переносим под 101; тело не трогаем — меняется только цепочка предков.
+    conf.pages["102"]["ancestors"] = ["Root Space Home", "Дизайн API"]
+    conf.pages["102"]["version"] = 3  # перенос в Confluence поднимает версию
+
+    frames = _run_sync(conf, cvm, paths)
+    done = _done(frames)
+    assert done["failed"] == 0
+    assert done["updated"] == 1
+    assert done["skipped"] == 0
+
+    moved = "Confluence/ENG/Root Space Home/Дизайн API/Guide.md"
+    assert moved in cvm.vault
+    assert ("DELETE", _GUIDE) in cvm.calls
+    assert _GUIDE not in cvm.vault
+
+    manifest = store.load_manifest(paths)
+    assert manifest["pages"]["102"]["path"] == moved
+
+
+def test_renamed_parent_moves_whole_subtree_even_though_child_version_is_unchanged():
+    """Переименование предка двигает потомков, чья версия не менялась.
+
+    Потомки попадают в `skipped_candidates` (версия та же) и раньше не
+    пересматривались никогда — осиротевало разом всё поддерево.
+    """
+    conf, cvm, paths = ConfMock(), CVMock(), _tmp_paths()
+    # Третий уровень: внук корня, ребёнок «Guide».
+    conf.pages["103"] = {
+        "id": "103",
+        "title": "Дочерняя",
+        "space": "ENG",
+        "version": 1,
+        "ancestors": ["Root Space Home", "Guide"],
+        "body": "<p>Текст ребёнка</p>",
+    }
+    conf.children = ["101", "102", "103"]
+
+    _run_sync(conf, cvm, paths)
+    child_old = "Confluence/ENG/Root Space Home/Guide/Дочерняя.md"
+    assert child_old in cvm.vault
+    cvm.calls.clear()
+
+    # Переименовываем ТОЛЬКО родителя. Версия ребёнка остаётся прежней.
+    conf.pages["102"]["title"] = "Руководство"
+    conf.pages["102"]["version"] = 3
+    conf.pages["103"]["ancestors"] = ["Root Space Home", "Руководство"]
+    assert conf.pages["103"]["version"] == 1
+
+    frames = _run_sync(conf, cvm, paths)
+    done = _done(frames)
+    assert done["failed"] == 0
+
+    child_new = "Confluence/ENG/Root Space Home/Руководство/Дочерняя.md"
+    assert child_new in cvm.vault, "ребёнок не переехал вслед за родителем"
+    assert child_old not in cvm.vault
+    assert ("DELETE", child_old) in cvm.calls
+
+    manifest = store.load_manifest(paths)
+    assert manifest["pages"]["103"]["path"] == child_new
+    # Родитель тоже переехал (заголовок входит и в имя файла, и в тело).
+    assert (
+        manifest["pages"]["102"]["path"]
+        == "Confluence/ENG/Root Space Home/Руководство.md"
+    )
+
+
+def test_moved_page_is_not_refetched_when_nothing_moved():
+    """Цена проверки — ноль лишних запросов, когда переездов не было."""
+    conf, cvm, paths = ConfMock(), CVMock(), _tmp_paths()
+    _run_sync(conf, cvm, paths)
+    cvm.calls.clear()
+
+    # Только версия, тело и путь прежние → хеш-ворота по-прежнему срабатывают.
+    conf.pages["101"]["version"] = 42
+    frames = _run_sync(conf, cvm, paths)
+    done = _done(frames)
+    assert done["skipped"] == 1
+    assert done["updated"] == 0
+    assert cvm.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Тесты: потеря манифеста (эфемерный /data) → подчистка осиротевших файлов
+# --------------------------------------------------------------------------- #
+
+
+def _drop_manifest(paths: AppPaths) -> None:
+    """Имитирует перезапуск пода UI: manifest.json на emptyDir не пережил его."""
+    (paths.confluence_dir / "manifest.json").unlink()
+
+
+def test_lost_manifest_still_removes_pages_deleted_in_confluence():
+    """Пустой манифест + непустой вольт: удаления обязаны доходить.
+
+    Без восстановления `deleted_ids` пуст (сравнивать не с чем), шаг 7 —
+    no-op, и удалённая в Confluence страница остаётся в вольте навсегда.
+    """
+    conf, cvm, paths = ConfMock(), CVMock(), _tmp_paths()
+    _run_sync(conf, cvm, paths)
+    assert _GUIDE in cvm.vault
+
+    _drop_manifest(paths)
+    # Страницу удалили в Confluence, пока UI был без манифеста.
+    conf.children = ["101"]
+    del conf.pages["102"]
+
+    frames = _run_sync(conf, cvm, paths)
+    done = _done(frames)
+    assert done["failed"] == 0
+    assert done["deleted"] == 1
+    assert _GUIDE not in cvm.vault
+    # Уцелевшие страницы перезаписаны, а не удалены.
+    assert _ROOT_HOME in cvm.vault
+    assert "Confluence/ENG/Root Space Home/Дизайн API.md" in cvm.vault
+
+
+def test_lost_manifest_never_deletes_a_file_it_cannot_attribute():
+    """Подчистка не трогает то, чего не записывала: чужие папки и чужие корни."""
+    conf, cvm, paths = ConfMock(), CVMock(), _tmp_paths()
+    _run_sync(conf, cvm, paths)
+
+    # Файлы, которые этот прогон не пишет и отнести их к нему нельзя:
+    outsiders = {
+        "Ручные заметки/важное.md": "ручная загрузка".encode("utf-8"),
+        "Confluence/ENG/Другой корень.md": "другое поддерево".encode("utf-8"),
+        "Confluence/OPS/Чужое пространство.md": "другое пространство".encode("utf-8"),
+        "Confluence/attachments/999/schema.png": b"PNG",
+    }
+    for path, data in outsiders.items():
+        cvm.existing.add(path)
+        cvm.vault[path] = data
+
+    _drop_manifest(paths)
+    conf.children = ["101"]
+    del conf.pages["102"]
+
+    frames = _run_sync(conf, cvm, paths)
+    assert _done(frames)["failed"] == 0
+
+    # Осиротевшее из СВОЕГО поддерева удалено…
+    assert _GUIDE not in cvm.vault
+    # …а всё остальное на месте, побайтово.
+    for path, data in outsiders.items():
+        assert cvm.vault.get(path) == data, f"подчистка съела чужой файл {path}"
+    deleted_paths = {p for m, p in cvm.calls if m == "DELETE"}
+    assert deleted_paths & set(outsiders) == set()
+
+
+def test_lost_manifest_sweep_is_cancelled_when_any_page_failed():
+    """Частичный прогон: список записанного неполон → не удаляем ничего.
+
+    Файл упавшей страницы неотличим от осиротевшего, поэтому подчистка
+    отменяется целиком.
+    """
+    conf, cvm, paths = ConfMock(), CVMock(), _tmp_paths()
+    _run_sync(conf, cvm, paths)
+
+    _drop_manifest(paths)
+    conf.fail_ids = {"101"}  # get_page(101) → 500
+
+    frames = _run_sync(conf, cvm, paths)
+    done = _done(frames)
+    assert done["failed"] == 1
+    assert done["deleted"] == 0
+    # Ни один файл поддерева не удалён, включая файл упавшей страницы.
+    assert "Confluence/ENG/Root Space Home/Дизайн API.md" in cvm.vault
+    assert _GUIDE in cvm.vault
+    assert not [p for m, p in cvm.calls if m == "DELETE"]
+    logs = " ".join(d.get("line", "") for d in _events(frames, "log"))
+    assert "подчистка осиротевших файлов отменена" in logs
+
+
+def test_first_ever_sync_into_empty_vault_deletes_nothing():
+    """Вольт пуст → подчищать нечего и незачем (обычная первая синхронизация)."""
+    conf, cvm, paths = ConfMock(), CVMock(), _tmp_paths()
+    frames = _run_sync(conf, cvm, paths)
+    done = _done(frames)
+    assert done["synced"] == 3
+    assert done["deleted"] == 0
+    assert not [p for m, p in cvm.calls if m == "DELETE"]
+
+
+# --------------------------------------------------------------------------- #
 # Tests: deletion
 # --------------------------------------------------------------------------- #
 

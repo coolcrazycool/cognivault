@@ -126,6 +126,39 @@ def _is_too_large(exc: cognivault.CogniVaultError) -> bool:
     return False
 
 
+def _subtree_prefix(path: str) -> str:
+    """Каталог потомков страницы — её собственный путь без ``.md``.
+
+    Страница лежит в ``…/<предки>/<Заголовок>.md``, а её дети — в
+    ``…/<предки>/<Заголовок>/``.  Значит переезд ОДНОЙ страницы двигает ровно
+    те файлы, чьи пути начинаются с этого префикса, — на всю глубину, а не
+    только прямых детей.
+    """
+    return path[:-3] if path.endswith(".md") else path
+
+
+def _moved_descendants(
+    moved_prefixes: list[str], candidates: set[str], pages: dict[str, Any]
+) -> list[str]:
+    """Страницы из ``candidates``, чьи файлы лежат внутри переехавшего поддерева.
+
+    Переименование или перенос страницы-предка НЕ меняет ``version`` потомков:
+    в шаге 4 они попадают в ``skipped_candidates`` и без этой проверки не
+    перезаписываются никогда — целое поддерево осиротело бы разом.  Цена
+    проверки — ноль запросов: сравниваются строки путей из манифеста.
+    """
+    if not moved_prefixes or not candidates:
+        return []
+    out: list[str] = []
+    for pid in sorted(candidates):
+        path = str((pages.get(pid) or {}).get("path") or "")
+        if not path:
+            continue
+        if any(path.startswith(prefix + "/") for prefix in moved_prefixes):
+            out.append(pid)
+    return out
+
+
 def _lock_for(key: str) -> asyncio.Lock:
     """Return (creating on first use) the per-key sync lock."""
     lock = SYNC_LOCKS.get(key)
@@ -211,6 +244,39 @@ async def sync_stream(
 
         # Initial (bulk zip) vs incremental (per-note create/update).
         initial = not pages
+
+        # ---- восстановление после потери манифеста --------------------------
+        # `manifest.json` лежит на эфемерном /data (emptyDir; PVC в namespace
+        # ровно один, и он занят бэкендом), поэтому перезапуск пода UI стирает
+        # его.  Пустой манифест при НЕпустом вольте — это не «первая
+        # синхронизация», а «состояние потеряно»: `deleted_ids` считается по
+        # манифесту, значит шаг 7 не удалит ничего, и страницы, удалённые или
+        # переехавшие в Confluence, останутся в вольте навсегда.
+        #
+        # Восстанавливаем не манифест (версий и хешей взять негде — тела всё
+        # равно будут перезаписаны), а ИНВЕНТАРЬ путей: снимок вольта ДО записи.
+        # В конце (шаг 7b) удаляем из него ровно те файлы, которые лежат внутри
+        # синхронизируемого поддерева и которых этот прогон не записал.
+        preexisting: set[str] = set()
+        if initial and not replace:
+            try:
+                preexisting = set(await cognivault.list_files(cv, recursive=True))
+            except Exception as exc:  # noqa: BLE001 — снимок строго best-effort
+                # Не прочитали вольт — просто не подчищаем.  Оставить мусор
+                # плохо, удалить не то — хуже.  И это первый сетевой вызов до
+                # общего try/except, поэтому ловим широко: он не вправе уронить
+                # синхронизацию, которая без него отработала бы полностью.
+                preexisting = set()
+                yield log(
+                    f"инвентарь вольта не прочитан "
+                    f"({getattr(exc, 'message', exc)}) — "
+                    f"подчистка осиротевших файлов пропущена"
+                )
+            if preexisting:
+                yield log(
+                    f"манифест пуст, но в вольте {len(preexisting)} файлов — "
+                    f"состояние восстанавливается по инвентарю путей"
+                )
 
         try:
             async with ConfluenceClient.from_config(
@@ -319,14 +385,31 @@ async def sync_stream(
                 zip_entries: list[tuple[str, bytes]] = []
                 zip_bytes = 0
                 sem = asyncio.Semaphore(max(1, max_concurrency))
+                # Пути, записанные ЭТИМ прогоном, и путь корневой страницы —
+                # вместе они задают границу подчистки на шаге 7b.
+                produced_targets: set[str] = set()
+                root_target = ""
+                # Префиксы (путь без «.md») страниц, которые в этом прогоне
+                # переехали: по ним ищутся осиротевшие потомки.
+                moved_prefixes: list[str] = []
+                # «Версия та же» — трогаем только если переехал их предок.
+                pending_unchanged: set[str] = set(skipped_candidates)
 
                 async def _fetch(pid: str) -> dict[str, Any]:
                     async with sem:
                         return await client.get_page(pid)
 
                 chunk_size = max(1, max_concurrency)
-                for start in range(0, total, chunk_size):
-                    chunk = targets[start : start + chunk_size]
+                # Очередь, а не range(): в неё дописываются потомки страниц,
+                # переехавших по ходу прогона (см. хвост цикла).
+                queue: list[tuple[str, str]] = list(targets)
+                pos = 0
+                moves_seen = 0
+                while pos < len(queue):
+                    chunk = queue[pos : pos + chunk_size]
+                    # ровно len(chunk), а не chunk_size: последний чанк короче,
+                    # и перескок оставил бы дописанных потомков необработанными
+                    pos += len(chunk)
                     fetched = await asyncio.gather(
                         *[_fetch(pid) for _kind, pid in chunk],
                         return_exceptions=True,
@@ -380,12 +463,35 @@ async def sync_stream(
                             ).hexdigest()
                             old = pages.get(pid)
 
+                            # Целевой путь считаем ДО хеш-ворот.  В путь зашита
+                            # вся цепочка предков (`build_vault_path`), поэтому
+                            # перенос страницы в другого родителя меняет путь
+                            # при побайтово том же теле.  Пока ворота стояли
+                            # раньше расчёта пути, такой перенос уходил в
+                            # `continue`: новый файл не записывался, старый не
+                            # удалялся — страница оставалась в вольте по старому
+                            # адресу навсегда.
+                            target = build_vault_path(page)
+                            if target in used_paths and (
+                                old is None or old.get("path") != target
+                            ):
+                                parent = target.rsplit("/", 1)[0]
+                                target = (
+                                    f"{parent}/{collision_suffix(title, pid)}.md"
+                                )
+                            used_paths.add(target)
+                            produced_targets.add(target)
+                            if pid == root_id:
+                                root_target = target
+
                             # Hash gate: a "changed" page whose rendered body is
-                            # byte-identical only bumps the manifest version.
+                            # byte-identical AND whose path did not move only
+                            # bumps the manifest version.
                             if (
                                 kind == "changed"
                                 and old is not None
                                 and old.get("content_hash") == content_hash
+                                and old.get("path") == target
                             ):
                                 old["version"] = remote[pid][0]
                                 refs_by_page[pid] = refs
@@ -402,17 +508,6 @@ async def sync_stream(
                                 )
                                 processed_since_flush += 1
                                 continue
-
-                            # Resolve the target path (disambiguate collisions).
-                            target = build_vault_path(page)
-                            if target in used_paths and (
-                                old is None or old.get("path") != target
-                            ):
-                                parent = target.rsplit("/", 1)[0]
-                                target = (
-                                    f"{parent}/{collision_suffix(title, pid)}.md"
-                                )
-                            used_paths.add(target)
 
                             rendered = render_document(
                                 build_frontmatter(page, content_hash), body_md
@@ -471,6 +566,14 @@ async def sync_stream(
                                 ):
                                     await cognivault.delete_note(old["path"], cv)
 
+                            old_path = str((old or {}).get("path") or "")
+                            if old_path and old_path != target:
+                                # Страница переехала — значит переехало и всё её
+                                # поддерево, а версии потомков при этом не
+                                # менялись.  Запоминаем префикс, хвост цикла
+                                # дотянет потомков (см. `_moved_descendants`).
+                                moved_prefixes.append(_subtree_prefix(old_path))
+
                             pages[pid] = {
                                 "path": target,
                                 "version": remote[pid][0],
@@ -524,6 +627,21 @@ async def sync_stream(
                                 paths, {"meta": meta, "pages": pages}
                             )
                             processed_since_flush = 0
+
+                    # Хвост чанка: если что-то переехало, дотягиваем потомков.
+                    # Их `version` не изменилась (переименовали/перенесли ПРЕДКА),
+                    # поэтому сами по себе они в очередь не попадают, а путь у
+                    # них уже другой.  Стоит это ноль запросов к Confluence на
+                    # проверку и один `get_page` на каждого потомка, который
+                    # действительно переехал, — то есть ровно на те страницы,
+                    # которые всё равно надо перезаписать.
+                    fresh_moves = moved_prefixes[moves_seen:]
+                    moves_seen = len(moved_prefixes)
+                    follow = _moved_descendants(fresh_moves, pending_unchanged, pages)
+                    if follow:
+                        pending_unchanged.difference_update(follow)
+                        queue.extend(("changed", pid) for pid in follow)
+                        total += len(follow)
 
                 # Flush any remaining bulk-zip pages.
                 if zip_entries:
@@ -722,6 +840,57 @@ async def sync_stream(
                                 "total": dtotal,
                             },
                         )
+
+                # ---- step 7b: подчистка после потери манифеста ------------
+                # Работает ТОЛЬКО когда манифест пришёл пустым, а вольт пустым
+                # не был (см. `preexisting` выше).  Область удаления — ровно
+                # поддерево корневой страницы: её собственный файл лежит в
+                # `<...>/<Корень>.md`, все потомки — в `<...>/<Корень>/`, и
+                # больше в этот каталог не пишет никто.  Удаляем из снятого
+                # ДО записи снимка те пути, которых этот прогон не записал.
+                #
+                # Два жёстких предохранителя:
+                #   * при ЛЮБОЙ несинхронизированной странице (`failed`) набор
+                #     записанных путей неполон, и файл упавшей страницы выглядел
+                #     бы осиротевшим — подчистка целиком отменяется;
+                #   * файл, который нельзя достоверно отнести к поддереву этого
+                #     прогона (ручная загрузка, другое пространство, вложения,
+                #     другой корень), под префикс не попадает и не трогается.
+                if preexisting and root_target:
+                    prefix = _subtree_prefix(root_target) + "/"
+                    orphans = sorted(
+                        p
+                        for p in preexisting
+                        if p.startswith(prefix) and p not in produced_targets
+                    )
+                    if counts["failed"]:
+                        if orphans:
+                            yield log(
+                                f"подчистка осиротевших файлов отменена: "
+                                f"{counts['failed']} страниц не синхронизированы, "
+                                f"список записанного неполон "
+                                f"(кандидатов было {len(orphans)})"
+                            )
+                    elif orphans:
+                        yield format_sse(
+                            "step",
+                            {
+                                "name": "orphans",
+                                "label": "Удаление осиротевших файлов",
+                            },
+                        )
+                        yield log(
+                            f"манифест был потерян: удаляю {len(orphans)} файлов, "
+                            f"которых больше нет в Confluence"
+                        )
+                        for opath in orphans:
+                            try:
+                                await cognivault.delete_note(opath, cv)
+                            except cognivault.CogniVaultError as exc:
+                                yield log(f"удаление {opath}: {exc.message}")
+                                continue
+                            counts["deleted"] += 1
+                            yield log(f"удалён осиротевший файл: {opath}")
 
                 # ---- step 8: finalize -------------------------------------
                 yield format_sse(
