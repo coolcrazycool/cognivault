@@ -296,6 +296,50 @@ _PATTERNS: tuple[tuple[str, bool, str], ...] = (
         r"(?:о каких|про какие) (?:продуктах?|проектах?|темах?|системах?|"
         r"направлениях?) (?:ты )?знаешь",
     ),
+    # The NOMINATIVE twin of the pattern above: «Какие продукты ты знаешь?».
+    # Measured production miss — the list above covered the prepositional case
+    # («о каких продуктах…») only, the clause is `fullmatch`ed so there is no
+    # partial credit, and the one `какие X ты знаешь` pattern in the assistant
+    # family carries a closed noun list without продукты/проекты. The question
+    # therefore took the ordinary retrieval path and was answered from a single
+    # archived page («Проекты Ислама») — one engineer's notes served as the list
+    # of the company's projects.
+    #
+    # ANCHORED ON THE SECOND-PERSON VERB, and that is the whole safety argument:
+    # this matcher BYPASSES the grader, so a false positive SUBSTITUTES an answer
+    # instead of degrading one. «знаешь/знаете» names the assistant as the
+    # subject, which leaves retrieval nothing to look for; a wildcard tail
+    # («какие проекты.*») would swallow «какие проекты у Ислама» and answer it
+    # with the tree of the whole base.
+    #
+    # The noun list deliberately excludes темы/разделы/направления: the assistant
+    # pattern above already matches those with the same verbs, and
+    # :func:`_clause_kind` returns the FIRST list match — repeating them here
+    # would make the family of «какие темы ты знаешь?» depend on the order of
+    # this tuple. Non-overlapping lists need no such rule to stay correct.
+    #
+    # CONSIDERED AND REJECTED: the bare, object-elided «какие проекты?». It would
+    # need ``first_turn_only=True`` (after «Расскажи про Fincert» it means *его*
+    # проекты) and it carries real hijack risk even on turn 1 — «какие проекты»
+    # is also how one asks about the projects of a team, a person or a section,
+    # and those are retrieval's, not the tree's.
+    (
+        "corpus",
+        False,
+        r"(?:какие|каких) (?:есть )?(?:продукты|продуктов|проекты|проектов|"
+        r"системы) (?:ты |вы )?(?:знаешь|знаете)",
+    ),
+    # The possessive twin: «Какие продукты у нас есть?». Anchored on the
+    # first-person-plural / second-person possessive instead of the verb —
+    # «у нас»/«в компании» scopes the question to the base's owner, the same
+    # reading «ты знаешь» gives. Nothing may follow it (full-clause match), so
+    # «какие проекты у нас в Архиве» stays with retrieval.
+    (
+        "corpus",
+        False,
+        r"(?:какие|каких) (?:продукты|проекты|системы|направления) "
+        r"(?:есть )?(?:у нас|у тебя|у вас|в компании)(?: есть)?",
+    ),
     (
         "corpus",
         False,
