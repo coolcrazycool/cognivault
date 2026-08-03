@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { FileChangeEvent } from '../../../lib/indexer.js';
 import type { PipelineEventEmitter, PipelineEventMap } from '../../../plugins/pipeline-events.js';
 
 // Set env vars before any module imports that trigger config parsing
@@ -96,6 +97,18 @@ function capturedScanComplete(): (filesScanned: number, eventsEmitted: number) =
   const call = mockOn.mock.calls.find((c) => c[0] === 'scanComplete');
   expect(call).toBeDefined();
   return call![1] as (filesScanned: number, eventsEmitted: number) => Promise<void>;
+}
+
+/** Pull the 'changes' handler the service registered on the indexer. */
+function capturedOnChanges(): (events: FileChangeEvent[]) => void {
+  const call = mockOn.mock.calls.find((c) => c[0] === 'changes');
+  expect(call).toBeDefined();
+  return call![1] as (events: FileChangeEvent[]) => void;
+}
+
+/** Shorthand for a batch of non-deleted events at the given paths. */
+function changeBatch(...paths: string[]): FileChangeEvent[] {
+  return paths.map((path) => ({ path, type: 'created' as const, contentHash: `h:${path}` }));
 }
 
 describe('ReindexService', () => {
@@ -423,6 +436,68 @@ describe('ReindexService', () => {
       const events = callArgs[1] as Array<{ path: string; type: string; contentHash: string }>;
       expect(events).toHaveLength(1);
       expect(events[0]!.contentHash).toBe('');
+    });
+  });
+
+  /**
+   * "Обработано 158 из 127 файлов": filesProcessed was a running sum of dispatches with
+   * no per-path dedup, clamped exactly once inside scanComplete. The 'changes' listener
+   * stays attached until the queue drains, so every poll cycle after the scan pushed the
+   * numerator past a denominator that never moves again.
+   */
+  describe('progress counter', () => {
+    async function startFullJob(): Promise<import('../service.js').ReindexJob> {
+      const service = new ReindexService(mockFastify);
+      return service.createJob(
+        'full',
+        undefined,
+        mockUserDb as never,
+        mockUserQdrant as never,
+        TEST_USER_ID,
+      );
+    }
+
+    it('counts distinct paths, not dispatches', async () => {
+      const job = await startFullJob();
+      const onChanges = capturedOnChanges();
+
+      onChanges(changeBatch('a.md', 'b.md'));
+      // The same files re-dispatched by a later poll cycle — a retry after a pipeline
+      // failure, or the stale-snapshot race in the poller. Neither is a new file.
+      onChanges(changeBatch('a.md', 'b.md'));
+      onChanges(changeBatch('b.md', 'c.md'));
+
+      expect(job.filesProcessed).toBe(3);
+    });
+
+    it('ignores deleted events', async () => {
+      const job = await startFullJob();
+      const onChanges = capturedOnChanges();
+
+      onChanges([
+        ...changeBatch('a.md'),
+        { path: 'gone.md', type: 'deleted', contentHash: 'h:gone.md' },
+      ]);
+
+      expect(job.filesProcessed).toBe(1);
+    });
+
+    it('never reports more files than the scan found, however late they arrive', async () => {
+      const job = await startFullJob();
+      const onChanges = capturedOnChanges();
+      const onScanComplete = capturedScanComplete();
+
+      onChanges(changeBatch('a.md', 'b.md'));
+      await onScanComplete(2, 2);
+
+      expect(job.totalFiles).toBe(2);
+      expect(job.filesProcessed).toBe(2);
+
+      // Emissions after the clamp used to keep incrementing — this is the 158/127 shape.
+      onChanges(changeBatch('a.md', 'b.md', 'c.md'));
+
+      expect(job.filesProcessed).toBeLessThanOrEqual(job.totalFiles);
+      expect(job.filesProcessed).toBe(2);
     });
   });
 

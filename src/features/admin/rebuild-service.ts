@@ -62,6 +62,15 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * Set key for "this tenant's copy of this file was dispatched". NUL separates the two
+ * halves because neither a user id nor a vault-relative path can contain one, so the
+ * pair can never be ambiguous.
+ */
+function dispatchKey(userId: string, filePath: string): string {
+  return `${userId}\u0000${filePath}`;
+}
+
 function recordJobError(job: RebuildJob, message: string): void {
   job.errorCount += 1;
   if (job.errors.length < MAX_JOB_ERRORS) {
@@ -283,8 +292,11 @@ export class CollectionRebuildService {
       }
 
       job.phase = 'indexing';
+      // Distinct (user, path) pairs dispatched, shared across users so the counter is a
+      // set size and not a running sum of emissions — see reindexUser().
+      const dispatched = new Set<string>();
       for (const userId of users) {
-        await this.reindexUser(job, userId);
+        await this.reindexUser(job, userId, dispatched);
         job.usersDone += 1;
       }
 
@@ -324,8 +336,17 @@ export class CollectionRebuildService {
    *
    * A failure is recorded against the job and the loop moves on — one broken vault must
    * not leave every other tenant unindexed.
+   *
+   * `dispatched` is the job-wide set of (user, path) pairs handed to the pipeline. The
+   * poller can re-emit a path (a file that changes again, a retry after a failure), so
+   * `filesProcessed` has to be a set size; summing emissions reports more files than the
+   * vault contains.
    */
-  private async reindexUser(job: RebuildJob, userId: string): Promise<void> {
+  private async reindexUser(
+    job: RebuildJob,
+    userId: string,
+    dispatched: Set<string>,
+  ): Promise<void> {
     const entry = this.fastify.indexers.get(userId);
     if (entry === undefined) {
       recordJobError(
@@ -337,7 +358,13 @@ export class CollectionRebuildService {
     }
 
     const onChanges = (events: FileChangeEvent[]): void => {
-      job.filesProcessed += events.filter((e) => e.type !== 'deleted').length;
+      for (const event of events) {
+        if (event.type !== 'deleted') {
+          // Keyed by user AND path: two tenants can hold files with identical paths.
+          dispatched.add(dispatchKey(userId, event.path));
+        }
+      }
+      job.filesProcessed = dispatched.size;
     };
     const onFileFailed = (event: FileFailedEvent): void => {
       if (event.userId !== userId) {

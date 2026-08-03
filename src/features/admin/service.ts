@@ -110,10 +110,22 @@ export class ReindexService {
     const interlock = this.interlock;
     interlock.fullReindexUsers.add(userId);
 
-    // Listen for 'changes' events to count files as they are dispatched for processing
+    // Count DISTINCT paths dispatched for processing, not dispatches. The listener stays
+    // attached until the queue drains, so poll cycles that land after the scan keep
+    // emitting into it; a running sum turned those into "158 из 127".
+    const dispatchedPaths = new Set<string>();
+    const syncFilesProcessed = (): void => {
+      job.filesProcessed =
+        job.totalFiles > 0 ? Math.min(dispatchedPaths.size, job.totalFiles) : dispatchedPaths.size;
+    };
+
     const onChanges = (events: import('../../lib/indexer.js').FileChangeEvent[]): void => {
-      const processed = events.filter((e) => e.type !== 'deleted').length;
-      job.filesProcessed += processed;
+      for (const event of events) {
+        if (event.type !== 'deleted') {
+          dispatchedPaths.add(event.path);
+        }
+      }
+      syncFilesProcessed();
     };
 
     // Per-file pipeline failures are what make a job "completed with errors" instead of
@@ -130,9 +142,10 @@ export class ReindexService {
     const onScanComplete = async (filesScanned: number, _eventsEmitted: number): Promise<void> => {
       try {
         job.totalFiles = filesScanned;
-        if (job.filesProcessed > filesScanned) {
-          job.filesProcessed = filesScanned;
-        }
+        // Clamping once here was the other half of the bug: every emission after this
+        // point pushed the numerator past a denominator that never moves again. The
+        // clamp now lives in syncFilesProcessed() and applies to all of them.
+        syncFilesProcessed();
         // Wait for all queued pipeline tasks to finish before marking completed
         const entry = this.fastify.indexers.get(userId);
         if (entry) {

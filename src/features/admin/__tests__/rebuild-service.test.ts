@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { FastifyInstance } from 'fastify';
 import { describe, expect, it, vi } from 'vitest';
+import type { FileChangeEvent } from '../../../lib/indexer.js';
 import type { PipelineEventEmitter, PipelineEventMap } from '../../../plugins/pipeline-events.js';
 import type { QdrantAdmin } from '../../../plugins/qdrant.js';
 import { type AdminInterlock, createAdminInterlock } from '../interlock.js';
@@ -439,6 +440,39 @@ describe('CollectionRebuildService', () => {
       expect(job.usersTotal).toBe(2);
       expect(job.filesProcessed).toBe(5);
       expect(job.errors).toEqual([]);
+    });
+
+    it('counts distinct dispatched files, not emissions', async () => {
+      const h = buildHarness(['user-a']);
+      const indexer = h.indexers.get('user-a')!.indexer;
+      indexer.scanFiles = 3;
+
+      let replayed = false;
+      indexer.on('changes', (events: FileChangeEvent[]) => {
+        if (replayed) return;
+        replayed = true;
+        // A later poll cycle re-dispatches a file already seen plus one genuinely new
+        // one. Summing emissions reports 5 files in a 4-file vault.
+        indexer.emit('changes', [
+          events[0],
+          { path: 'note-9.md', type: 'created', contentHash: 'h9' },
+        ]);
+      });
+
+      const job = await settle(h.service, h.service.start(COLLECTION).id);
+
+      expect(job.filesProcessed).toBe(4);
+    });
+
+    it('counts the same path under two users separately', async () => {
+      const h = buildHarness(['user-a', 'user-b']);
+      // Both vaults contain note-0.md — two tenants, two files to embed.
+      h.indexers.get('user-a')!.indexer.scanFiles = 1;
+      h.indexers.get('user-b')!.indexer.scanFiles = 1;
+
+      const job = await settle(h.service, h.service.start(COLLECTION).id);
+
+      expect(job.filesProcessed).toBe(2);
     });
 
     it('records a user whose reindex throws and still indexes the rest', async () => {
