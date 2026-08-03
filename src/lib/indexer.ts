@@ -548,6 +548,17 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
    * Record every created/updated/moved event as pending and drop re-emissions of paths
    * already queued with the same content hash (the pipeline can take much longer than
    * one poll interval; without this the queue fills with duplicates every 5s).
+   *
+   * Two guards, because one is not enough:
+   *  - `pendingIndex` catches a file still in the queue.
+   *  - a FRESH read of indexed_files catches a file the pipeline confirmed *after* the
+   *    caller took its `dbRows` snapshot. detectChanges() snapshots the table first and
+   *    then spends at least STABILITY_DELAY_MS hashing; every file confirmed inside that
+   *    window is gone from `pendingIndex` yet still classified 'created' from the stale
+   *    snapshot, so without this check it is dispatched, chunked and embedded a second
+   *    time. Re-reading here (rather than moving the snapshot after the wait) keeps the
+   *    check in the same synchronous block as the emission — nothing can be confirmed
+   *    between the read and the decision.
    */
   private registerPending(
     events: FileChangeEvent[],
@@ -571,6 +582,18 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
         continue;
       }
 
+      if (this.isAlreadyIndexed(event.path, event.contentHash)) {
+        this.logger.debug(
+          { path: event.path },
+          'Confirmed as indexed while this cycle was running — not re-emitting',
+        );
+        // A 'moved' event dropped here leaves its source row in place (detectChanges
+        // skips deleting move sources). The next cycle sees the destination already in
+        // indexed_files, detects no move, and cleans the source up as a plain delete —
+        // which is exactly the right outcome for vectors left behind at the old path.
+        continue;
+      }
+
       const stat = stats.get(event.path);
       if (!stat) {
         this.logger.warn({ path: event.path }, 'No stat snapshot for change event — skipping');
@@ -587,6 +610,23 @@ export class VaultIndexer extends EventEmitter<IndexerEvents> {
     }
 
     return emitted;
+  }
+
+  /**
+   * Is this exact content already on record for this path, as of RIGHT NOW?
+   *
+   * Deliberately a point lookup and not a reuse of the caller's snapshot — the whole
+   * value of this check is that it is younger than the snapshot.
+   */
+  private isAlreadyIndexed(filePath: string, contentHash: string): boolean {
+    try {
+      const row = this.db.select().from(indexedFiles).where(eq(indexedFiles.path, filePath)).get();
+      return row?.contentHash === contentHash;
+    } catch (err: unknown) {
+      // Read failure must not swallow a real change: fall through and emit.
+      this.logger.debug({ path: filePath, err }, 'Failed to re-read indexed_files row');
+      return false;
+    }
   }
 
   /** Update only the stat columns of an existing row (content is known unchanged). */

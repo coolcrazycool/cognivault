@@ -138,6 +138,25 @@ function createTestIndexer(opts: {
   return { indexer, db, logger };
 }
 
+/**
+ * The three private members the confirm-mid-cycle tests drive directly.
+ *
+ * Deliberately white-box: the defect lives in the window between detectChanges()'s
+ * indexed_files snapshot and registerPending(), and the only way to land a confirmation
+ * inside that window *reliably* is to inject it there. Doing it with timers would make
+ * the test a race against STABILITY_DELAY_MS — the flakiness this file is already known
+ * for. Calling detectChanges() by hand also means no poll timer, no sleeps, no clock.
+ */
+interface IndexerInternals {
+  runInitialScan(): Promise<void>;
+  detectChanges(): Promise<void>;
+  checkStability(absolutePath: string, firstHash: string): Promise<string | null>;
+}
+
+function internals(indexer: VaultIndexer): IndexerInternals {
+  return indexer as unknown as IndexerInternals;
+}
+
 async function writeMd(dir: string, relPath: string, content: string): Promise<string> {
   const absPath = path.join(dir, relPath);
   await fs.mkdir(path.dirname(absPath), { recursive: true });
@@ -843,6 +862,98 @@ describe('VaultIndexer', () => {
 
       expect(emissions.length).toBeGreaterThanOrEqual(2);
       expect(new Set(emissions.map((e) => e.contentHash)).size).toBe(2);
+    });
+
+    /**
+     * The 158-из-127 defect. detectChanges() snapshots indexed_files first and only then
+     * hashes and waits out the stability delay, so a file the pipeline confirms inside
+     * that window is gone from pendingIndex while still classified 'created' from the
+     * stale snapshot. Both duplicate guards missed it and the file was chunked and
+     * embedded a second time.
+     *
+     * Fully deterministic: no timers, no sleeps — the poll cycle is invoked by hand and
+     * the confirmation is injected at the exact point the real pipeline hit.
+     */
+    describe('confirmed mid-cycle (stale snapshot)', () => {
+      it('does not re-emit a file confirmed between the snapshot and registerPending', async () => {
+        await writeMd(vaultRoot, 'race.md', 'body');
+
+        const { indexer, db } = createTestIndexer({
+          vaultRoot,
+          dbPath,
+          // Long enough that the poll timer cannot fire during the test; the cycle is
+          // driven manually instead.
+          pollIntervalMs: 60_000,
+          autoConfirm: false,
+        });
+
+        const emissions: FileChangeEvent[] = [];
+        indexer.on('changes', (events) => {
+          emissions.push(...events.filter((e) => e.path === 'race.md'));
+        });
+
+        await internals(indexer).runInitialScan();
+        expect(emissions).toHaveLength(1);
+        expect(emissions[0]?.type).toBe('created');
+
+        const { indexedFiles } = await import('../../db/schema.js');
+        // Still pending: the snapshot the next cycle takes will NOT contain this row.
+        expect(db.select().from(indexedFiles).all()).toHaveLength(0);
+
+        // The pipeline finishes while the cycle is in its stability wait.
+        let confirmedDuringCycle = false;
+        vi.spyOn(internals(indexer), 'checkStability').mockImplementation(
+          async (_absolutePath: string, firstHash: string) => {
+            if (!confirmedDuringCycle) {
+              confirmedDuringCycle = true;
+              indexer.confirmIndexed('race.md');
+            }
+            return firstHash;
+          },
+        );
+
+        await internals(indexer).detectChanges();
+        indexer.stop();
+
+        expect(confirmedDuringCycle).toBe(true);
+        // The row is on record with this exact content — re-embedding it is pure waste.
+        expect(db.select().from(indexedFiles).all()).toHaveLength(1);
+        expect(emissions).toHaveLength(1);
+      });
+
+      it('still emits when the content changed after the confirmation', async () => {
+        await writeMd(vaultRoot, 'race.md', 'first body');
+
+        const { indexer } = createTestIndexer({
+          vaultRoot,
+          dbPath,
+          pollIntervalMs: 60_000,
+          autoConfirm: false,
+        });
+
+        const emissions: FileChangeEvent[] = [];
+        indexer.on('changes', (events) => {
+          emissions.push(...events.filter((e) => e.path === 'race.md'));
+        });
+
+        await internals(indexer).runInitialScan();
+        indexer.confirmIndexed('race.md');
+        expect(emissions).toHaveLength(1);
+
+        // A real edit after the confirmation: the fresh-row guard must not swallow it,
+        // or an updated file would never be re-indexed.
+        await fs.writeFile(path.join(vaultRoot, 'race.md'), 'second body, longer', 'utf-8');
+        vi.spyOn(internals(indexer), 'checkStability').mockImplementation(
+          async (_absolutePath: string, firstHash: string) => firstHash,
+        );
+
+        await internals(indexer).detectChanges();
+        indexer.stop();
+
+        expect(emissions).toHaveLength(2);
+        expect(emissions[1]?.type).toBe('updated');
+        expect(emissions[1]?.contentHash).not.toBe(emissions[0]?.contentHash);
+      });
     });
 
     it('confirmIndexed on a moved file carries the row over to the new path', async () => {
