@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # ⚠️ ФАЙЛ УСТАРЕЛ. Актуальный набор манифестов — deploy/dropapp/
-# (см. deploy/dropapp/README.md): полный, с UI, Service, Ingress и актуальными
-# пинами образов sha-f8a989d. Здесь образ старый и нет Service/Ingress.
+# (см. deploy/dropapp/README.md): полный, с UI, Service, Ingress и актуальным
+# пином образа — он там один, и сверять надо с ним. Здесь нет Service/Ingress.
 # Файл оставлен для истории и отката — не применять, не сверившись с deploy/dropapp/.
 # ═══════════════════════════════════════════════════════════════════════════
 apiVersion: v1
@@ -155,7 +155,7 @@ spec:
           # ВНИМАНИЕ: тег должен совпадать с deploy/dropapp/04-backend.yaml. У бэкенда
           # старше sha-8665e36 нет маршрута /api/vault/catalog — новый UI тогда молча
           # отдаёт ответы без дерева разделов, БЕЗ ошибки. Бэкенд катить НЕ ПОЗЖЕ UI.
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-8665e36
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-8955d97
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

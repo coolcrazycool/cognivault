@@ -22,8 +22,8 @@ Namespace: `ci05490208-oasis-cognivault`.
 
 | Компонент | Пин в манифесте | Что это за сборка |
 |-----------|-----------------|-------------------|
-| бэкенд | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-8665e36` | этот релиз |
-| UI | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-8665e36` | этот релиз |
+| бэкенд | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-8955d97` | этот релиз |
+| UI | `sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-8955d97` | этот релиз |
 
 > **Оба тега собраны и проверены в реестре** — запросом к нему, а не выводом из хеша
 > коммита. В этом релизе они СОВПАДАЮТ: последний коммит затронул и `src/`, и

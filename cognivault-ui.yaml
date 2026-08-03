@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # ⚠️ ФАЙЛ УСТАРЕЛ. Актуальный набор манифестов — deploy/dropapp/
 # (см. deploy/dropapp/README.md): полный набор с бэкендом, Service, Ingress и
-# актуальными пинами образов sha-f8a989d. Здесь образ старый (sha-a638117) и нет
+# актуальным пином образа — он там один, и сверять надо с ним. Здесь нет
 # ни бэкенда, ни Ingress-объекта.
 # Файл оставлен для истории и отката — не применять, не сверившись с deploy/dropapp/.
 # ═══════════════════════════════════════════════════════════════════════════
@@ -112,7 +112,7 @@ spec:
           # (пакет ghcr должен быть PUBLIC).
           # ВНИМАНИЕ: тег должен совпадать с deploy/dropapp/05-ui.yaml, и бэкенд катится
           # НЕ ПОЗЖЕ UI (см. комментарий у образа в cognivault.yaml).
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-8665e36
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-8955d97
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
