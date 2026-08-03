@@ -110,7 +110,9 @@ spec:
           # закешированный вердикт «Заблокирован» по старому образу.
           # Образ тянется через прокси SberOSC из ghcr.io/coolcrazycool/cognivault-ui
           # (пакет ghcr должен быть PUBLIC).
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-a638117
+          # ВНИМАНИЕ: тег должен совпадать с deploy/dropapp/05-ui.yaml, и бэкенд катится
+          # НЕ ПОЗЖЕ UI (см. комментарий у образа в cognivault.yaml).
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-8665e36
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
