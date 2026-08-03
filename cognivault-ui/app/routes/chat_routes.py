@@ -389,6 +389,12 @@ async def chat(request: Request) -> Any:
         # уточняет, а не заменяет.
         scope: str | None = None
         hedge: str | None = None
+        # Структурный блок в голове последнего user-турна: чем он был («tree» /
+        # «footprint» / ничего) и какого размера. В `context_text` он не
+        # попадает — тот режется от «Источники:», — так что без этой пары по
+        # логу нельзя сказать, доехало ли дерево разделов до модели вообще.
+        head_block_kind: str | None = None
+        head_block_chars: int = 0
         # Стадии конвейера. `condense`/`search`/`grade`/`content` приходят из
         # инструментированных seams (см. верх модуля), остальное меряем здесь.
         turn_started = time.perf_counter()
@@ -421,6 +427,8 @@ async def chat(request: Request) -> Any:
                     answer_override = getattr(ctx, "answer_override", None)
                     scope = getattr(ctx, "scope", None)
                     hedge = getattr(ctx, "hedge", None)
+                    head_block_kind = getattr(ctx, "head_block_kind", None)
+                    head_block_chars = getattr(ctx, "head_block_chars", 0)
 
                     if answer_override:
                         # Ответ уже готов (шаблонный отказ: ни один кандидат не
@@ -599,6 +607,19 @@ async def chat(request: Request) -> Any:
                         "context_text": context_logged,
                         "context_chars": context_chars,
                         "context_truncated_in_log": context_cut,
+                        # Структурный блок в голове того же сообщения — только
+                        # форма ({kind, chars}), не текст: он одинаков на всех
+                        # ходах прогона и весит тысячи символов. На ходе поиска
+                        # (`rag_used: true`, `intent != "meta"`) `kind: null`
+                        # означает, что блока не было вовсе — то есть тихую
+                        # деградацию (каталог вольта недоступен), которую по
+                        # остальному логу не увидеть: `context_text` режется от
+                        # «Источники:» и блок в него не попадает. Мета-ход
+                        # собирает структуру другим швом (`rag._structure_block`)
+                        # и в этом поле не отражается.
+                        "head_block": rag_log.head_block_snapshot(
+                            head_block_kind, head_block_chars
+                        ),
                         "answer_text": answer_text,
                         "answer_chars": len(full_text),
                         "answer_truncated_in_log": answer_cut,

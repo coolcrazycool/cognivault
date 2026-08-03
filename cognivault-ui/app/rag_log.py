@@ -30,6 +30,15 @@ Deliberate choices:
   ``tools/eval/README.md``. The price is record size: a full turn is ~30 KB, so
   the 5 MiB rotation holds roughly 150–300 turns, which comfortably covers a
   golden-set run. Collect the file right after a run.
+* **The head block is recorded by SHAPE, not by text** (:func:`head_block_snapshot`).
+  ``context_text`` starts at «Источники:» by construction — the structural block
+  that opens the same message (``app.rag._head_block``) is outside the slice, so
+  before this field nothing in a finished run could say whether the section tree
+  had been there at all. Both of its renderings need
+  ``GET /api/vault/catalog``, and against a backend that predates the endpoint
+  they both silently collapse to ``None``. Its text is not logged: it is
+  thousands of characters, identical on every turn of a run, and already
+  reconstructible from the vault.
 
 Deployment note: in the production manifest ``/data`` is an ``emptyDir``, so
 this log (and the votes in it) does not survive a pod restart. That is fine for
@@ -281,6 +290,46 @@ def settings_snapshot(
             key: _prompt_fingerprint(prompt_cfg.get(key))
             for key in ("system", "context_reminder")
         },
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Head block
+# --------------------------------------------------------------------------- #
+
+#: The two renderings the structural head block can take — the section tree
+#: (:mod:`app.corpus_tree`) or the constant-size footprint
+#: (:mod:`app.corpus_map`). ``app.rag._head_block`` produces one of them or
+#: nothing; these names are its and this record's shared vocabulary.
+HEAD_BLOCK_TREE = "tree"
+HEAD_BLOCK_FOOTPRINT = "footprint"
+
+_HEAD_BLOCK_KINDS = frozenset({HEAD_BLOCK_TREE, HEAD_BLOCK_FOOTPRINT})
+
+
+def head_block_snapshot(kind: Any, chars: Any) -> dict[str, Any]:
+    """``{"kind": …, "chars": …}`` — what opened the final user turn.
+
+    ``kind`` is :data:`HEAD_BLOCK_TREE`, :data:`HEAD_BLOCK_FOOTPRINT`, or
+    ``None`` — and ``None`` is the field's whole reason for existing. It is the
+    *degraded* state: both renderings need ``GET /api/vault/catalog``, so a UI
+    newer than its backend loses the entire block with no other trace. Whether
+    that happened used to be unanswerable after the fact, since ``context_text``
+    is sliced from «Источники:» forward.
+
+    Anything unrecognised also becomes ``None`` (and a non-integer ``chars``
+    becomes ``0``): the record is telemetry and must never carry a value a later
+    reader has to guess about. The block's TEXT is deliberately absent — see the
+    module docstring.
+
+    Scope: the RETRIEVAL turn's head block only. A meta turn (``intent ==
+    "meta"``) builds its structure through a different seam
+    (``app.rag._structure_block``) and leaves this ``None`` — read the field
+    together with ``intent``.
+    """
+    return {
+        "kind": kind if kind in _HEAD_BLOCK_KINDS else None,
+        "chars": chars if isinstance(chars, int) and not isinstance(chars, bool) else 0,
     }
 
 

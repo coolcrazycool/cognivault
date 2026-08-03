@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from . import cognivault, corpus_map, corpus_scope, corpus_tree, rag_pipeline
+from .rag_log import HEAD_BLOCK_FOOTPRINT, HEAD_BLOCK_TREE
 from .tokens import CHARS_PER_TOKEN, estimate_messages_tokens
 
 log = logging.getLogger("cognivault-ui.rag")
@@ -264,7 +265,12 @@ class RagContext:
     * ``hedge`` — the evidence-concentration caveat, appended to the generated
       answer by the route. ``None`` on all but a corpus-wide question whose
       fragments collapsed to one document. It QUALIFIES the answer; it never
-      replaces one, and it is never the refusal (that is the grader's alone).
+      replaces one, and it is never the refusal (that is the grader's alone);
+    * ``head_block_kind`` / ``head_block_chars`` — which rendering of the
+      structural head block opened ``user_message`` (:func:`_head_block`) and how
+      big it was. Telemetry only, never read back into the answer path: the
+      block itself sits outside the logged ``context_text``, so without this pair
+      a finished run cannot say whether the section tree was there at all.
     """
 
     system_message: dict[str, Any] | None = None
@@ -279,6 +285,8 @@ class RagContext:
     answer_override: str | None = None
     scope: str = corpus_scope.DEFAULT_SCOPE
     hedge: str | None = None
+    head_block_kind: str | None = None
+    head_block_chars: int = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -564,10 +572,31 @@ def _system_message(prompt: str | None = None) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+# The tree-gap warning of `_head_block` is emitted at most once per process, and
+# re-armed by the next successful render. The condition it reports is a standing
+# one (an endpoint that 404s stays 404 for the life of the deployment), so a
+# per-turn line would be pure noise — and noise in the one place an operator has
+# to look. A `logging.warning` DOES reach the container log: nothing in this app
+# calls `basicConfig` and uvicorn's default config leaves the root logger alone,
+# so the record goes through `logging.lastResort` to stderr at WARNING and above
+# (this is why `rag_log` says `log.info` would go nowhere — WARNING is the first
+# level that survives). The primary, machine-readable signal is nevertheless the
+# `head_block` field of the request record: the log line can be lost to a log
+# driver, the JSONL is collected with the run.
+_tree_gap_warned = False
+
+
 async def _head_block(
     rcfg: dict[str, Any], cv: dict[str, Any] | None, n_sources: int | None
-) -> str | None:
-    """The structural block that opens the final user turn, or ``None``.
+) -> tuple[str | None, str | None]:
+    """The structural block that opens the final user turn, and WHICH one it is.
+
+    Returns ``(text, kind)`` — ``kind`` being :data:`app.rag_log.HEAD_BLOCK_TREE`,
+    :data:`app.rag_log.HEAD_BLOCK_FOOTPRINT` or ``None`` when nothing could be
+    built. The caller carries the pair into the request log, because a missing
+    head block is otherwise invisible: it never reaches ``rag_log``'s
+    ``context_text`` (which is sliced from «Источники:» forward) and neither
+    renderer raises.
 
     Two renderings of the same fact, one slot. With ``rag.corpus_tree_enabled``
     on and a reachable catalogue it is the full section tree
@@ -617,11 +646,29 @@ async def _head_block(
     measurement, and the fix — if the stand shows the model refusing material it
     was given — is (3).
     """
+    global _tree_gap_warned
+
     if corpus_tree.enabled(rcfg):
         tree = await corpus_tree.tree_block(cv, n_sources)
         if tree:
-            return tree
-    return await corpus_map.corpus_block(cv, n_sources)
+            _tree_gap_warned = False
+            return tree, HEAD_BLOCK_TREE
+        # Switched ON and empty-handed — the state that used to be
+        # indistinguishable from switched OFF. Every path into it is silent by
+        # design (`corpus_tree.tree_block` swallows a missing `GET
+        # /api/vault/catalog`, a timeout and a malformed payload alike), and the
+        # most likely cause is a backend older than this UI.
+        if not _tree_gap_warned:
+            _tree_gap_warned = True
+            log.warning(
+                "rag.corpus_tree_enabled включён, но дерево разделов не собралось "
+                "(каталог недоступен или пуст) — контекст уходит с отпечатком базы "
+                "или вовсе без структурного блока; см. поле head_block в rag_log.jsonl"
+            )
+    footprint = await corpus_map.corpus_block(cv, n_sources)
+    if footprint:
+        return footprint, HEAD_BLOCK_FOOTPRINT
+    return None, None
 
 
 def _operating_rules(prompts: dict[str, Any] | None) -> str:
@@ -999,7 +1046,7 @@ async def _build_auto(
     # now, so a turn that ended in a refusal or found nothing never pays for it.
     # Cached per vault; `None` on any failure, and then the message is exactly
     # what it was before either feature existed.
-    corpus = await _head_block(rcfg, cv, len(sources))
+    corpus, head_kind = await _head_block(rcfg, cv, len(sources))
 
     # Evidence-concentration caveat. Pure Python, zero tokens, and — because
     # `scope` is `document` unless the model explicitly said otherwise — it
@@ -1038,6 +1085,8 @@ async def _build_auto(
         grades=grades_meta,
         scope=scope,
         hedge=hedge_text,
+        head_block_kind=head_kind,
+        head_block_chars=len(corpus or ""),
     )
 
 
@@ -1110,7 +1159,7 @@ async def _build_legacy(
     if not sources:
         return RagContext()
 
-    corpus = await _head_block(rcfg, cv, len(sources))
+    corpus, head_kind = await _head_block(rcfg, cv, len(sources))
     user_message, context_chars = _render_context_message(
         blocks,
         query,
@@ -1124,6 +1173,8 @@ async def _build_legacy(
         user_message=user_message,
         sources=sources,
         context_chars=context_chars,
+        head_block_kind=head_kind,
+        head_block_chars=len(corpus or ""),
     )
 
 

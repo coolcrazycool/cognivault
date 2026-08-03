@@ -2,7 +2,8 @@
 
 Covers: one valid JSON object per line, Cyrillic written as-is, size-based
 rotation with at most two files, best-effort failure handling, the secret
-scrubber, the free-text cap, the settings snapshot and the stage timer.
+scrubber, the free-text cap, the settings snapshot, the head-block shape and
+the stage timer.
 """
 
 from __future__ import annotations
@@ -208,6 +209,49 @@ def test_settings_snapshot_tolerates_missing_sections():
         "gigachat": {},
         "prompts": {"system": None, "context_reminder": None},
     }
+
+
+# --------------------------------------------------------------------------- #
+# Head block
+# --------------------------------------------------------------------------- #
+
+
+def test_head_block_snapshot_records_the_shape_of_the_two_renderings():
+    assert rag_log.head_block_snapshot(rag_log.HEAD_BLOCK_TREE, 6203) == {
+        "kind": "tree",
+        "chars": 6203,
+    }
+    assert rag_log.head_block_snapshot(rag_log.HEAD_BLOCK_FOOTPRINT, 512) == {
+        "kind": "footprint",
+        "chars": 512,
+    }
+
+
+def test_head_block_snapshot_keeps_the_degraded_state_distinguishable():
+    """`kind: null` — это «блока не было», и по логу это должно быть видно.
+
+    Оба рендера ходят в `GET /api/vault/catalog`; на бэкенде старше UI оба молча
+    отдают `None`, и голова сообщения исчезает целиком. В `context_text` она не
+    попадает по построению — тот режется от «Источники:», — так что до этого
+    поля прогон с деревом и прогон без него выглядели одинаково.
+    """
+    assert rag_log.head_block_snapshot(None, 0) == {"kind": None, "chars": 0}
+
+
+@pytest.mark.parametrize(
+    "kind, chars, expected",
+    [
+        ("дерево", 10, {"kind": None, "chars": 10}),  # не из словаря
+        ("", 0, {"kind": None, "chars": 0}),
+        (rag_log.HEAD_BLOCK_TREE, None, {"kind": "tree", "chars": 0}),
+        (rag_log.HEAD_BLOCK_TREE, "6203", {"kind": "tree", "chars": 0}),
+        (rag_log.HEAD_BLOCK_TREE, True, {"kind": "tree", "chars": 0}),  # bool ≠ длина
+    ],
+)
+def test_head_block_snapshot_never_carries_a_value_to_be_guessed_about(
+    kind, chars, expected
+):
+    assert rag_log.head_block_snapshot(kind, chars) == expected
 
 
 # --------------------------------------------------------------------------- #

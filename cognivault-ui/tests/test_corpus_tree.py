@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -558,6 +559,143 @@ def test_tree_falls_back_to_the_footprint_when_the_catalogue_is_gone(monkeypatch
     assert ctx.user_message["content"].startswith("Источники:")
 
 
+# --------------------------------------------------------------------------- #
+# Наблюдаемость: чем был структурный блок и был ли он вообще
+# --------------------------------------------------------------------------- #
+#
+# Оба блока требуют `GET /api/vault/catalog`. На бэкенде старше UI эндпойнт
+# отвечает 404, оба рендера возвращают `None`, и голова сообщения исчезает
+# целиком — без исключения, без кадра и без следа в логе: `context_text`
+# режется от «Источники:», то есть блок в него не попадает по построению.
+# Диагностировать это постфактум было нечем — отсюда пара полей на ходе.
+
+
+def _head_len(ctx: rag.RagContext) -> int:
+    """Длина головы сообщения, посчитанная по самому сообщению.
+
+    Голова рендерится как ``f"{corpus}\\n\\n"`` перед «Источники:» — то есть
+    смещение минус разделитель. Считаем именно так, а не по эталонному тексту
+    блока: тест должен ловить расхождение поля с тем, что реально уехало.
+    """
+    content = ctx.user_message["content"]
+    return content.index("Источники:") - 2
+
+
+def test_head_block_field_names_which_of_the_two_blocks_the_turn_got(monkeypatch):
+    _install(monkeypatch, [_hit(f"{_ROOT}/Продукты/Fincert.md", 1)])
+
+    on = _build("какие поля у витрины", True)
+    off = _build("какие поля у витрины", False)
+
+    assert on.head_block_kind == "tree"
+    assert off.head_block_kind == "footprint"
+    # Размер — тоже поле: по нему видно урезанное дерево, а не только его отказ.
+    assert on.head_block_chars == _head_len(on) > off.head_block_chars == _head_len(off)
+
+
+def test_head_block_field_is_null_when_no_block_was_built(monkeypatch):
+    """Тихая деградация — единственное, ради чего поле и заводилось."""
+    _install(monkeypatch, [_hit(f"{_ROOT}/Продукты/Fincert.md", 1)])
+
+    async def boom(cv=None, limit=None, offset=None, timeout=None):
+        raise cognivault.CogniVaultError("catalog failed (404)", 404, "")
+
+    monkeypatch.setattr(cognivault, "catalog", boom)
+    catalog.reset_cache()
+    corpus_map.reset_cache()
+
+    ctx = _build("какие поля у витрины", True)
+
+    assert ctx.user_message["content"].startswith("Источники:")
+    assert ctx.head_block_kind is None
+    assert ctx.head_block_chars == 0
+
+
+def test_legacy_mode_reports_the_head_block_too(monkeypatch):
+    """`source=semantic` идёт другим сборщиком — поле обязано быть и там."""
+    _install(monkeypatch, [_hit(f"{_ROOT}/Продукты/Fincert.md", 1)])
+
+    async def fake_semantic(query, limit, cv=None, **kwargs):
+        return {"results": [_hit(f"{_ROOT}/Продукты/Fincert.md", 1)]}
+
+    monkeypatch.setattr(rag.cognivault, "semantic_search", fake_semantic)
+    ctx = asyncio.run(
+        rag.build_rag_context(
+            "какие поля у витрины",
+            {"mode": "semantic", "source": "semantic", "corpus_tree_enabled": True},
+            None,
+            {},
+            None,
+        )
+    )
+
+    assert ctx.head_block_kind == "tree"
+    assert ctx.head_block_chars == _head_len(ctx)
+
+
+def test_an_enabled_but_empty_tree_warns_once_not_every_turn(monkeypatch, caplog):
+    """«Выключено» и «включено и сломано» — разные состояния, и слышно второе.
+
+    Строка ровно одна на процесс: состояние стоячее (эндпойнт, отвечающий 404,
+    отвечает так всё время жизни пода), а лишний шум — в том единственном месте,
+    куда оператор и придёт смотреть. Взводится обратно успешным деревом, иначе
+    вернувшаяся поломка была бы уже беззвучной.
+    """
+    _install(monkeypatch, [_hit(f"{_ROOT}/Продукты/Fincert.md", 1)])
+    monkeypatch.setattr(rag, "_tree_gap_warned", False)
+
+    async def empty_catalog(cv=None, limit=None, offset=None, timeout=None):
+        # Каталог отвечает, но документов в нём нет: дерево не собирается,
+        # `document_extensions` на месте — футпринт собирается.
+        return _payload([])
+
+    monkeypatch.setattr(cognivault, "catalog", empty_catalog)
+    catalog.reset_cache()
+    corpus_map.reset_cache()
+
+    with caplog.at_level(logging.WARNING, logger="cognivault-ui.rag"):
+        first = _build("какие поля у витрины", True)
+        _build("какие поля у витрины", True)
+        _build("какие поля у витрины", True)
+
+    assert first.head_block_kind == "footprint"  # деградация, а не отсутствие
+    warnings = [r for r in caplog.records if "corpus_tree_enabled" in r.message]
+    assert len(warnings) == 1
+    assert warnings[0].levelno == logging.WARNING
+
+    # Выключенный флаг молчит: это не поломка.
+    caplog.clear()
+    monkeypatch.setattr(rag, "_tree_gap_warned", False)
+    with caplog.at_level(logging.WARNING, logger="cognivault-ui.rag"):
+        _build("какие поля у витрины", False)
+    assert [r for r in caplog.records if "corpus_tree_enabled" in r.message] == []
+
+
+def test_the_warning_is_rearmed_by_a_working_tree(monkeypatch, caplog):
+    _install(monkeypatch, [_hit(f"{_ROOT}/Продукты/Fincert.md", 1)])
+    monkeypatch.setattr(rag, "_tree_gap_warned", True)  # уже жаловались
+
+    with caplog.at_level(logging.WARNING, logger="cognivault-ui.rag"):
+        assert _build("какие поля у витрины", True).head_block_kind == "tree"
+    assert rag._tree_gap_warned is False
+
+
+def test_a_warning_from_this_module_actually_reaches_stderr():
+    """Логгер тут не украшение: WARNING виден без `basicConfig`.
+
+    Приложение нигде не зовёт `logging.basicConfig`, а uvicorn настраивает
+    только свои три логгера и корневой не трогает — значит запись уходит через
+    `logging.lastResort` в stderr, но лишь от WARNING и выше (потому `rag_log` и
+    пишет, что `log.info` не доехал бы никуда). Машиночитаемый сигнал всё равно
+    первичен — поле `head_block` в `rag_log.jsonl`; строка в логе вторична.
+    """
+    root = logging.getLogger()
+    assert root.level <= logging.WARNING
+    assert rag.log.getEffectiveLevel() <= logging.WARNING
+    assert rag.log.isEnabledFor(logging.WARNING)
+    assert not rag.log.isEnabledFor(logging.INFO)
+
+
 def test_meta_branch_prefers_the_tree_and_degrades_to_the_listing(monkeypatch):
     _install(monkeypatch, [_hit(f"{_ROOT}/Продукты/Fincert.md", 1)])
 
@@ -625,6 +763,60 @@ def test_tree_reaches_the_model_and_history_pays_for_it(monkeypatch, tmp_path):
     from app.tokens import estimate_messages_tokens
 
     assert estimate_messages_tokens(captured[0]) + 4096 <= 32768
+
+
+@pytest.mark.parametrize("tree_on, kind", [(True, "tree"), (False, "footprint")])
+def test_the_request_record_says_what_opened_the_turn(
+    monkeypatch, tmp_path, tree_on, kind
+):
+    """Сквозь маршрут: форма головы уезжает в `rag_log.jsonl`, текст — нет.
+
+    Без этого поля прогон, собранный против бэкенда без `/api/vault/catalog`,
+    невозможно отличить от прогона с деревом: голова сообщения в `context_text`
+    не попадает (тот режется от «Источники:»), исключений никто не бросает.
+    """
+    from app import rag_log
+
+    async def fake_stream_chat(messages, gcfg):
+        yield "ответ"
+
+    _install(monkeypatch, [_hit(f"{_ROOT}/Продукты/Fincert.md", 1)])
+    paths = AppPaths(root=tmp_path / "ui")
+    monkeypatch.setattr(chat_routes, "resolve_paths", lambda request: paths)
+    monkeypatch.setattr(chat_routes.gigachat, "stream_chat", fake_stream_chat)
+    monkeypatch.setattr(chat_routes.gigachat, "_files_present", lambda gcfg: None)
+    monkeypatch.setattr(
+        chat_routes.settings,
+        "effective_config_for",
+        lambda paths=None: {
+            "cognivault": {"base_url": "http://x", "token": ""},
+            "gigachat": {"model": "m", "max_tokens": 4096, "model_context_tokens": 32768},
+            "rag": {
+                "mode": "auto",
+                "max_expanded_files": 0,
+                "corpus_tree_enabled": tree_on,
+            },
+            "prompts": {"system": None, "context_reminder": None},
+        },
+    )
+
+    with TestClient(create_app()) as client:
+        resp = client.post(
+            "/api/chat",
+            json={
+                "messages": [{"role": "user", "content": "какие поля у витрины"}],
+                "rag": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    record = rag_log.read_records(paths)[0]
+    assert record["head_block"]["kind"] == kind
+    assert record["head_block"]["chars"] > 0
+    # Текста блока в записи нет — только форма: он одинаков на всех ходах
+    # прогона и весит тысячи символов.
+    assert "Структура базы знаний" not in json.dumps(record, ensure_ascii=False)
+    assert record["context_text"].startswith("### Источник 1:")
 
 
 # --------------------------------------------------------------------------- #

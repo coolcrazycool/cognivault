@@ -191,6 +191,7 @@ REQUEST_KEYS = {
     "context_text",
     "context_chars",
     "context_truncated_in_log",
+    "head_block",
     "answer_text",
     "answer_chars",
     "answer_truncated_in_log",
