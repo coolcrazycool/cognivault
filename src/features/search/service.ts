@@ -34,13 +34,14 @@ interface ScoredPoint {
 }
 
 type QdrantCondition =
-  | { key: string; match: { value: string | number } }
+  | { key: string; match: { value: string | number | boolean } }
   | { key: string; match: { any: string[] } }
   | { key: string; match: { text: string } };
 
 interface QdrantFilter {
   must?: QdrantCondition[];
   should?: QdrantCondition[];
+  must_not?: QdrantCondition[];
 }
 
 /** One branch of a fusion query: a vector, the named vector it targets, and its depth. */
@@ -277,6 +278,8 @@ export interface HybridOptions {
   groupBySection?: boolean;
   /** Truncate the expanded section text to this many characters. */
   sectionMaxChars?: number;
+  /** Include pages flagged `archived` in the payload. Off by default. */
+  includeArchived?: boolean;
 }
 
 export class SearchService {
@@ -306,7 +309,12 @@ export class SearchService {
     this.logger = logger;
   }
 
-  async semantic(query: string, limit: number, filters: SearchFilters): Promise<SearchResult[]> {
+  async semantic(
+    query: string,
+    limit: number,
+    filters: SearchFilters,
+    includeArchived = false,
+  ): Promise<SearchResult[]> {
     // embedQuery (not embed) — asymmetric models instruct the query side only.
     const embedding = await this.embedder.embedQuery(query);
 
@@ -316,7 +324,7 @@ export class SearchService {
       vector: embedding,
       limit,
       with_payload: true,
-      filter: this.buildFilter(filters) as { must?: unknown[] },
+      filter: this.buildFilter(filters, includeArchived) as { must?: unknown[] },
     });
 
     const points = this.usablePoints(result as unknown as ScoredPoint[], filters.folder);
@@ -328,7 +336,12 @@ export class SearchService {
     );
   }
 
-  async lexical(query: string, limit: number, filters: SearchFilters): Promise<SearchResult[]> {
+  async lexical(
+    query: string,
+    limit: number,
+    filters: SearchFilters,
+    includeArchived = false,
+  ): Promise<SearchResult[]> {
     const sparse = buildSparseVector(query);
     // Nothing survived tokenization (stop words / single characters only). Qdrant rejects an
     // empty sparse query, and there is no lexical signal to search with anyway.
@@ -339,7 +352,7 @@ export class SearchService {
       using: BM25_VECTOR_NAME,
       limit,
       with_payload: true,
-      filter: this.buildFilter(filters) as { must?: unknown[] },
+      filter: this.buildFilter(filters, includeArchived) as { must?: unknown[] },
     });
 
     const points = this.usablePoints(result.points as ScoredPoint[], filters.folder);
@@ -384,7 +397,9 @@ export class SearchService {
       query: { fusion: 'rrf' },
       limit: fetchLimit,
       with_payload: true,
-      filter: this.buildFilter(filters) as { must?: unknown[] },
+      filter: this.buildFilter(filters, options.includeArchived === true) as {
+        must?: unknown[];
+      },
     });
 
     let points = this.usablePoints(result.points as ScoredPoint[], filters.folder);
@@ -718,10 +733,20 @@ export class SearchService {
     });
   }
 
-  private buildFilter(filters: SearchFilters): QdrantFilter | undefined {
+  private buildFilter(filters: SearchFilters, includeArchived: boolean): QdrantFilter | undefined {
     const must = this.buildMustConditions(filters);
-    if (must.length === 0) return undefined;
-    return { must };
+    // `must_not archived == true`, never `must archived == false`. Every point
+    // written before the field existed simply lacks it, and a `match` does not
+    // match a missing key — the positive form would hide the whole collection
+    // until a full re-index finished.
+    const mustNot: QdrantCondition[] = includeArchived
+      ? []
+      : [{ key: 'archived', match: { value: true } }];
+    if (must.length === 0 && mustNot.length === 0) return undefined;
+    return {
+      ...(must.length > 0 ? { must } : {}),
+      ...(mustNot.length > 0 ? { must_not: mustNot } : {}),
+    };
   }
 
   private buildMustConditions(filters: SearchFilters): QdrantCondition[] {

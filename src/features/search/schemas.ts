@@ -19,6 +19,10 @@ export const SearchRequestBodySchema = Type.Object({
   query: Type.String({ minLength: 1 }),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, default: 10 })),
   filters: Type.Optional(SearchFiltersSchema),
+  // Archived pages ("Архив" folder, or `archived: true` frontmatter) are excluded
+  // by default: a stale passage is measurably worse than an irrelevant one — it
+  // gets believed. Set true to search history deliberately.
+  include_archived: Type.Optional(Type.Boolean({ default: false })),
   // Small-to-big retrieval, honoured by /hybrid only: collapse the chunks of one section
   // into their best-ranked chunk and return the whole section text with it.
   group_by_section: Type.Optional(Type.Boolean({ default: false })),

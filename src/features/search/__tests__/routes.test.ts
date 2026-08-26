@@ -771,6 +771,35 @@ describe('search routes', () => {
       expect(body.results[0].parent_id).toBe('parent-1');
     });
 
+    it('excludes archived pages by default, as must_not — never as must archived=false', async () => {
+      await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'вечные потоки' },
+      });
+
+      const filter = mockQdrantQuery.mock.calls[0]?.[0].filter;
+      expect(filter.must_not).toEqual([{ key: 'archived', match: { value: true } }]);
+      // The positive form would hide every point written before the field existed:
+      // a `match` never matches a missing key.
+      expect(JSON.stringify(filter.must ?? [])).not.toContain('archived');
+    });
+
+    it('searches history when include_archived is set', async () => {
+      await app.inject({
+        method: 'POST',
+        url: '/api/vault/search/hybrid',
+        headers: { authorization: 'Bearer cv-test-search-key', 'content-type': 'application/json' },
+        payload: { query: 'старые версии дообучения', include_archived: true },
+      });
+
+      // No filters and nothing to exclude — the service sends no filter at all.
+      // (Tenant isolation is injected below this mock, by TenantQdrantClient.)
+      const filter = mockQdrantQuery.mock.calls[0]?.[0].filter;
+      expect(filter).toBeUndefined();
+    });
+
     it('runs a single Query API call — never search() or scroll()', async () => {
       await app.inject({
         method: 'POST',
