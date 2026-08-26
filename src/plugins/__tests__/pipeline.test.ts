@@ -7,6 +7,7 @@ import { buildDocumentSparseVector, buildSparseVector } from '../../lib/bm25.js'
 import { ChunkParseError } from '../../lib/chunk-errors.js';
 import { countTokens, DOC_SUMMARY_MAX_TOKENS } from '../../lib/chunker.js';
 import type { FileChangeEvent } from '../../lib/indexer.js';
+import { isArchived } from '../../lib/archived.js';
 
 // ── Mock format chunkers ──
 
@@ -414,6 +415,63 @@ describe('pipeline plugin (per-user)', () => {
       await app.close();
     });
 
+    it('carries frontmatter into the payload instead of re-parsing the stripped body', async () => {
+      // Regression: the pipeline used to run gray-matter over the body that
+      // `readContent` had ALREADY stripped, so `data` was always `{}` and every
+      // document in every vault was indexed with empty tags/project/status/type.
+      const { app, upsert } = await buildTestApp({
+        readContent: vi.fn().mockResolvedValue({
+          content: RICH_CONTENT,
+          frontmatter: {
+            tags: ['ml'],
+            project: 'oasis',
+            status: 'draft',
+            type: 'guide',
+            source_url: 'https://confluence/pages/viewpage.action?pageId=42',
+          },
+        }),
+      });
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'notes/my-note.md', type: 'created', contentHash: 'abc123' },
+      ]);
+
+      type PayloadPoint = { payload: Record<string, string> };
+      const call = upsert.mock.calls[0] as [{ points: PayloadPoint[] }] | undefined;
+      const payload = call?.[0].points[0]?.payload;
+      expect(payload).toMatchObject({
+        tags: ['ml'],
+        project: 'oasis',
+        status: 'draft',
+        type: 'guide',
+      });
+      // Everything not promoted to a filterable field still round-trips.
+      expect(JSON.parse(payload?.extra_metadata ?? '{}')).toMatchObject({
+        source_url: 'https://confluence/pages/viewpage.action?pageId=42',
+      });
+
+      await app.close();
+    });
+
+    it('maps Confluence `labels` onto `tags` so a synced vault has a keyword facet', async () => {
+      const { app, upsert } = await buildTestApp({
+        readContent: vi.fn().mockResolvedValue({
+          content: RICH_CONTENT,
+          frontmatter: { labels: ['арм-дс', 'мониторинг'], space: 'OASIS' },
+        }),
+      });
+
+      await processChanges(app, TEST_USER_ID, [
+        { path: 'notes/my-note.md', type: 'created', contentHash: 'abc123' },
+      ]);
+
+      type TagPoint = { payload: { tags: string[] } };
+      const call = upsert.mock.calls[0] as [{ points: TagPoint[] }] | undefined;
+      expect(call?.[0].points[0]?.payload.tags).toEqual(['арм-дс', 'мониторинг']);
+
+      await app.close();
+    });
+
     it('uses user-scoped chunkId (UUID v5 with userId prefix)', async () => {
       const { app, upsert } = await buildTestApp();
 
@@ -700,7 +758,7 @@ describe('pipeline plugin (per-user)', () => {
 
     it('confirms a valid-but-empty file after its vectors are dropped', async () => {
       const { app, confirmIndexed, qdrantDelete, upsert, embed } = await buildTestApp({
-        readContent: vi.fn().mockResolvedValue({ content: '---\ntags: [ai]\n---\n' }),
+        readContent: vi.fn().mockResolvedValue({ content: '', frontmatter: { tags: ['ai'] } }),
       });
 
       await processChanges(app, TEST_USER_ID, [
@@ -813,9 +871,12 @@ describe('pipeline plugin (per-user)', () => {
 
   describe('frontmatter-only notes', () => {
     it('skips embedding but cleans stale vectors on tenant Qdrant', async () => {
-      const content = '---\ntags: [ai]\ntitle: My Note\n---\n';
+      // `readContent` strips the frontmatter, so a frontmatter-only note reaches
+      // the pipeline as an empty body plus parsed metadata — never as raw text.
       const { app, embed, upsert, qdrantDelete } = await buildTestApp({
-        readContent: vi.fn().mockResolvedValue({ content }),
+        readContent: vi
+          .fn()
+          .mockResolvedValue({ content: '', frontmatter: { tags: ['ai'], title: 'My Note' } }),
       });
 
       const event: FileChangeEvent = {
@@ -917,7 +978,7 @@ describe('pipeline plugin (per-user)', () => {
 
     it('clears sections for a file that no longer produces chunks', async () => {
       const { app, dbTransaction, dbDelete, dbInsert } = await buildTestApp({
-        readContent: vi.fn().mockResolvedValue({ content: '---\ntags: [ai]\n---\n' }),
+        readContent: vi.fn().mockResolvedValue({ content: '', frontmatter: { tags: ['ai'] } }),
       });
 
       await processChanges(app, TEST_USER_ID, [
@@ -1327,5 +1388,29 @@ describe('pipeline plugin (per-user)', () => {
         vi.resetModules();
       }
     });
+  });
+});
+
+// ── archived pages ──
+
+describe('isArchived', () => {
+  it('flags a page filed under an archive folder, in either language', () => {
+    expect(isArchived('Confluence/OASIS/Архив/Gallery.md', {})).toBe(true);
+    expect(isArchived('Confluence/OASIS/Archive/Gallery.md', {})).toBe(true);
+    expect(isArchived('Confluence/OASIS/deprecated/old.md', {})).toBe(true);
+  });
+
+  it('matches whole segments only, so "Архитектура" is not archived', () => {
+    expect(isArchived('Confluence/OASIS/Архитектура/схема.md', {})).toBe(false);
+    expect(isArchived('notes/архивариус.md', {})).toBe(false);
+  });
+
+  it('ignores the file name itself — only ancestors decide', () => {
+    expect(isArchived('Confluence/OASIS/Архив.md', {})).toBe(false);
+  });
+
+  it('lets explicit frontmatter override the folder either way', () => {
+    expect(isArchived('Confluence/OASIS/Архив/live.md', { archived: false })).toBe(false);
+    expect(isArchived('notes/current.md', { archived: true })).toBe(true);
   });
 });

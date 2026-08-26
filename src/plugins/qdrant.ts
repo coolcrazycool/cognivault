@@ -134,13 +134,19 @@ const USER_ID_INDEX_SCHEMA: PayloadFieldSchema = {
   is_tenant: true,
 };
 
-const PAYLOAD_INDEXES: Array<{ field: string; type: 'keyword' | 'integer' }> = [
+const PAYLOAD_INDEXES: Array<{ field: string; type: 'keyword' | 'integer' | 'bool' }> = [
   { field: 'path', type: 'keyword' },
   { field: 'tags', type: 'keyword' },
   { field: 'project', type: 'keyword' },
   { field: 'status', type: 'keyword' },
   { field: 'type', type: 'keyword' },
   { field: 'chunk_index', type: 'integer' },
+  // Archived pages are excluded from search by default. Points written before
+  // this field existed simply lack it, which is why the exclusion is expressed
+  // as `must_not archived == true` and never as `must archived == false`:
+  // a `match` does not match a missing key, so the latter would hide the entire
+  // pre-existing collection until a re-index.
+  { field: 'archived', type: 'bool' },
 ];
 
 /**

@@ -250,10 +250,18 @@ describe('VaultManager', () => {
       expect(result.content).not.toContain('title:');
     });
 
+    it('returns the parsed frontmatter alongside the stripped body', async () => {
+      // The body loses the frontmatter here, so a caller cannot recover it by
+      // parsing `content` again — it has to come back on the same result.
+      const result = await manager.readContent('notes/with-frontmatter.md');
+      expect(result.frontmatter).toEqual(expect.objectContaining({ title: expect.any(String) }));
+    });
+
     it('returns full content for file without frontmatter', async () => {
       const result = await manager.readContent('notes/no-frontmatter.md');
       expect(result.path).toBe('notes/no-frontmatter.md');
       expect(result.content).toBe('# Just Markdown\n\nNo frontmatter here.');
+      expect(result.frontmatter).toEqual({});
     });
 
     it('throws UnsupportedMediaTypeError for binary files', async () => {

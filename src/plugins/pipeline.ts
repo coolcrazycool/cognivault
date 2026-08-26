@@ -4,12 +4,12 @@ import * as path from 'node:path';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
-import matter from 'gray-matter';
 import { v5 as uuidv5 } from 'uuid';
 import { config } from '../config.js';
 import { docSummaries, indexedFiles, type NewSection, sections } from '../db/schema.js';
 import { BM25_VECTOR_NAME, buildDocumentSparseVector, DENSE_VECTOR_NAME } from '../lib/bm25.js';
 import { chunkCanvas } from '../lib/canvas-chunker.js';
+import { isArchived } from '../lib/archived.js';
 import { isChunkParseError } from '../lib/chunk-errors.js';
 import type { MarkdownSection } from '../lib/chunker.js';
 import { capDocSummary, chunkMarkdownWithSections, DOC_SUMMARY_PREFIX } from '../lib/chunker.js';
@@ -80,12 +80,15 @@ interface Chunk {
 }
 
 /** Payload keys every non-markdown format shares (markdown fills them from frontmatter). */
-function defaultExtraPayload(): Record<string, unknown> {
+function defaultExtraPayload(filePath: string): Record<string, unknown> {
   return {
     tags: [],
     project: null,
     status: null,
     type: null,
+    // A PDF filed under Архив is just as stale as a page; only the source of the
+    // flag differs — these formats have no frontmatter, so the path is all there is.
+    archived: isArchived(filePath, {}),
     extra_metadata: '{}',
   };
 }
@@ -447,8 +450,6 @@ async function embedAndUpsert(
  * Read errors propagate: the queue consumer turns them into failIndexed + 'file-failed'.
  */
 async function extractMarkdown(
-  fastify: FastifyInstance,
-  userId: string,
   event: FileChangeEvent,
   vault: VaultManager,
 ): Promise<{
@@ -456,41 +457,45 @@ async function extractMarkdown(
   extraPayload: Record<string, unknown>;
   sections: MarkdownSection[];
 }> {
-  const { content: rawContent } = await vault.readContent(event.path);
-
-  let parsed: matter.GrayMatterFile<string>;
-  try {
-    parsed = matter(rawContent);
-  } catch {
-    fastify.log.warn(
-      { path: event.path, userId },
-      'Invalid frontmatter — indexing without metadata',
-    );
-    parsed = { content: rawContent, data: {} } as matter.GrayMatterFile<string>;
-  }
+  // The frontmatter travels WITH the body. Parsing `content` here a second time
+  // is what the old code did, and it always yielded `{}`: `readContent` had
+  // already stripped the frontmatter off, so every document in every vault was
+  // indexed with empty tags/project/status/type and all four search filters were
+  // dead. See `ContentResult.frontmatter`.
+  const { content, frontmatter } = await vault.readContent(event.path);
+  const frontmatterData = frontmatter ?? {};
 
   const title = path.basename(event.path, '.md');
-  const { chunks, sections: markdownSections } = chunkMarkdownWithSections(parsed.content, {
+  const { chunks, sections: markdownSections } = chunkMarkdownWithSections(content, {
     title,
     path: event.path,
   });
-  const frontmatterData = parsed.data as Record<string, unknown>;
 
   return {
     chunks,
     sections: markdownSections,
     extraPayload: {
-      tags: Array.isArray(frontmatterData.tags)
-        ? frontmatterData.tags
-        : typeof frontmatterData.tags === 'string'
-          ? [frontmatterData.tags]
-          : [],
+      // `labels` is the Confluence spelling of `tags` — the sync writes it
+      // (`convert.build_frontmatter`) and nothing read it, so a Confluence vault
+      // had no usable keyword facet at all. Obsidian's `tags` still wins when
+      // both are present.
+      tags: normalizeTags(frontmatterData.tags ?? frontmatterData.labels),
       project: frontmatterData.project ?? null,
       status: frontmatterData.status ?? null,
       type: frontmatterData.type ?? null,
-      extra_metadata: JSON.stringify(omit(frontmatterData, ['tags', 'project', 'status', 'type'])),
+      archived: isArchived(event.path, frontmatterData),
+      extra_metadata: JSON.stringify(
+        omit(frontmatterData, ['tags', 'labels', 'project', 'status', 'type', 'archived']),
+      ),
     },
   };
+}
+
+/** Frontmatter tags are a list, a bare string, or absent. */
+function normalizeTags(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((tag): tag is string => typeof tag === 'string');
+  if (typeof value === 'string') return [value];
+  return [];
 }
 
 /**
@@ -552,14 +557,14 @@ async function processCreatedOrUpdated(
 
     // Text formats: extract chunks -> embed -> upsert
     let chunks: Chunk[];
-    let extraPayload = defaultExtraPayload();
+    let extraPayload = defaultExtraPayload(event.path);
     // Only markdown produces parent sections; other formats leave this empty, which
     // still clears any stale rows for the path.
     let sectionRecords: MarkdownSection[] = [];
 
     switch (ext) {
       case '.md': {
-        const extracted = await extractMarkdown(fastify, userId, event, vault);
+        const extracted = await extractMarkdown(event, vault);
         chunks = extracted.chunks;
         extraPayload = extracted.extraPayload;
         sectionRecords = extracted.sections;

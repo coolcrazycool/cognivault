@@ -69,6 +69,15 @@ export interface ListOptions {
 export interface ContentResult {
   path: string;
   content: string;
+  /**
+   * Frontmatter parsed off `content` — markdown only, `{}` when there is none.
+   *
+   * It has to travel WITH the body: `readContent` strips the frontmatter before
+   * returning, so a caller that wants the metadata cannot recover it by parsing
+   * `content` again. The indexing pipeline did exactly that and silently indexed
+   * every document with empty `tags/project/status/type`.
+   */
+  frontmatter?: Record<string, unknown>;
 }
 
 export interface MetadataResult {
@@ -279,10 +288,14 @@ export class VaultManager {
     // Parse frontmatter for markdown files
     try {
       const parsed = matter(raw);
-      return { path: filePath, content: parsed.content.trim() };
+      return {
+        path: filePath,
+        content: parsed.content.trim(),
+        frontmatter: parsed.data as Record<string, unknown>,
+      };
     } catch {
       // If gray-matter fails, return raw content
-      return { path: filePath, content: raw.trim() };
+      return { path: filePath, content: raw.trim(), frontmatter: {} };
     }
   }
 
