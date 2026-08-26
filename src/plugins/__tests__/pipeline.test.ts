@@ -3,11 +3,11 @@ import type { FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { docSummaries, sections } from '../../db/schema.js';
+import { isArchived } from '../../lib/archived.js';
 import { buildDocumentSparseVector, buildSparseVector } from '../../lib/bm25.js';
 import { ChunkParseError } from '../../lib/chunk-errors.js';
 import { countTokens, DOC_SUMMARY_MAX_TOKENS } from '../../lib/chunker.js';
 import type { FileChangeEvent } from '../../lib/indexer.js';
-import { isArchived } from '../../lib/archived.js';
 
 // ── Mock format chunkers ──
 
