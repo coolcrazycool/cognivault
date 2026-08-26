@@ -111,6 +111,11 @@ button,input,textarea,select{font:inherit;color:inherit}
 .bubble pre code{border:0;background:none;padding:0}
 .bubble a{color:var(--accent);text-underline-offset:2px}
 .notice{margin-bottom:8px;padding:6px 10px;font-size:12.5px;color:var(--fg-muted);background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-sm)}
+/* Провайдер без стриминга: ответ приходит целиком, поэтому вместо бегущего
+   курсора — честное ожидание. Пульсация даёт понять, что запрос жив. */
+.thinking{margin-top:6px;font-size:12.5px;color:var(--fg-muted);animation:thinking-pulse 1.4s ease-in-out infinite}
+@keyframes thinking-pulse{0%,100%{opacity:.45}50%{opacity:1}}
+@media (prefers-reduced-motion: reduce){.thinking{animation:none;opacity:.7}}
 .cursor{display:inline-block;width:8px;height:1.05em;vertical-align:-2px;margin-left:2px;background:var(--accent);animation:blink 1s steps(2) infinite}
 @keyframes blink{50%{opacity:0}}
 @media (prefers-reduced-motion:reduce){.cursor{animation:none}.pill.warn .dot{animation:none}}

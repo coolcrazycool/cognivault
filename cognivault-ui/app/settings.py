@@ -50,6 +50,16 @@ def is_server() -> bool:
 # --------------------------------------------------------------------------- #
 
 
+def _gc_default(key: str) -> str:
+    """Shipped default for a ``gigachat`` key, as a string.
+
+    Reading it from `DEFAULT_CONFIG` instead of repeating the literal keeps the
+    env layer and the config file from drifting — the exact failure mode
+    CLAUDE.md warns about for this section.
+    """
+    return str(DEFAULT_CONFIG["gigachat"][key])
+
+
 def _env_str(name: str, default: str) -> str:
     val = os.environ.get(name)
     return val if val is not None and val != "" else default
@@ -216,6 +226,22 @@ def server_config() -> dict[str, Any]:
         "temperature": _env_float("GIGACHAT_TEMPERATURE", 0.2),
         "max_tokens": _env_int("GIGACHAT_MAX_TOKENS", 4096),
         "model_context_tokens": _env_int("GIGACHAT_MODEL_CONTEXT_TOKENS", 32768),
+        # Транспорт чата. Эмбеддинги живут в TS-бэкенде и этим ключом не
+        # затрагиваются: сменить эмбеддер — это другое векторное пространство и
+        # полная переиндексация.
+        "provider": _env_str("CHAT_PROVIDER", _gc_default("provider")),
+        "kitai_host": _env_str("KITAI_HOST", _gc_default("kitai_host")),
+        "kitai_model": _env_str("KITAI_MODEL", _gc_default("kitai_model")),
+        "kitai_system_name": _env_str(
+            "KITAI_SYSTEM_NAME", _gc_default("kitai_system_name")
+        ),
+        "kitai_module_name": _env_str(
+            "KITAI_MODULE_NAME", _gc_default("kitai_module_name")
+        ),
+        "kitai_profanity_check": _env_bool("KITAI_PROFANITY_CHECK", False),
+        "kitai_poll_timeout": _env_float("KITAI_POLL_TIMEOUT", 240.0),
+        "kitai_poll_initial_delay": _env_float("KITAI_POLL_INITIAL_DELAY", 2.0),
+        "kitai_poll_delay": _env_float("KITAI_POLL_DELAY", 2.0),
     }
 
     return {
@@ -250,6 +276,9 @@ USER_EDITABLE_KEYS: tuple[str, ...] = (
     "gigachat.temperature",
     "gigachat.max_tokens",
     "gigachat.model",
+    # Имя модели у KitAI своё — иначе переключение транспорта затирало бы
+    # настройку соседнего. Правится так же, как `model`.
+    "gigachat.kitai_model",
     "rag.default_on",
     "rag.limit",
     "rag.min_score",
@@ -281,6 +310,17 @@ ADMIN_LOCKED_KEYS: tuple[str, ...] = (
     "gigachat.key_passphrase",
     "gigachat.verify_ssl",
     "gigachat.model_context_tokens",
+    # Выбор транспорта и адресация KitAI — деплойная забота, не пользовательская:
+    # у пользователя нет ни сертификата под другой контур, ни права называться
+    # чужой системой в x-identification-system.
+    "gigachat.provider",
+    "gigachat.kitai_host",
+    "gigachat.kitai_system_name",
+    "gigachat.kitai_module_name",
+    "gigachat.kitai_profanity_check",
+    "gigachat.kitai_poll_timeout",
+    "gigachat.kitai_poll_initial_delay",
+    "gigachat.kitai_poll_delay",
     "rag.mode",
     "rag.source",
     "rag.token_budget",
@@ -424,19 +464,21 @@ def validate_user_overrides(
             gigachat["max_tokens"] = _int_in(
                 "gigachat.max_tokens", gigachat["max_tokens"], 1, ctx_tokens
             )
-        if "model" in gigachat:
-            model = gigachat["model"]
+        for key in ("model", "kitai_model"):
+            if key not in gigachat:
+                continue
+            model = gigachat[key]
             if (
                 not isinstance(model, str)
                 or not model.strip()
                 or len(model) > _MAX_MODEL_CHARS
             ):
                 raise ConfigValueError(
-                    "gigachat.model",
+                    f"gigachat.{key}",
                     f"непустая строка до {_MAX_MODEL_CHARS} символов",
                     model,
                 )
-            gigachat["model"] = model.strip()
+            gigachat[key] = model.strip()
 
     rag = out.get("rag")
     if isinstance(rag, dict):

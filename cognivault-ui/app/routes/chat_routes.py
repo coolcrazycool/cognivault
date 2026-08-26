@@ -13,11 +13,11 @@ from typing import Any, AsyncIterator
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .. import cognivault, gigachat, history, rag, rag_log, rag_pipeline, settings
+from .. import cognivault, history, llm, rag, rag_log, rag_pipeline, settings
 from ..config import AppPaths
 from ..confluence import store as confluence_store
 from ..deps import cv_context, resolve_paths
-from ..gigachat import GigaChatCertMissing, GigaChatError, GigaConfig
+from ..llm_errors import GigaChatCertMissing, GigaChatError
 from ..sse import format_sse, sse_error
 from ..tokens import estimate_messages_tokens, trim_history
 
@@ -32,6 +32,13 @@ _TRIM_RESERVE_TOKENS = 500
 _CITATION_RE = re.compile(
     r"\[\s*Источник(?:и|а)?\s+(\d+(?:\s*[,;]\s*\d+)*)\s*\]"
 )
+
+# Любая скобка, начинающаяся со слова «Источник» — включая те, что НЕ являются
+# номерной ссылкой: «[Источник базы знаний]», «[Источник: инструкция]». Такой
+# маркер выглядит как цитата, но не кликается и ничего не подтверждает —
+# проверить утверждение по нему нельзя. `_invalid_citations` их не видит: там
+# номера, а тут номера как раз нет.
+_CITATION_LIKE_RE = re.compile(r"\[\s*Источник\w*\b[^\]]*\]")
 
 _SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -162,6 +169,23 @@ def _invalid_citations(text: str, n_sources: int) -> list[int]:
             if part.isdigit():
                 found.add(int(part))
     return sorted(n for n in found if n < 1 or n > n_sources)
+
+
+def _malformed_citations(text: str) -> list[str]:
+    """Маркеры «[Источник …]» без номера — их нельзя ни открыть, ни проверить.
+
+    Наблюдалось в проде: «[Источник базы знаний]». Для пользователя это выглядит
+    как ссылка, но никуда не ведёт; для оценки качества — как будто утверждение
+    подтверждено источником. Считаем отдельно от `_invalid_citations`: там
+    выдуманный НОМЕР, здесь номера нет вовсе.
+    """
+    if not text:
+        return []
+    bad: list[str] = []
+    for match in _CITATION_LIKE_RE.finditer(text):
+        if not _CITATION_RE.fullmatch(match.group(0)):
+            bad.append(match.group(0))
+    return sorted(set(bad))
 
 
 def _linked_candidates(
@@ -324,7 +348,7 @@ async def chat(request: Request) -> Any:
         url_index = {}
 
     cfg = _effective_config(paths)
-    gcfg = GigaConfig.from_dict(cfg.get("gigachat", {}))
+    gcfg = llm.config_for(cfg.get("gigachat", {}))
 
     # Настраиваемые тексты промптов ответа: `None`/пусто в любом поле означает
     # «взять встроенный дефолт» — разбирается в `rag._resolve_prompt`.
@@ -348,7 +372,7 @@ async def chat(request: Request) -> Any:
 
     # Pre-flight: cert/key presence (raises a typed error we convert to 400).
     try:
-        gigachat._files_present(gcfg)  # noqa: SLF001 — deliberate pre-flight reuse
+        llm.files_present(gcfg)
     except GigaChatCertMissing as exc:
         return _error(400, exc.code, exc.message, exc.detail)
 
@@ -404,7 +428,16 @@ async def chat(request: Request) -> Any:
 
         with rag_log.collect_stages() as stages:
             try:
-                yield format_sse("meta", {"chat_id": chat_id})
+                # `streaming` говорит фронтенду, чего ждать: у KitAI потока
+                # токенов нет вовсе (POST → polling → готовый ответ), и бегущий
+                # курсор над пустым пузырём в этом случае врёт про прогресс.
+                yield format_sse(
+                    "meta",
+                    {
+                        "chat_id": chat_id,
+                        "streaming": llm.supports_streaming(gcfg),
+                    },
+                )
 
                 send = list(outgoing)
 
@@ -507,7 +540,7 @@ async def chat(request: Request) -> Any:
                     )
 
                 stream_started = time.perf_counter()
-                async for delta in gigachat.stream_chat(send, gcfg):
+                async for delta in llm.stream_chat(send, gcfg):
                     if "first_token" not in stages:
                         stages["first_token"] = _elapsed_ms(stream_started)
                     full_text += delta
@@ -528,6 +561,14 @@ async def chat(request: Request) -> Any:
                 # галлюцинации. Значение уезжает и в assistant-сообщение (history),
                 # и в JSONL-лог запросов.
                 invalid_citations = _invalid_citations(full_text, len(sources))
+                malformed = _malformed_citations(full_text)
+                if malformed:
+                    log.warning(
+                        "chat %s: маркеры цитат без номера %s — не кликаются и "
+                        "ничего не подтверждают",
+                        chat_id,
+                        malformed,
+                    )
                 if invalid_citations:
                     log.warning(
                         "chat %s: ответ ссылается на несуществующие источники %s "

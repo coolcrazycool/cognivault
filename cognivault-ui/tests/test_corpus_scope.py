@@ -758,7 +758,7 @@ def _install_retrieval(monkeypatch) -> list[str]:
     monkeypatch.setattr(rag.cognivault, "hybrid_search", fake_hybrid)
     monkeypatch.setattr(rag.cognivault, "content", fake_content)
     monkeypatch.setattr(
-        rag_pipeline.gigachat, "complete_json", fake_complete_json, raising=False
+        rag_pipeline.llm, "complete_json", fake_complete_json, raising=False
     )
     return seen
 
@@ -1017,8 +1017,8 @@ def _install_chat(monkeypatch, paths, ctx, answer="ответ модели"):
 
     monkeypatch.setattr(chat_routes, "resolve_paths", lambda request: paths)
     monkeypatch.setattr(chat_routes.rag, "build_rag_context", fake_build_rag_context)
-    monkeypatch.setattr(chat_routes.gigachat, "stream_chat", fake_stream_chat)
-    monkeypatch.setattr(chat_routes.gigachat, "_files_present", lambda gcfg: None)
+    monkeypatch.setattr(chat_routes.llm, "stream_chat", fake_stream_chat)
+    monkeypatch.setattr(chat_routes.llm, "files_present", lambda gcfg: None)
 
 
 def _rag_ctx(hedge: str | None) -> rag.RagContext:

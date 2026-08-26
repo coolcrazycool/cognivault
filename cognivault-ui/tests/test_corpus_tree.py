@@ -477,7 +477,7 @@ def _install(monkeypatch, hits: list[dict], *, grade: int = 5) -> None:
     monkeypatch.setattr(rag.cognivault, "hybrid_search", fake_hybrid)
     monkeypatch.setattr(rag.cognivault, "content", fake_content)
     monkeypatch.setattr(
-        rag_pipeline.gigachat, "complete_json", fake_complete_json, raising=False
+        rag_pipeline.llm, "complete_json", fake_complete_json, raising=False
     )
     monkeypatch.setattr(corpus_map, "files", _REAL_FILES)
     monkeypatch.setattr(cognivault, "list_files", fake_list_files)
@@ -732,8 +732,8 @@ def test_tree_reaches_the_model_and_history_pays_for_it(monkeypatch, tmp_path):
     monkeypatch.setattr(
         chat_routes, "resolve_paths", lambda request: AppPaths(root=tmp_path / "ui")
     )
-    monkeypatch.setattr(chat_routes.gigachat, "stream_chat", fake_stream_chat)
-    monkeypatch.setattr(chat_routes.gigachat, "_files_present", lambda gcfg: None)
+    monkeypatch.setattr(chat_routes.llm, "stream_chat", fake_stream_chat)
+    monkeypatch.setattr(chat_routes.llm, "files_present", lambda gcfg: None)
     monkeypatch.setattr(
         chat_routes.settings,
         "effective_config_for",
@@ -783,8 +783,8 @@ def test_the_request_record_says_what_opened_the_turn(
     _install(monkeypatch, [_hit(f"{_ROOT}/Продукты/Fincert.md", 1)])
     paths = AppPaths(root=tmp_path / "ui")
     monkeypatch.setattr(chat_routes, "resolve_paths", lambda request: paths)
-    monkeypatch.setattr(chat_routes.gigachat, "stream_chat", fake_stream_chat)
-    monkeypatch.setattr(chat_routes.gigachat, "_files_present", lambda gcfg: None)
+    monkeypatch.setattr(chat_routes.llm, "stream_chat", fake_stream_chat)
+    monkeypatch.setattr(chat_routes.llm, "files_present", lambda gcfg: None)
     monkeypatch.setattr(
         chat_routes.settings,
         "effective_config_for",

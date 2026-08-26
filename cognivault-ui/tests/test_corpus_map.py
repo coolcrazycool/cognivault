@@ -423,7 +423,7 @@ def _install_retrieval(monkeypatch, hits: list[dict]) -> None:
     monkeypatch.setattr(rag.cognivault, "hybrid_search", fake_hybrid)
     monkeypatch.setattr(rag.cognivault, "content", fake_content)
     monkeypatch.setattr(
-        rag_pipeline.gigachat, "complete_json", fake_complete_json, raising=False
+        rag_pipeline.llm, "complete_json", fake_complete_json, raising=False
     )
 
 
@@ -519,8 +519,8 @@ def test_block_reaches_the_model_and_survives_trimming(monkeypatch, tmp_path):
     monkeypatch.setattr(
         chat_routes, "resolve_paths", lambda request: AppPaths(root=tmp_path / "ui")
     )
-    monkeypatch.setattr(chat_routes.gigachat, "stream_chat", fake_stream_chat)
-    monkeypatch.setattr(chat_routes.gigachat, "_files_present", lambda gcfg: None)
+    monkeypatch.setattr(chat_routes.llm, "stream_chat", fake_stream_chat)
+    monkeypatch.setattr(chat_routes.llm, "files_present", lambda gcfg: None)
 
     history = [
         {"role": "user", "content": f"вопрос {i} " * 200} for i in range(30)

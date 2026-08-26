@@ -2109,6 +2109,9 @@
     content.appendChild(cursor);
     let answer = "";
     let noticeNode = null;
+    // Плашка «Модель думает…» для провайдера без стриминга; снимается первым же
+    // токеном и в терминальных ветках ниже.
+    let waitNode = null;
     let sourcesData = null;
     let contextChars = null;
     scrollStreamToBottom();
@@ -2146,6 +2149,15 @@
         switch (ev.event) {
           case "meta":
             if (d.chat_id) state.chatId = d.chat_id;
+            // Провайдер без потока токенов (KitAI: запрос → опрос → готовый
+            // ответ). Мигающий курсор над пустым пузырём читается как «идёт
+            // печать» и врёт: печатать нечего, пока не придёт весь ответ.
+            if (d.streaming === false) {
+              cursor.classList.add("hidden");
+              waitNode = el("div", "thinking");
+              waitNode.textContent = "Модель думает…";
+              content.parentNode.insertBefore(waitNode, content.nextSibling);
+            }
             break;
           case "sources":
             sourcesData = d.sources || d.items || (Array.isArray(d) ? d : []);
@@ -2166,12 +2178,14 @@
             break;
           case "token": {
             const txt = d.text != null ? d.text : (typeof d === "string" ? d : "");
+            if (waitNode) { waitNode.remove(); waitNode = null; }
             answer += txt;
             cursor.parentNode.insertBefore(document.createTextNode(txt), cursor);
             scrollStreamToBottom();
             break;
           }
           case "done":
+            if (waitNode) { waitNode.remove(); waitNode = null; }
             if (cursor.parentNode) cursor.remove();
             // finalize with markdown render, then hyperlink inline citations
             content.innerHTML = renderMarkdown(answer);
@@ -2180,6 +2194,7 @@
             renderFeedback(bubble, state.chatId, state.messages.length - 1);
             break;
           case "error": {
+            if (waitNode) { waitNode.remove(); waitNode = null; }
             if (cursor.parentNode) cursor.remove();
             bubble.classList.add("err-bubble");
             let msg = (d.code ? "[" + d.code + "] " : "") + (d.message || "Ошибка");
@@ -2193,6 +2208,7 @@
     } catch (e) {
       if (e.name === "AbortError") {
         // normal cancellation — keep partial answer
+        if (waitNode) { waitNode.remove(); waitNode = null; }
         if (cursor.parentNode) cursor.remove();
         if (answer) {
           content.innerHTML = renderMarkdown(answer);

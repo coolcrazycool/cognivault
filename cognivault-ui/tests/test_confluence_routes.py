@@ -363,8 +363,8 @@ def test_chat_sources_carry_confluence_url(tmp_path, monkeypatch):
         yield "ответ"
 
     monkeypatch.setattr(chat_routes.rag, "build_rag_context", fake_build_rag_context)
-    monkeypatch.setattr(chat_routes.gigachat, "stream_chat", fake_stream_chat)
-    monkeypatch.setattr(chat_routes.gigachat, "_files_present", lambda gcfg: None)
+    monkeypatch.setattr(chat_routes.llm, "stream_chat", fake_stream_chat)
+    monkeypatch.setattr(chat_routes.llm, "files_present", lambda gcfg: None)
 
     with TestClient(create_app()) as client:
         resp = client.post(

@@ -25,6 +25,31 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 import httpx
 
+from . import mtls
+from .llm_errors import (  # re-exported: callers import these from here today
+    GigaChatBadJSON,
+    GigaChatCertMissing,
+    GigaChatDNS,
+    GigaChatError,
+    GigaChatHTTP,
+    GigaChatStreamDropped,
+    GigaChatTLS,
+)
+
+__all__ = [
+    "GigaChatBadJSON",
+    "GigaChatCertMissing",
+    "GigaChatDNS",
+    "GigaChatError",
+    "GigaChatHTTP",
+    "GigaChatStreamDropped",
+    "GigaChatTLS",
+    "GigaConfig",
+    "complete_json",
+    "extract_json",
+    "stream_chat",
+]
+
 log = logging.getLogger("cognivault-ui.gigachat")
 
 
@@ -60,40 +85,6 @@ class GigaConfig:
         )
 
 
-class GigaChatError(Exception):
-    """Base class for GigaChat errors carrying an SSE-ready code/message/detail."""
-
-    def __init__(self, code: str, message: str, detail: str | None = None) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.detail = detail
-
-
-class GigaChatCertMissing(GigaChatError):
-    """Client cert or key file is absent — surfaced as a pre-flight 400."""
-
-
-class GigaChatDNS(GigaChatError):
-    pass
-
-
-class GigaChatTLS(GigaChatError):
-    pass
-
-
-class GigaChatHTTP(GigaChatError):
-    pass
-
-
-class GigaChatStreamDropped(GigaChatError):
-    pass
-
-
-class GigaChatBadJSON(GigaChatError):
-    """The model's answer did not contain a parseable JSON *object*."""
-
-
 # --------------------------------------------------------------------------- #
 # TLS wiring
 # --------------------------------------------------------------------------- #
@@ -101,66 +92,20 @@ class GigaChatBadJSON(GigaChatError):
 
 def _files_present(gcfg: GigaConfig) -> None:
     """Raise :class:`GigaChatCertMissing` unless both cert and key exist."""
-    missing = [
-        p for p in (gcfg.cert_path, gcfg.key_path) if not (p and os.path.isfile(p))
-    ]
-    if missing:
-        raise GigaChatCertMissing(
-            "GIGACHAT_CERT_MISSING",
-            "Клиентский сертификат или ключ не найдены",
-            detail="; ".join(f"нет файла: {p}" for p in missing),
-        )
+    mtls.files_present(gcfg)
 
 
 def _build_verify(gcfg: GigaConfig) -> Any:
-    """Compute the ``verify`` argument for httpx.
-
-    A passphrase-protected key cannot be supplied through the plain ``cert``
-    tuple, so we build an :class:`ssl.SSLContext`, load the cert chain with the
-    password, and hand that to httpx via ``verify=`` (it also drives client auth).
-    """
-    if gcfg.key_passphrase:
-        ctx = ssl.create_default_context()
-        if not gcfg.verify_ssl:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-        ctx.load_cert_chain(
-            certfile=gcfg.cert_path,
-            keyfile=gcfg.key_path,
-            password=gcfg.key_passphrase,
-        )
-        return ctx
-    return gcfg.verify_ssl
+    return mtls.build_verify(gcfg)
 
 
 def _make_client(gcfg: GigaConfig) -> httpx.AsyncClient:
     timeout = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)
-    verify = _build_verify(gcfg)
-    if gcfg.key_passphrase:
-        # Cert chain (incl. key) already loaded into the SSLContext.
-        return httpx.AsyncClient(verify=verify, timeout=timeout)
-    return httpx.AsyncClient(
-        cert=(gcfg.cert_path, gcfg.key_path), verify=verify, timeout=timeout
-    )
+    return mtls.make_client(gcfg, timeout)
 
 
 def _classify_connect_error(exc: Exception) -> GigaChatError:
-    text = str(exc).lower()
-    if isinstance(exc, ssl.SSLError) or "ssl" in text or "certificate" in text:
-        return GigaChatTLS("GIGACHAT_TLS", "Ошибка TLS-соединения с GigaChat", str(exc))
-    if (
-        "getaddrinfo" in text
-        or "name or service not known" in text
-        or "nodename nor servname" in text
-    ):
-        return GigaChatDNS(
-            "GIGACHAT_DNS",
-            "Не удалось разрешить адрес GigaChat — проверьте VPN/корпоративную сеть",
-            str(exc),
-        )
-    return GigaChatTLS(
-        "GIGACHAT_TLS", "Не удалось установить соединение с GigaChat", str(exc)
-    )
+    return mtls.classify_connect_error(exc, what="GigaChat")
 
 
 # --------------------------------------------------------------------------- #

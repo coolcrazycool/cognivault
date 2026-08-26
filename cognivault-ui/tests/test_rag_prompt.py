@@ -9,7 +9,7 @@
 * :func:`app.routes.chat_routes._invalid_citations` — серверная валидация цитат.
 
 Мокается ТОЛЬКО транспорт (``rag.cognivault.hybrid_search`` / ``.content``) и
-скрытые LLM-вызовы волны 2 (``rag_pipeline.gigachat.complete_json``), поэтому
+скрытые LLM-вызовы волны 2 (``rag_pipeline.llm.complete_json``), поэтому
 тестируется настоящий ``rag.py``, а не заглушка.
 """
 
@@ -122,7 +122,7 @@ def _install_retrieval(monkeypatch, hits: list[dict], contents: dict | None = No
     monkeypatch.setattr(rag.cognivault, "hybrid_search", fake_hybrid)
     monkeypatch.setattr(rag.cognivault, "content", fake_content)
     monkeypatch.setattr(
-        rag_pipeline.gigachat, "complete_json", fake_complete_json, raising=False
+        rag_pipeline.llm, "complete_json", fake_complete_json, raising=False
     )
     return calls
 
@@ -614,8 +614,8 @@ def _install_chat(monkeypatch, tmp_path, hits, *, answer="ответ", contents=
 
     _install_retrieval(monkeypatch, hits, contents)
     monkeypatch.setattr(chat_routes, "resolve_paths", lambda request: _paths(tmp_path))
-    monkeypatch.setattr(chat_routes.gigachat, "stream_chat", fake_stream_chat)
-    monkeypatch.setattr(chat_routes.gigachat, "_files_present", lambda gcfg: None)
+    monkeypatch.setattr(chat_routes.llm, "stream_chat", fake_stream_chat)
+    monkeypatch.setattr(chat_routes.llm, "files_present", lambda gcfg: None)
     return captured
 
 
@@ -805,3 +805,46 @@ def test_chat_valid_citations_are_silent(monkeypatch, tmp_path):
         )
 
     assert saved and saved[0][-1]["invalid_citations"] == []
+
+
+# --------------------------------------------------------------------------- #
+# n_hits для расширения до целого файла считается ДО отбора
+# --------------------------------------------------------------------------- #
+
+
+def test_whole_file_expansion_counts_retrieval_hits_not_survivors(monkeypatch):
+    """Длинная страница разворачивается целиком, если поиск дал по ней 3+ чанка.
+
+    Регрессия: `n_hits` брался из фрагментов, ПЕРЕЖИВШИХ отбор, а грейдер
+    оставляет максимум пять на весь контекст. Порог `n_hits >= 3` практически
+    никогда не срабатывал, и страница длиннее `file_full_chars` не попадала в
+    контекст целиком ни при каких условиях — из-за чего терялись хвосты длинных
+    разделов (состав zip-архива, полный список моделей).
+    """
+    long_body = "полный текст страницы. " * 400  # ~9 000 символов
+    hits = [
+        {**_hit(1), "path": "big.md", "title": "Большая", "chunk_index": i, "rank": i}
+        for i in range(1, 4)
+    ]
+    # Грейдер оставляет ровно один фрагмент — как в реальном ходе.
+    async def one_five(messages, gcfg, **kwargs):
+        prompt = messages[-1]["content"]
+        if "Определи тип реплики" in prompt:
+            return {"intent": "kb_question", "standalone_question": "вопрос"}
+        return {"grades": [{"id": 1, "score": 5}]}
+
+    _install_retrieval(monkeypatch, hits, contents={"big.md": long_body})
+    monkeypatch.setattr(
+        rag_pipeline.llm, "complete_json", one_five, raising=False
+    )
+
+    ctx = _build(
+        "вопрос",
+        hits,
+        max_expanded_files=1,
+        file_full_chars=6000,
+        max_context_chars=48000,
+    )
+
+    assert long_body.strip()[:80] in ctx.user_message["content"]
+    assert [s["depth"] for s in ctx.sources] == ["file"]

@@ -24,7 +24,7 @@ import math
 import re
 from typing import Any, NamedTuple
 
-from . import corpus_scope, gigachat
+from . import corpus_scope, llm
 
 log = logging.getLogger("cognivault-ui.rag_pipeline")
 
@@ -95,8 +95,29 @@ _MAX_SELECTED = 5
 # Second-chance threshold when nothing clears `grader_threshold`.
 _FALLBACK_GRADE = 3
 
+# Grade for a fragment the judge SAW and chose not to list.
+#
+# A missing id used to be indistinguishable from a failed batch, so both became
+# `None` — and `select` treats `None` as "unknown, not bad" and keeps it. That
+# turned a lazy grader (one that lists only the fragments it liked) into a no-op
+# filter: everything it ignored sailed into the context ungraded. The two cases
+# are now separated at the batch boundary — the call failed, or it did not — and
+# only a real failure yields `None`. Value 2 = "смежная тема, конкретной пользы
+# нет": below both `grader_threshold` and `_FALLBACK_GRADE`, so an omitted
+# fragment is dropped rather than promoted.
+_OMITTED_GRADE = 2
+
 _INTENTS = ("smalltalk", "clarify", "kb_question")
 _DEFAULT_INTENT = "kb_question"
+
+# What SHAPE of answer the question asks for. Routing on this is the cheapest
+# fix for the biggest complaint in the user feedback: a top-k of five fragments
+# answers "какой ID у потока X" perfectly and cannot answer "перечисли все
+# вечные потоки" at all, however good the ranking is. `fact` keeps today's
+# behaviour; `list` and `procedure` widen the window so a whole registry or a
+# whole instruction can reach the model.
+_SHAPES = ("fact", "list", "procedure")
+DEFAULT_SHAPE = "fact"
 
 _ROLE_LABELS = {"user": "Пользователь", "assistant": "Ассистент"}
 
@@ -122,8 +143,13 @@ _CONDENSE_TASKS = """
   "corpus" — вопрос про базу в целом (какие вообще есть продукты, разделы,
   документы; перечисление по всей базе, а не по одной странице).
   При сомнении выбирай "document".
+- Определи форму ответа: "list" — просят перечислить набор (какие есть, перечисли
+  все, список чего-либо, все параметры/поля/потоки/модели); "procedure" — просят
+  порядок действий (как настроить, как заполнить, принцип работы, шаги);
+  "fact" — всё остальное (одно значение, определение, сравнение, да/нет).
+  При сомнении выбирай "fact".
 
-Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null, "scope": "document" | "corpus"}"""
+Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null, "scope": "document" | "corpus", "answer_shape": "fact" | "list" | "procedure"}"""
 
 _GRADE_SCALE = """
 Оцени КАЖДЫЙ фрагмент по шкале:
@@ -191,9 +217,9 @@ async def _call(
     degrades through the caller's usual fallback.
     """
     return await asyncio.wait_for(
-        gigachat.complete_json(
+        llm.complete_json(
             [{"role": "user", "content": prompt}],
-            gigachat.GigaConfig.from_dict(gcfg or {}),
+            llm.config_for(gcfg or {}),
             timeout=timeout,
             temperature=0.0,
             max_tokens=max_tokens,
@@ -414,11 +440,22 @@ class Condensed(NamedTuple):
     intent: str
     question: str
     scope: str = corpus_scope.DEFAULT_SCOPE
+    shape: str = DEFAULT_SHAPE
+
+
+def _parse_shape(value: Any) -> str:
+    """Answer shape from the model's JSON, defaulting to today's behaviour.
+
+    Unknown or missing → ``fact``: widening the context is the expensive branch,
+    so an unparseable reply must not buy it by accident.
+    """
+    shape = str(value or "").strip().strip('"').lower()
+    return shape if shape in _SHAPES else DEFAULT_SHAPE
 
 
 def _fallback(question: str) -> Condensed:
     """The safe verdict every failure path lands on: today's behaviour."""
-    return Condensed(_DEFAULT_INTENT, question, corpus_scope.DEFAULT_SCOPE)
+    return Condensed(_DEFAULT_INTENT, question, corpus_scope.DEFAULT_SCOPE, DEFAULT_SHAPE)
 
 
 def _parse_condense(data: dict[str, Any], question: str) -> Condensed:
@@ -432,20 +469,21 @@ def _parse_condense(data: dict[str, Any], question: str) -> Condensed:
     JSON object must not cost the turn its routing.
     """
     scope = corpus_scope.parse_scope(data.get("scope"))
+    shape = _parse_shape(data.get("answer_shape"))
     intent = str(data.get("intent", "") or "").strip().strip('"').lower()
     if intent not in _INTENTS:
         log.warning("condense: неизвестный intent %r — фолбэк на kb_question", intent)
-        return Condensed(_DEFAULT_INTENT, question, scope)
+        return Condensed(_DEFAULT_INTENT, question, scope, shape)
     if intent == "smalltalk" and _too_substantive_for_smalltalk(question):
         log.warning(
             "condense: smalltalk на содержательной реплике — переклассифицирую в %s",
             _DEFAULT_INTENT,
         )
-        return Condensed(_DEFAULT_INTENT, question, scope)
+        return Condensed(_DEFAULT_INTENT, question, scope, shape)
     raw = data.get("standalone_question")
     if intent == "kb_question" and isinstance(raw, str) and raw.strip():
-        return Condensed(intent, raw.strip(), scope)
-    return Condensed(intent, question, scope)
+        return Condensed(intent, raw.strip(), scope, shape)
+    return Condensed(intent, question, scope, shape)
 
 
 async def condense(
@@ -502,7 +540,7 @@ async def condense(
 
     parsed = _parse_condense(data, question)
     if first_turn:
-        return Condensed(_DEFAULT_INTENT, question, parsed.scope)
+        return Condensed(_DEFAULT_INTENT, question, parsed.scope, parsed.shape)
     return parsed
 
 
@@ -537,7 +575,14 @@ def _parse_grades(data: dict[str, Any], count: int) -> list[int | None]:
 async def _grade_batch(
     question: str, fragments: list[dict[str, Any]], gcfg: dict[str, Any] | None
 ) -> list[int | None]:
-    """Grade one batch; a failed batch degrades to ``None`` grades."""
+    """Grade one batch.
+
+    A **failed** batch degrades to ``None`` grades — genuinely unknown, and
+    :func:`select` keeps those by search rank so one dead batch cannot cause a
+    refusal. A **successful** batch that simply omitted some ids is a different
+    thing: the judge saw those fragments and did not rate them, so they are
+    scored ``_OMITTED_GRADE`` rather than left unknown.
+    """
     try:
         data = await _call(
             _grade_prompt(question, fragments),
@@ -551,7 +596,19 @@ async def _grade_batch(
     if not isinstance(data, dict):
         log.warning("grader: ответ не объект — отбор пропущен")
         return [None] * len(fragments)
-    return _parse_grades(data, len(fragments))
+
+    grades = _parse_grades(data, len(fragments))
+    omitted = [i for i, g in enumerate(grades) if g is None]
+    if omitted:
+        log.info(
+            "grader: батч оценён, но %d из %d фрагментов не упомянуты — считаем их %d",
+            len(omitted),
+            len(fragments),
+            _OMITTED_GRADE,
+        )
+        for i in omitted:
+            grades[i] = _OMITTED_GRADE
+    return grades
 
 
 async def grade(
@@ -671,7 +728,18 @@ def select(
         ]
 
     # Steps 1-3: the judge's verdict alone decides whether we answer at all.
-    keep = set(above(threshold) or above(_FALLBACK_GRADE)) | set(ungraded)
+    at_threshold = above(threshold)
+    if not at_threshold:
+        # Silent until now, which made `grader_threshold` look stricter than it
+        # is: with no 4s the bar quietly becomes 3 ("по теме, но скорее не
+        # нужен"). Worth a line in the log — if this fires on most turns, the
+        # threshold is not doing the job the operator thinks it is.
+        log.info(
+            "grader: ни один фрагмент не набрал %d — второй проход по порогу %d",
+            threshold,
+            _FALLBACK_GRADE,
+        )
+    keep = set(at_threshold or above(_FALLBACK_GRADE)) | set(ungraded)
     if not keep:
         return [], True
 

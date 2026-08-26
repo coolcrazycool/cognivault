@@ -1,0 +1,341 @@
+"""Собственный клиент платформы KitAI: POST → polling → commit.
+
+Офлайн: транспорт подменяется ``httpx.MockTransport``, сон — заглушкой, поэтому
+цикл опроса прогоняется мгновенно и без сети. Проверяется ровно то, что мы
+воспроизводим руками вместо вендорского SDK: форма запроса, разбор результата,
+коммит, и все три способа закончить плохо.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+
+import httpx
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app import kitai  # noqa: E402
+from app.llm_errors import (  # noqa: E402
+    GigaChatHTTP,
+    KitaiPollingTimeout,
+    KitaiQueryFailed,
+)
+
+HOST = "https://kitai.test"
+
+
+def _cfg(**over) -> kitai.KitaiConfig:
+    base = {
+        "kitai_host": HOST,
+        "kitai_model": "glm-5.2",
+        "kitai_system_name": "csp_lab",
+        "kitai_module_name": "csp_lab_antifraud_edge",
+        "temperature": 0.05,
+        "max_tokens": 1024,
+        "kitai_poll_initial_delay": 0.0,
+        "kitai_poll_delay": 0.0,
+        "kitai_poll_timeout": 30.0,
+    }
+    base.update(over)
+    return kitai.KitaiConfig.from_dict(base)
+
+
+def _finished(content: str = "ответ", finish_reason: str = "stop") -> dict:
+    return {
+        "description": None,
+        "data": {
+            "query_id": "00000000-0000-0000-0000-000000000000",
+            "query_status": "finished",
+            "is_final": True,
+            "response": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": finish_reason,
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 3,
+                    "total_tokens": 13,
+                },
+            },
+        },
+    }
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    async def instant(_seconds):
+        return None
+
+    monkeypatch.setattr(kitai, "_sleep", instant)
+
+
+def _recorder(*result_bodies: dict):
+    """Транспорт, отдающий переданные тела на последовательные GET /result."""
+    seen: list[httpx.Request] = []
+    remaining = list(result_bodies)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/query/model"):
+            return httpx.Response(200, json={"description": None, "data": None})
+        if request.url.path.endswith("/result"):
+            body = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+            return httpx.Response(200, json=body)
+        if request.url.path.endswith("/commit"):
+            return httpx.Response(200, json={"description": None, "data": True})
+        raise AssertionError(f"неожиданный путь: {request.url.path}")
+
+    return httpx.MockTransport(handler), seen
+
+
+def _run(cfg, transport, messages=None):
+    return asyncio.run(
+        kitai._run_query(
+            messages or [{"role": "user", "content": "вопрос"}],
+            cfg,
+            transport=transport,
+        )
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Счастливый путь
+# --------------------------------------------------------------------------- #
+
+
+def test_posts_polls_and_commits():
+    transport, seen = _recorder(_finished("готовый ответ"))
+
+    content, finish_reason = _run(_cfg(), transport)
+
+    assert (content, finish_reason) == ("готовый ответ", "stop")
+    methods = [(r.method, r.url.path.split("/")[-1]) for r in seen]
+    assert methods == [("POST", "model"), ("GET", "result"), ("PUT", "commit")]
+
+
+def test_request_body_matches_the_generated_dto():
+    """Поля уезжают в snake_case — сгенерированные DTO не объявляют алиасов."""
+    transport, seen = _recorder(_finished())
+
+    _run(_cfg(), transport, [{"role": "system", "content": "правила"}])
+
+    body = json.loads(seen[0].content)
+    assert body["model_name"] == "glm-5.2"
+    assert body["messages"] == [{"role": "system", "content": "правила"}]
+    assert body["temperature"] == 0.05
+    assert body["max_tokens"] == 1024
+    assert body["profanity_check"] is False
+    # query_id генерим мы: он же адресует result и commit.
+    assert body["query_id"] in seen[1].url.path
+
+
+def test_identification_headers_travel_with_every_call():
+    transport, seen = _recorder(_finished())
+
+    _run(_cfg(), transport)
+
+    for request in seen:
+        assert request.headers["x-identification-system"] == "csp_lab"
+        assert request.headers["x-identification-module"] == "csp_lab_antifraud_edge"
+
+
+def test_module_header_is_omitted_when_not_configured():
+    transport, seen = _recorder(_finished())
+
+    _run(_cfg(kitai_module_name=""), transport)
+
+    assert "x-identification-module" not in seen[0].headers
+
+
+def test_polls_until_finished():
+    running = {"description": None, "data": {"query_status": "running", "is_final": False}}
+    transport, seen = _recorder(running, running, _finished("наконец"))
+
+    content, _ = _run(_cfg(), transport)
+
+    assert content == "наконец"
+    assert sum(1 for r in seen if r.url.path.endswith("/result")) == 3
+
+
+# --------------------------------------------------------------------------- #
+# Плохие концовки
+# --------------------------------------------------------------------------- #
+
+
+def test_timeout_is_its_own_error_not_a_transport_failure():
+    """Запрос ПРИНЯТ и, возможно, ещё считается — это не обрыв связи.
+
+    Оператор должен прочитать «поднять таймаут / модель медленная», а не
+    «сеть сломана», поэтому у случая свой класс и свой код.
+    """
+    running = {"description": None, "data": {"query_status": "running", "is_final": False}}
+    transport, _ = _recorder(running)
+
+    with pytest.raises(KitaiPollingTimeout) as exc:
+        _run(_cfg(kitai_poll_timeout=0.0), transport)
+
+    assert exc.value.code == "KITAI_TIMEOUT"
+
+
+def test_final_non_finished_status_fails_fast():
+    """`is_final` при статусе не «finished» — платформа сдалась, ждать нечего."""
+    failed = {
+        "description": None,
+        "data": {
+            "query_status": "failed",
+            "is_final": True,
+            "error": {"status": 500, "message": "модель недоступна"},
+        },
+    }
+    transport, _ = _recorder(failed)
+
+    with pytest.raises(KitaiQueryFailed) as exc:
+        _run(_cfg(), transport)
+
+    assert exc.value.code == "KITAI_QUERY_FAILED"
+    assert "модель недоступна" in (exc.value.detail or "")
+
+
+def test_http_error_on_enqueue_is_typed():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="upstream down")
+
+    with pytest.raises(GigaChatHTTP):
+        _run(_cfg(), httpx.MockTransport(handler))
+
+
+def test_finished_without_choices_is_an_error_not_an_empty_answer():
+    """Пустой ответ молча выглядел бы как «модель ничего не нашла»."""
+    empty = {
+        "description": None,
+        "data": {"query_status": "finished", "is_final": True, "response": {"choices": []}},
+    }
+    transport, _ = _recorder(empty)
+
+    with pytest.raises(KitaiQueryFailed) as exc:
+        _run(_cfg(), transport)
+
+    assert exc.value.code == "KITAI_EMPTY_RESULT"
+
+
+def test_failed_commit_does_not_lose_the_answer():
+    """Коммит — бухгалтерия; ответ уже получен и должен дойти до пользователя."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/commit"):
+            return httpx.Response(500, text="nope")
+        if request.url.path.endswith("/result"):
+            return httpx.Response(200, json=_finished("ответ несмотря ни на что"))
+        return httpx.Response(200, json={"data": None})
+
+    content, _ = _run(_cfg(), httpx.MockTransport(handler))
+
+    assert content == "ответ несмотря ни на что"
+
+
+# --------------------------------------------------------------------------- #
+# Обёртки, которые видит остальной код
+# --------------------------------------------------------------------------- #
+
+
+def test_stream_chat_yields_one_chunk_and_records_finish_reason():
+    """Стриминга у платформы нет — притворяться не пытаемся."""
+    transport, _ = _recorder(_finished("целиком", finish_reason="length"))
+    cfg = _cfg()
+
+    async def collect():
+        chunks = []
+        stream = kitai.stream_chat(
+            [{"role": "user", "content": "?"}], cfg, transport=transport
+        )
+        async for chunk in stream:
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(collect())
+
+    assert chunks == ["целиком"]
+    assert cfg.last_finish_reason == "length"
+
+
+def test_complete_json_parses_the_models_object():
+    payload = '{"intent": "kb_question", "answer_shape": "list"}'
+    transport, _ = _recorder(_finished(payload))
+
+    parsed = asyncio.run(
+        kitai.complete_json(
+            [{"role": "user", "content": "?"}], _cfg(), transport=transport
+        )
+    )
+
+    assert parsed == {"intent": "kb_question", "answer_shape": "list"}
+
+
+def test_complete_json_timeout_shortens_the_polling_budget():
+    """У скрытых вызовов свой поводок — 240 с по умолчанию их бы пережил."""
+    running = {"description": None, "data": {"query_status": "running", "is_final": False}}
+    transport, _ = _recorder(running)
+
+    with pytest.raises(KitaiPollingTimeout):
+        asyncio.run(
+            kitai.complete_json(
+                [{"role": "user", "content": "?"}],
+                _cfg(kitai_poll_timeout=999.0),
+                timeout=0.0,
+                transport=transport,
+            )
+        )
+
+
+def test_missing_host_fails_before_any_request():
+    with pytest.raises(Exception) as exc:
+        _run(_cfg(kitai_host=""), httpx.MockTransport(lambda r: httpx.Response(200)))
+
+    assert getattr(exc.value, "code", "") == "KITAI_NOT_CONFIGURED"
+
+
+# --------------------------------------------------------------------------- #
+# Выбор провайдера (фасад app.llm)
+# --------------------------------------------------------------------------- #
+
+
+def test_provider_dispatch_picks_the_config_type():
+    from app import llm
+    from app.gigachat import GigaConfig
+
+    assert isinstance(llm.config_for({"provider": "kitai"}), kitai.KitaiConfig)
+    assert isinstance(llm.config_for({"provider": "gigachat"}), GigaConfig)
+    # Ключа нет — остаёмся на прежнем транспорте, а не падаем.
+    assert isinstance(llm.config_for({}), GigaConfig)
+
+
+def test_unknown_provider_falls_back_instead_of_breaking_chat(caplog):
+    from app import llm
+
+    with caplog.at_level("WARNING"):
+        assert llm.provider_of({"provider": "gigacaht"}) == llm.DEFAULT_PROVIDER
+    assert "gigacaht" in caplog.text
+
+
+def test_only_gigachat_advertises_streaming():
+    from app import llm
+    from app.gigachat import GigaConfig
+
+    assert llm.supports_streaming(GigaConfig.from_dict({})) is True
+    assert llm.supports_streaming(_cfg()) is False
+
+
+def test_kitai_model_falls_back_to_the_shared_model_key():
+    """Пустой `kitai_model` не должен обнулять имя модели."""
+    cfg = kitai.KitaiConfig.from_dict(
+        {"kitai_host": HOST, "kitai_model": "", "model": "GigaChat-3-Ultra"}
+    )
+    assert cfg.model == "GigaChat-3-Ultra"

@@ -59,7 +59,35 @@ SYSTEM_PROMPT = """Ты — ассистент по базе знаний пол
   информации не хватает.
 - В источниках встречаются markdown-таблицы: внимательно сопоставляй значения ячеек
   с заголовками их столбцов и строк.
-- Отвечай на русском языке, кратко и по делу."""
+- Отвечай на русском языке, кратко и по делу.
+
+Полнота перечислений:
+- Если спрашивают «какие», «все», «перечисли» — выпиши ВСЕ подходящие элементы из
+  источников, не выборку. Не заменяй часть списка словами «и другие», «и т.д.».
+- Если список собран из фрагмента таблицы или из разных источников и ты не можешь
+  ручаться за его полноту — приведи всё, что есть, и добавь одну строку: «список
+  может быть неполным». Не выдавай частичный список за исчерпывающий.
+
+Чего делать нельзя:
+- Не расшифровывай аббревиатуры и сокращения, если расшифровка не приведена в
+  источниках дословно. Незнакомое сокращение оставляй как есть.
+- Не утверждай, что чего-то не существует, если в источниках просто нет упоминания.
+  «В источниках не указано» — не то же самое, что «этого нет».
+- Не выдавай собственные выводы за содержимое источников. Если связываешь факты сам,
+  пиши «из этого следует» и не ставь после такого предложения [Источник N].
+- Проверяй предпосылку вопроса. Если вопрос утверждает факт («почему X происходит раз
+  в сутки»), сначала убедись, что X подтверждается источниками. Если он им
+  противоречит или не подтверждается — скажи об этом прямо, а не объясняй причину
+  того, чего в источниках нет.
+
+Форма ответа:
+- Не начинай с оговорки «прямого ответа нет», если ответ в источниках всё-таки есть.
+  Сначала ответ, оговорки — после и только по делу.
+- Одну и ту же сущность называй в ответе одним и тем же термином — тем, который
+  используется в источниках.
+- Отвечай на том уровне, о котором спросили: на пользовательский вопрос не вываливай
+  внутреннее устройство (имена таблиц БД, пути в хранилище, структуру записей), если
+  об этом не спрашивали."""
 
 # Repeated right before the question: the tail of a long context is the part the
 # model attends to best. Public for the same reason as `SYSTEM_PROMPT`.
@@ -189,6 +217,16 @@ _RETRIEVAL_UNAVAILABLE = "Поиск по базе недоступен — от
 _NO_ANSWER = "В доступных мне документах ответа на этот вопрос не нашлось."
 
 # Auto-mode internal retrieval width (independent of any stored `limit`): the
+# Answer shapes that need a wider window than a top-k slice (see `_build_auto`).
+_WIDE_SHAPES = ("list", "procedure")
+# Ceiling for the widened section window. Deliberately a ceiling and not a
+# multiplier without bound: a registry section runs to 83 000 characters, and the
+# point is to fit the ANSWER, not the whole page.
+_WIDE_SECTION_MAX_CHARS = 24000
+# A list question usually spans siblings ("вечные потоки" sits in one cell of 28
+# different pages), so widening the window alone is not enough.
+_WIDE_EXPANDED_FILES = 3
+
 # grader re-ranks this many candidates down to `_MAX_CONTEXT_BLOCKS`.
 #
 # Wave 3 widened this 20 → 40: recall at the retrieval stage is the ceiling for
@@ -437,6 +475,15 @@ def _decide_file_depth(
     * many hits (``>= 3``) AND the whole file still fits the remaining budget →
       whole file;
     * otherwise → section expansion.
+
+    ``n_hits`` must be counted on the RETRIEVAL candidates, not on the fragments
+    that survived selection. Search already collapsed the file to one chunk per
+    section, and the grader then caps the whole context at five fragments — so a
+    count taken after those two steps could reach three only by spending three of
+    the five slots on one file. In practice it never did, which meant any page
+    over ``file_full_chars`` was never expanded whole, and answers that needed the
+    tail of a long section (the contents of the training zip, the full list of
+    models) could not be produced at all.
     """
     if content_len <= file_full_chars:
         return "file"
@@ -824,7 +871,29 @@ async def _build_auto(
             return meta
 
     # 0b. Hidden call 1: route the turn and rewrite it into a standalone query.
-    intent, rq, scope = await rag_pipeline.condense(query, messages, rcfg, gcfg)
+    condensed = await rag_pipeline.condense(query, messages, rcfg, gcfg)
+    intent, rq, scope, shape = condensed
+
+    # Route on the SHAPE of the answer the user asked for. A five-fragment top-k
+    # answers «какой ID у потока X» perfectly and cannot answer «перечисли все
+    # вечные потоки» at all — the second needs the whole registry section, not a
+    # better-ranked slice of it. Ranking cannot fix that; only the window can.
+    #
+    # Only widening is applied, and only for the two shapes that need it, so a
+    # misclassified `fact` costs nothing and a misclassified `list` costs context
+    # size rather than a wrong answer. Both multipliers stay under the char budget
+    # computed above — `add()` still refuses to overflow it.
+    if shape in _WIDE_SHAPES:
+        section_max_chars = min(
+            _WIDE_SECTION_MAX_CHARS, max(section_max_chars * 2, _WIDE_SECTION_MAX_CHARS // 2)
+        )
+        max_expanded_files = max(max_expanded_files, _WIDE_EXPANDED_FILES)
+        log.info(
+            "shape=%s — окно секции %d, разворачиваем до %d файлов",
+            shape,
+            section_max_chars,
+            max_expanded_files,
+        )
     if intent in _NO_RAG_INTENTS:
         # Chit-chat / "say that again": no retrieval, the model answers from the
         # untouched history — but NOT without rules. A misrouted knowledge-base
@@ -881,6 +950,13 @@ async def _build_auto(
         }
         for f in fragments
     ]
+
+    # How many chunks the SEARCH returned per file, before the grader's cap. This
+    # is what `_decide_file_depth` needs; see its docstring.
+    retrieval_hits: dict[str, int] = {}
+    for c in candidates:
+        p_ = c.get("path") or ""
+        retrieval_hits[p_] = retrieval_hits.get(p_, 0) + 1
 
     # 1b. Hidden call 2: grade every candidate, then select. Runs BEFORE
     # grouping and smart expansion so whole-file/section expansion only ever
@@ -1011,7 +1087,8 @@ async def _build_auto(
             add(title, p, "", best, _merge_chunk_text(frags), "chunk", best_grade)
             continue
         remaining = budget - used
-        depth = _decide_file_depth(len(content), len(frags), file_full_chars, remaining)
+        n_hits = retrieval_hits.get(p, len(frags))
+        depth = _decide_file_depth(len(content), n_hits, file_full_chars, remaining)
         if depth == "file":
             block_len = len(_block(_header(n + 1, title, p, ""), content))
             if blocks and used + block_len > budget:

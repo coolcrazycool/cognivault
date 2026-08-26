@@ -76,7 +76,13 @@ PATHS = AppPaths()
 DEFAULT_CONFIG: dict[str, Any] = {
     "version": 1,
     "cognivault": {"base_url": "http://localhost:3000", "token": ""},
+    # One section, two transports. The certificate, temperature and token budget
+    # are shared — only `provider` and the `kitai_*` keys decide where the request
+    # goes, so switching back is one env var and no re-entered credentials.
     "gigachat": {
+        # "gigachat" — прямой mTLS-клиент, настоящий стриминг токенов;
+        # "kitai"    — платформа KitAI (POST → polling → commit), стриминга нет.
+        "provider": "gigachat",
         "base_url": "https://gigachat-ift.sberdevices.delta.sbrf.ru/v1",
         "model": "GigaChat-3-Ultra-preview",
         "cert_path": "~/.cognivault-ui/certs/client_crt.crt",
@@ -86,6 +92,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "temperature": 0.2,
         "max_tokens": 4096,
         "model_context_tokens": 32768,
+        # ── KitAI ──
+        # `kitai_host` — БЕЗ /v1: пути версионируются самим API (/api/v1/query/...).
+        "kitai_host": "https://hcscr-ift.delta.sbrf.ru",
+        # Пустое значение = взять `model`. Держим отдельным ключом, чтобы
+        # переключение провайдера не переписывало имя модели другого транспорта.
+        "kitai_model": "glm-5.2",
+        # Идентификация вызывающей системы: уезжает в заголовках
+        # x-identification-system / x-identification-module.
+        "kitai_system_name": "csp_lab",
+        "kitai_module_name": "csp_lab_antifraud_edge",
+        "kitai_profanity_check": False,
+        # Бюджет ожидания ответа. Это НЕ таймаут сокета: запрос ставится в
+        # очередь, и всё это время мы опрашиваем результат.
+        "kitai_poll_timeout": 240.0,
+        "kitai_poll_initial_delay": 2.0,
+        "kitai_poll_delay": 2.0,
     },
     "rag": {
         "default_on": False,
@@ -99,9 +121,27 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "limit": 10,
         "min_score": None,
         "token_budget": 3000,
-        "max_context_chars": 24000,
+        # Волна 0 (фидбек 2026-08-26): 24000 → 48000 и 4000 → 12000.
+        #
+        # Замер на снапшоте корпуса (127 страниц, 920 чанков, 260 секций): 44
+        # секции длиннее старого окна 4000 и держат 70.6% всего текста базы.
+        # Проверенный пример — вопрос «для каких моделей финэффект НЕ
+        # рассчитывается»: все 7 моделей лежат в ОДНОЙ секции (24 379 символов),
+        # в 7 чанках, разнесённых на 16 762 символа. В окно 4000 помещается
+        # максимум 3 из 7 — агент и называл ровно 3. Это арифметика окна, а не
+        # качество ранжирования: hit@1 гибрида 0.82, hit@5 0.97.
+        #
+        # `max_context_chars` поднят вместе с окном, иначе расширенные секции
+        # просто не влезут в бюджет. Потолок сверху всё равно считает
+        # `_compute_budget` от контекста модели: при 32768 токенов и max_tokens
+        # 4096 вычисленный лимит ~70k символов, то есть 48000 достижимы.
+        #
+        # Цена: контекст на ход примерно вдвое дороже, и при 12000 на блок в
+        # бюджет влезает ~4 источника вместо 5. Это осознанный размен полноты
+        # на разнообразие, и он ОБРАТИМ из UI — обе ручки в USER_EDITABLE_KEYS.
+        "max_context_chars": 48000,
         "file_full_chars": 6000,
-        "section_max_chars": 4000,
+        "section_max_chars": 12000,
         "max_expanded_files": 2,
         # Волна 2: два скрытых вызова GigaChat в конвейере чата.
         # `condense_enabled` — интент-маршрутизация + переписывание вопроса;
@@ -143,7 +183,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "corpus_tree_enabled": False,
         "grader_enabled": True,
         "grader_threshold": 4,
-        "grader_keep_top": 2,
+        # Волна 0: 2 → 0. `grader_keep_top` отдавал два верхних по СЫРОМУ рангу
+        # поиска в контекст безусловно — даже с оценкой 1 («не связан с
+        # вопросом»), и слоты резервировались до кэпа `_MAX_SELECTED`. То есть
+        # 40% контекста каждого хода не фильтровалось вообще. Именно так в ответ
+        # про мониторинг нормализованного скора попал пункт про Min/Max PSI из
+        # карточки модели (жалоба пользователя «3 пункт про psi лишний»).
+        #
+        # Страховка от пустого отбора остаётся: при полном отказе грейдера
+        # `select` уходит в `_NO_ANSWER`, и это честнее, чем подмешать заведомо
+        # нерелевантный фрагмент. Вернуть 2 можно из UI.
+        "grader_keep_top": 0,
         "rerank_candidates": 40,
     },
     # Prompt overrides. ``None`` (NOT the prompt text) is the default on purpose:
