@@ -289,6 +289,16 @@ function nodeToText(node: Node): string {
   if (node.type === 'break') {
     return '\n';
   }
+  // An mdast `image` has neither `value` nor `children`, so both branches below
+  // miss it and the alt text — often the only words describing a diagram — was
+  // dropped from the chunk entirely. Diagrams carry real content in this corpus
+  // (stream names live inside them), and nothing else recovers it: there is no
+  // OCR anywhere in the pipeline.
+  if (node.type === 'image' || node.type === 'imageReference') {
+    const alt = (node as { alt?: string | null }).alt;
+    const title = (node as { title?: string | null }).title;
+    return [alt, title].filter((s): s is string => typeof s === 'string' && s.length > 0).join(' ');
+  }
   if ('value' in node && typeof (node as { value: string }).value === 'string') {
     return (node as { value: string }).value;
   }

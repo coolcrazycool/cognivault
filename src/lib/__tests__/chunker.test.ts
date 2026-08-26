@@ -1045,3 +1045,25 @@ describe('chunkMarkdownWithSections', () => {
     });
   });
 });
+
+describe('image alt text', () => {
+  it('keeps the alt text of a diagram in the chunk', () => {
+    // Diagrams are where several stream names actually live, and there is no OCR
+    // in the pipeline — the alt text is the only handle on them.
+    const md = [
+      '# Мониторинг моделей',
+      '',
+      'Схема потоков инструмента:',
+      '',
+      '![Потоки: psi_metric_compute, simple_metrics, simple_normalized_metrics](diagram.png)',
+      '',
+      'Подробности ниже.',
+    ].join('\n');
+
+    const text = chunkMarkdown(md, { title: 'Мониторинг', path: 'monitoring.md' })
+      .map((c) => c.text)
+      .join('\n');
+
+    expect(text).toContain('simple_normalized_metrics');
+  });
+});
