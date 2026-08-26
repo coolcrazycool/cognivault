@@ -155,7 +155,7 @@ spec:
           # ВНИМАНИЕ: тег должен совпадать с deploy/dropapp/04-backend.yaml. У бэкенда
           # старше sha-8665e36 нет маршрута /api/vault/catalog — новый UI тогда молча
           # отдаёт ответы без дерева разделов, БЕЗ ошибки. Бэкенд катить НЕ ПОЗЖЕ UI.
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-8955d97
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-d1d5cd6
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

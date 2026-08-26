@@ -100,7 +100,7 @@ spec:
           # поднимается и работает — деградирует только лексическая ветвь
           # поиска, поэтому шаг легко пропустить. Делается из UI (настройки ->
           # «Индекс и поиск» -> «Пересоздать коллекцию»), README, раздел 3.7.
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-8955d97
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault:sha-d1d5cd6
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
