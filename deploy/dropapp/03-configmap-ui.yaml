@@ -33,12 +33,32 @@ data:
   GIGACHAT_TEMPERATURE: "0.2"
   GIGACHAT_MAX_TOKENS: "4096"
   GIGACHAT_MODEL_CONTEXT_TOKENS: "32768"
+  # ── Транспорт чата ──
+  # "gigachat" — прямой mTLS-клиент, настоящий стриминг токенов (путь отката);
+  # "kitai"    — платформа KitAI: POST → polling → commit, стриминга НЕТ (UI
+  # показывает «Модель думает…» вместо бегущего курсора).
+  # Эмбеддинги этим ключом не затрагиваются: они считаются в TS-бэкенде своим
+  # провайдером, и смена эмбеддера означала бы полную переиндексацию.
+  CHAT_PROVIDER: "kitai"
+  # Без /v1 — версия зашита в пути (/api/v1/query/...).
+  KITAI_HOST: "https://hcscr-ift.delta.sbrf.ru"
+  KITAI_MODEL: "glm-5.2"
+  # Уезжает в x-identification-system / x-identification-module.
+  KITAI_SYSTEM_NAME: "csp_lab"
+  KITAI_MODULE_NAME: "csp_lab_antifraud_edge"
+  KITAI_PROFANITY_CHECK: "false"
+  # Бюджет ОЖИДАНИЯ ответа, а не таймаут сокета: запрос стоит в очереди, а мы
+  # опрашиваем результат. Скрытые вызовы (condense/грейдер) режут его своими
+  # поводками в 10 и 20 с.
+  KITAI_POLL_TIMEOUT: "240"
+  KITAI_POLL_INITIAL_DELAY: "2"
+  KITAI_POLL_DELAY: "2"
 
   # ── RAG-конвейер ──────────────────────────────────────────────────────
   RAG_MODE: "auto"
-  RAG_MAX_CONTEXT_CHARS: "24000"
+  RAG_MAX_CONTEXT_CHARS: "48000"
   RAG_FILE_FULL_CHARS: "6000"
-  RAG_SECTION_MAX_CHARS: "4000"
+  RAG_SECTION_MAX_CHARS: "12000"
   RAG_MAX_EXPANDED_FILES: "2"
   RAG_LIMIT: "10"
   RAG_SOURCE: "hybrid"
@@ -52,7 +72,7 @@ data:
   RAG_CONDENSE_ENABLED: "true"
   RAG_GRADER_ENABLED: "true"
   RAG_GRADER_THRESHOLD: "4"
-  RAG_GRADER_KEEP_TOP: "2"
+  RAG_GRADER_KEEP_TOP: "0"
   # Запускать вызов 1 (интент + condense) и на ПЕРВОЙ реплике диалога. Без него
   # первый ход не классифицируется вовсе: истории нет, condense коротит, и поле
   # охвата (document/corpus) на первом сообщении отсутствует. Цена ровно одна —
