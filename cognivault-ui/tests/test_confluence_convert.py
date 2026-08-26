@@ -1102,3 +1102,65 @@ def test_full_document_composes_cleanly():
     assert "> **Внимание:** Осторожно" in md
     assert "| K | V |" in md
     assert "\n\n\n" not in md
+
+
+# ---------------------------------------------------------------------------
+# подписи к картинкам и упоминания людей
+# ---------------------------------------------------------------------------
+
+
+def test_image_caption_survives_as_text():
+    """<ac:caption> — ребёнок <ac:image>, и раньше выпадал вместе с ним.
+
+    Confluence почти никогда не проставляет ac:alt, поэтому подпись — обычно
+    единственная проза, называющая, что изображено на схеме.
+    """
+    body = (
+        '<ac:image><ri:attachment ri:filename="scheme.png"/>'
+        "<ac:caption><p>Потоки мониторинга: psi_metric_compute, simple_metrics</p></ac:caption>"
+        "</ac:image>"
+    )
+    md = _md(body)
+
+    assert "psi_metric_compute" in md
+    assert "simple_metrics" in md
+
+
+def test_image_caption_fills_empty_alt():
+    body = (
+        '<ac:image><ri:attachment ri:filename="scheme.png"/>'
+        "<ac:caption><p>Схема дообучения</p></ac:caption></ac:image>"
+    )
+    assert "Схема дообучения" in _md(body)
+
+
+def test_explicit_alt_wins_over_caption():
+    body = (
+        '<ac:image ac:alt="Диаграмма потоков"><ri:attachment ri:filename="s.png"/>'
+        "<ac:caption><p>подпись</p></ac:caption></ac:image>"
+    )
+    md = _md(body)
+    assert "Диаграмма потоков" in md
+    assert "подпись" in md
+
+
+def test_user_mention_is_not_silently_dropped():
+    """ri:user не имел ветки и превращался в ПУСТУЮ строку.
+
+    Из-за этого страница со списком команды конвертировалась в пустой документ,
+    а ответ «в документах не нашлось» выглядел честным.
+    """
+    body = '<p>Ответственный: <ac:link><ri:user ri:userkey="abc123"/></ac:link></p>'
+    md = _md(body)
+
+    assert "Ответственный:" in md
+    assert md.strip() != "Ответственный:"
+    assert "abc123" in md
+
+
+def test_user_mention_keeps_the_authored_anchor_text():
+    body = (
+        "<p><ac:link><ri:user ri:userkey=\"abc123\"/>"
+        "<ac:link-body>Иванов И.И.</ac:link-body></ac:link></p>"
+    )
+    assert "Иванов И.И." in _md(body)

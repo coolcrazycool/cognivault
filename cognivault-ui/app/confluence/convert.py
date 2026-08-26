@@ -415,6 +415,7 @@ class _Context:
         self.refs: list[str] = []
         self._seen_refs: set[str] = set()
         self.coverage: list[str] = []
+        self.unresolved_users: list[str] = []
         self._counter = 0
 
     def add_placeholder(self, kind: str, payload: Any) -> str:
@@ -430,6 +431,16 @@ class _Context:
         if filename and filename not in self._seen_refs:
             self._seen_refs.add(filename)
             self.refs.append(filename)
+
+    def record_unresolved_user(self, key: str) -> None:
+        """Note a person mention we could not turn into a name.
+
+        Storage XHTML has only ``ri:userkey``; the display name needs a separate
+        ``/rest/api/user?key=`` call. Until that exists, the count at least makes
+        the gap countable instead of silent — a page whose whole content is a
+        team roster otherwise converts to an empty document and looks fine.
+        """
+        self.unresolved_users.append(key or "?")
 
 
 # ===========================================================================
@@ -748,6 +759,15 @@ def _transform_images(soup: BeautifulSoup, ctx: _Context) -> None:
             emo.decompose()
     for image in soup.find_all("ac:image"):
         alt = image.get("ac:alt") or image.get("ac:title") or ""
+        # <ac:caption> is a CHILD of <ac:image>, so `image.replace_with(img)`
+        # dropped the caption together with the image — and Confluence rarely
+        # sets ac:alt, which left 198 images in the corpus contributing exactly
+        # zero indexable words. The caption is usually the only prose naming
+        # what a diagram shows.
+        caption_el = image.find("ac:caption")
+        caption = caption_el.get_text(" ", strip=True) if caption_el is not None else ""
+        if caption and not alt:
+            alt = caption
         att = image.find("ri:attachment")
         url = image.find("ri:url")
         if att is not None:
@@ -759,14 +779,30 @@ def _transform_images(soup: BeautifulSoup, ctx: _Context) -> None:
             img = _new_tag(image, "img")
             img["src"] = ctx.attachment_href(filename)
             img["alt"] = alt
-            image.replace_with(img)
+            _replace_image(image, img, caption)
         elif url is not None:
             img = _new_tag(image, "img")
             img["src"] = url.get("ri:value") or ""
             img["alt"] = alt
-            image.replace_with(img)
+            _replace_image(image, img, caption)
         else:
             image.decompose()
+
+
+def _replace_image(image: Tag, img: Tag, caption: str) -> None:
+    """Swap ``<ac:image>`` for the ``<img>``, keeping the caption as real text.
+
+    The caption goes AFTER the image as its own paragraph rather than only into
+    ``alt``: markdown conversion keeps paragraph text verbatim, whereas alt text
+    survives only as far as the chunker chooses to read it. Belt and braces — the
+    words are what matter, not where they sit.
+    """
+    image.replace_with(img)
+    if not caption:
+        return
+    para = _new_tag(img, "p")
+    para.string = caption
+    img.insert_after(para)
 
 
 def _emoticon_text(emo: Tag) -> str:
@@ -782,9 +818,24 @@ def _transform_links(soup: BeautifulSoup, ctx: _Context) -> None:
 
         page_ref = link.find("ri:page")
         att_ref = link.find("ri:attachment")
+        user_ref = link.find("ri:user")
         same_anchor = link.get("ac:anchor")
 
-        if page_ref is not None:
+        if user_ref is not None:
+            # No branch used to match this, so a person mention fell through to
+            # the final `else` and became an EMPTY string: "кто входит в состав
+            # команды" had nothing to answer from, and the loss was invisible —
+            # it looked like an honest "не нашлось".
+            #
+            # Storage XHTML carries only an opaque key, never the name, so the
+            # best we can do without a second API round-trip is preserve the
+            # anchor text when the author typed one and otherwise leave a marker
+            # that says a person is referenced here.
+            key = (user_ref.get("ri:userkey") or user_ref.get("ri:account-id") or "").strip()
+            text = anchor_text or (f"@user:{key}" if key else "@пользователь")
+            ctx.record_unresolved_user(key)
+            link.replace_with(NavigableString(text))
+        elif page_ref is not None:
             title = (page_ref.get("ri:content-title") or "").strip()
             space = (page_ref.get("ri:space-key") or ctx.space).strip()
             text = anchor_text or title
