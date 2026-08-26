@@ -8,12 +8,15 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+
+import pytest
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from metrics import (  # noqa: E402
     METRIC_NAMES,
+    item_recall,
     aggregate,
     answer_relevancy_ru,
     context_precision,
@@ -231,3 +234,48 @@ def test_aggregate_covers_all_metric_names():
 def test_coverage_counts_usable_scores():
     samples = [_sample(faithfulness_ru=1.0), _sample(faithfulness_ru=None)]
     assert coverage(samples)["faithfulness_ru"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# item_recall — полнота перечисления
+# --------------------------------------------------------------------------- #
+
+
+def test_item_recall_counts_missing_items():
+    """Воспроизводит реальный провал: 3 модели из 7 в ответе про финэффект.
+
+    Судейские метрики этого не видят: всё сказанное верно, ответ релевантен и
+    опирается на контекст — неполон только СПИСОК.
+    """
+    answer = "Не рассчитывается для *BNPL_1*, ACQUIRER и CARDS_DROP_MODEL."
+    expected = [
+        "BNPL_1",
+        "ACQUIRER",
+        "CARDS_DROP_MODEL",
+        "PROF_NOT_PROF_CARDS",
+        "СМС-модель",
+        "Скоринг неплатежных",
+        "PROF_NOT_PROF_DBO",
+    ]
+
+    result = item_recall(answer, expected)
+
+    assert result.score == pytest.approx(3 / 7)
+    assert result.raw["missing"] == expected[3:]
+
+
+def test_item_recall_matches_inside_markup_and_ignores_case():
+    result = item_recall(
+        "Потоки: **psi_metric_compute**, `Simple_Metrics`.",
+        ["psi_metric_compute", "simple_metrics"],
+    )
+    assert result.score == 1.0
+
+
+def test_item_recall_is_none_without_expected_items():
+    """Вопросы не про перечисление метрику не получают — None, а не ноль."""
+    assert item_recall("любой ответ", []).score is None
+
+
+def test_item_recall_zero_on_empty_answer():
+    assert item_recall("", ["A", "B"]).score == 0.0

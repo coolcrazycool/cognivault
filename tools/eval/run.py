@@ -850,6 +850,9 @@ async def run_sample(
         ground_truth=ground_truth,
         answer=outcome.answer,
         contexts=resolved.contexts,
+        # Только у вопросов-перечислений; у остальных метрика даёт None и в
+        # среднее не входит.
+        expected_items=row.get("expected_items") or (),
     )
     sample["metrics"] = {name: result.to_dict() for name, result in results.items()}
     return sample

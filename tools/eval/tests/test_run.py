@@ -926,6 +926,7 @@ def test_group_by_category_splits_metrics_and_counts_failures():
         "answer_relevancy_ru": None,
         "context_precision": None,
         "context_recall": None,
+        "item_recall": None,
         RETRIEVAL_KEY: None,
         REFUSAL_KEY: None,
         FALSE_REFUSAL_RATE_KEY: None,

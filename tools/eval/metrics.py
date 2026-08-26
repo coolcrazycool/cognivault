@@ -34,6 +34,9 @@ METRIC_NAMES = (
     "answer_relevancy_ru",
     "context_precision",
     "context_recall",
+    # Deterministic, no judge call. `None` for questions without `expected_items`,
+    # and `aggregate` skips `None`, so the mean is over enumeration questions only.
+    "item_recall",
 )
 
 
@@ -494,8 +497,13 @@ async def evaluate_sample(
     ground_truth: str,
     answer: str,
     contexts: Sequence[str],
+    expected_items: Sequence[str] = (),
 ) -> dict[str, MetricResult]:
-    """Run all four metrics for one golden pair (sequentially — judge friendly)."""
+    """Run every metric for one golden pair (sequentially — judge friendly).
+
+    Four cost a judge call each; `item_recall` is pure and free, and only scores
+    at all when the golden row declares `expected_items`.
+    """
     return {
         "faithfulness_ru": await faithfulness_ru(judge, answer, contexts),
         "answer_relevancy_ru": await answer_relevancy_ru(judge, question, answer),
@@ -503,6 +511,7 @@ async def evaluate_sample(
         "context_recall": await context_recall(
             judge, question, ground_truth, contexts
         ),
+        "item_recall": item_recall(answer, expected_items),
     }
 
 
@@ -547,3 +556,48 @@ def coverage(
                 count += 1
         out[name] = count
     return out
+
+
+# --------------------------------------------------------------------------- #
+# item_recall — полнота перечисления (без судьи)
+# --------------------------------------------------------------------------- #
+
+
+def item_recall(answer: str, expected_items: Sequence[str]) -> MetricResult:
+    """Доля ожидаемых элементов списка, названных в ответе.
+
+    Ни одна из четырёх судейских метрик выше неполноту СПИСКА не видит: ответ,
+    назвавший 3 модели из 7, остаётся полностью faithful (всё сказанное верно),
+    релевантным вопросу и опирающимся на выданный контекст. Именно так неполные
+    перечисления и проходили оценку — а в пользовательском фидбеке это самая
+    частая претензия.
+
+    Детерминированная, без вызова модели: элементы списка — это имена потоков,
+    моделей, полей и параметров, то есть идентификаторы, а не проза. Сравнение
+    идёт по подстроке после приведения к нижнему регистру и схлопывания
+    пробелов, чтобы «BNPL_1» нашлось в «*BNPL_1* (Buy Now Pay Later)».
+
+    ``expected_items`` берётся из поля ``expected_items`` золотого набора;
+    вопросы без него эту метрику не получают (``None``, не ноль).
+    """
+    if not expected_items:
+        return MetricResult("item_recall", None, error="в вопросе нет expected_items")
+    haystack = re.sub(r"\s+", " ", (answer or "")).lower()
+    if not haystack:
+        return MetricResult("item_recall", 0.0, raw={"note": "пустой ответ"})
+
+    found: list[str] = []
+    missing: list[str] = []
+    for item in expected_items:
+        needle = re.sub(r"\s+", " ", str(item)).strip().lower()
+        if needle and needle in haystack:
+            found.append(item)
+        else:
+            missing.append(item)
+
+    score = len(found) / len(expected_items)
+    return MetricResult(
+        "item_recall",
+        score,
+        raw={"found": found, "missing": missing, "total": len(expected_items)},
+    )
