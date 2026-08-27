@@ -10,6 +10,17 @@ on:
       - '**.md'
       - '.planning/**'
       - 'docs/**'
+      # Deployment manifests are not image inputs — the image gets `src/`,
+      # `drizzle/`, `package.json`, `pnpm-lock.yaml` and `tsconfig.json`, and
+      # nothing else (see Dockerfile.lean). Building on a manifest edit produced
+      # a NEW tag whose image was byte-identical to the pinned one, so the pin
+      # could never equal the newest build and looked stale when it was not.
+      - 'deploy/**'
+      - 'k8s/**'
+      - 'cognivault.yaml'
+      - 'cognivault-ui.yaml'
+      # The UI has its own workflow.
+      - 'cognivault-ui/**'
   workflow_dispatch: {}
 
 permissions:
