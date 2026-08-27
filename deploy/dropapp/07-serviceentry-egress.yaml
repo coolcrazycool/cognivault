@@ -27,6 +27,30 @@ spec:
   resolution: DNS
   location: MESH_EXTERNAL
 ---
+# KitAI — платформа, через которую UI ходит в модель генерации ответа
+# (CHAT_PROVIDER=kitai, KITAI_HOST). Аутентификация — тот же клиентский
+# сертификат, что у GigaChat, поэтому здесь тоже `protocol: TLS` и
+# SNI-passthrough; DestinationRule с origination TLS добавлять НЕЛЬЗЯ.
+#
+# Запись нужна, ПОКА CHAT_PROVIDER=kitai. При откате на `gigachat` она
+# безвредна, но не используется — а вот `gigachat-egress` выше нужен всегда:
+# на нём остаётся путь отката.
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: kitai-egress
+  labels:
+    app.kubernetes.io/name: cognivault
+spec:
+  hosts:
+    - hcscr-ift.delta.sbrf.ru
+  ports:
+    - number: 443
+      name: https
+      protocol: TLS
+  resolution: DNS
+  location: MESH_EXTERNAL
+---
 # Внешний Qdrant (DropApp) — Platform V Vector DB. Перечислены ОБА узла:
 # QDRANT_URL указывает на один, второй — ручной резерв (клиентской балансировки
 # нет). Порт 6433 обслуживает и саму СУБД, и выдачу JWT на /auth, поэтому
