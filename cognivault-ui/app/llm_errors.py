@@ -68,5 +68,14 @@ class KitaiPollingTimeout(GigaChatError):
     """
 
 
+class KitaiCatalogForbidden(GigaChatError):
+    """Сертификат действителен для запросов, но не имеет прав на каталог моделей.
+
+    Отдельный класс, чтобы вызывающий код мог отличить «нет прав на справочник»
+    от «сломано подключение»: первое — штатное состояние прав на контуре, и
+    лечится оно списком моделей от владельца платформы, а не проверкой сети.
+    """
+
+
 class KitaiQueryFailed(GigaChatError):
     """The platform reported a final, non-successful query state."""

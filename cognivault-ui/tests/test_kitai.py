@@ -528,3 +528,46 @@ def test_kitai_certificate_paths_stay_admin_only():
                 "gigachat.kitai_key_passphrase"):
         assert key in settings.ADMIN_LOCKED_KEYS
         assert key not in settings.USER_EDITABLE_KEYS
+
+
+def test_catalog_403_is_a_permission_state_not_a_fault():
+    """403 на каталоге при рабочих запросах — это права, а не сломанное подключение.
+
+    Наблюдалось на IFT: `POST /query/model` тем же сертификатом принимается, а
+    `/api/v1/meta/model` отвечает «Access denied for the certificate». Отдельный
+    класс нужен, чтобы это не логировалось как отказ связи на каждой загрузке
+    страницы настроек.
+    """
+    from app.llm_errors import KitaiCatalogForbidden
+
+    def handler(request):
+        return httpx.Response(403, json={"description": "Access denied for the certificate"})
+
+    with pytest.raises(KitaiCatalogForbidden) as exc:
+        asyncio.run(kitai.list_models(_cfg(), transport=httpx.MockTransport(handler)))
+
+    assert exc.value.code == "KITAI_CATALOG_FORBIDDEN"
+    assert "Access denied" in (exc.value.detail or "")
+
+
+def test_upstream_503_reaches_the_operator_verbatim():
+    """503 от апстрима KitAI: причина — в response_body, и её нельзя терять."""
+    failed = {
+        "description": None,
+        "data": {
+            "query_status": "error",
+            "is_final": True,
+            "response_code": 503,
+            "response_body": (
+                "upstream connect error or disconnect/reset before headers. "
+                "reset reason: connection termination"
+            ),
+        },
+    }
+    transport, _ = _recorder(failed)
+
+    with pytest.raises(KitaiQueryFailed) as exc:
+        _run(_cfg(), transport)
+
+    assert "response_code=503" in (exc.value.detail or "")
+    assert "connection termination" in (exc.value.detail or "")

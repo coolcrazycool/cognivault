@@ -54,6 +54,7 @@ from .llm_errors import (
     GigaChatError,
     GigaChatHTTP,
     GigaChatTLS,
+    KitaiCatalogForbidden,
     KitaiPollingTimeout,
     KitaiQueryFailed,
 )
@@ -414,6 +415,18 @@ async def list_models(
             )
         except httpx.HTTPError as exc:
             raise mtls.classify_connect_error(exc, what="KitAI") from exc
+        if resp.status_code in (401, 403):
+            # Наблюдалось на IFT: `POST /query/model` тем же сертификатом
+            # принимается (200), а каталог отвечает 403 «Access denied for the
+            # certificate». То есть сертификат ДЕЙСТВИТЕЛЕН, просто у него нет
+            # права на мета-эндпоинт — это состояние прав, а не поломка, и
+            # рассказывать о нём как об ошибке значит слать оператора искать
+            # несуществующую проблему с подключением.
+            raise KitaiCatalogForbidden(
+                "KITAI_CATALOG_FORBIDDEN",
+                "У сертификата нет доступа к списку моделей KitAI",
+                resp.text[:300],
+            )
         if resp.status_code != 200:
             raise GigaChatHTTP(
                 "GIGACHAT_HTTP",

@@ -21,7 +21,7 @@ from ..config import (
     save_config,
 )
 from ..deps import ApiError, get_token, resolve_paths
-from ..llm_errors import GigaChatError
+from ..llm_errors import GigaChatError, KitaiCatalogForbidden
 
 log = logging.getLogger("cognivault-ui.config")
 
@@ -335,6 +335,16 @@ async def get_models(
     gc = cfg.get("gigachat", {})
     try:
         models = await llm.list_models(llm.config_for(gc))
+    except KitaiCatalogForbidden as exc:
+        # Не warning: это штатное состояние прав, а не поломка, и форма его
+        # корректно переживает. На уровне warning оно повторялось на каждой
+        # загрузке страницы настроек и выглядело как отказ подключения.
+        log.info("каталог моделей закрыт для сертификата: %s", exc)
+        return {
+            "provider": llm.provider_of(gc),
+            "models": None,
+            "error": "У сертификата нет доступа к списку моделей — впишите имя вручную",
+        }
     except GigaChatError as exc:
         log.warning("список моделей недоступен [%s]: %s", exc.code, exc)
         return {"provider": llm.provider_of(gc), "models": None, "error": exc.message}
