@@ -436,6 +436,34 @@
       <div class="conf-sync-counter" id="reindex-progress" hidden></div>
       <div class="console" id="reindex-console" aria-live="polite" aria-label="Журнал переиндексации" hidden></div>
 
+      <!-- Оценка качества ответов: прогон golden-набора через живой чат -->
+      <div id="eval-block" hidden>
+        <hr class="sep">
+        <span class="eyebrow">Оценка качества ответов</span>
+        <small class="hint">
+          Прогоняет набор эталонных вопросов через чат и считает метрики. Идёт под вашим
+          токеном и вашими настройками — значит меряет именно вашу конфигурацию.
+          Дорого: около 190 обращений к модели, несколько минут. Абсолютным числам судьи
+          верить нельзя — осмысленна только разница между двумя прогонами.
+        </small>
+        <div class="field">
+          <label for="eval-label">Метка прогона</label>
+          <input class="input" id="eval-label" placeholder="after-w5" value="baseline">
+          <small class="hint">Попадает в имя отчёта. Латиница, цифры, точка, дефис, подчёркивание.</small>
+        </div>
+        <div class="field">
+          <label for="eval-limit">Сколько пар</label>
+          <input class="input" id="eval-limit" type="number" min="0" step="1" value="0">
+          <small class="hint">0 — весь набор (47 пар). Начните с 5, чтобы проверить, что судья отвечает.</small>
+        </div>
+        <div class="section-actions">
+          <button type="button" class="btn ghost" id="eval-btn">Прогнать оценку</button>
+        </div>
+        <div class="conf-sync-counter" id="eval-progress" hidden></div>
+        <div class="console" id="eval-console" aria-live="polite" aria-label="Журнал прогона оценки" hidden></div>
+        <div class="section-actions" id="eval-reports" hidden></div>
+      </div>
+
       <!-- Пересоздание коллекции: разрушающая операция на весь кластер -->
       <div id="rebuild-block" hidden>
         <p class="warn-hint" id="rebuild-unavailable" hidden></p>

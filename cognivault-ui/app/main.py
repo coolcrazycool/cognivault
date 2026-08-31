@@ -28,6 +28,7 @@ from .routes import (
     config_routes,
     confluence_routes,
     env_routes,
+    eval_routes,
     feedback_routes,
     history_routes,
     upload_routes,
@@ -135,6 +136,10 @@ def create_app() -> FastAPI:
     # Index maintenance (reindex / collection rebuild). Both modes: the operator
     # has no shell or vector-DB access, so the drawer is the only surface.
     app.include_router(admin_routes.router, dependencies=auth)
+    # Прогон харнесса оценки. Запускать его надо ИЗНУТРИ пода (снаружи закрытого
+    # контура нет ни UI, ни mTLS-эндпоинта судьи), а прав на kubectl exec у того,
+    # кто читает отчёты, может не быть вовсе — кнопка снимает это ограничение.
+    app.include_router(eval_routes.router, dependencies=auth)
     # Confluence source: per-user data, registered in BOTH modes behind the same
     # bearer-token gate. The CONFLUENCE_ENABLED admin flag (default on) lets a
     # server deployment turn the surface off entirely.

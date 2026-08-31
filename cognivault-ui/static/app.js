@@ -25,6 +25,7 @@
     collection: null,      // last successful GET /api/admin/collection
     reindexJob: null,      // jobId of the vault reindex we are watching
     reindexTimer: null,    // setTimeout handle of the reindex poll loop
+    evalTimer: null,       // то же для опроса прогона оценки
     reindexBusy: false,    // a start request is in flight (double-click guard)
     reindexWatching: false, // we saw this job running → announce its result
     rebuildJob: null,      // jobId of the collection rebuild we are watching
@@ -137,6 +138,13 @@
     reindexBtn: $("reindex-btn"),
     reindexProgress: $("reindex-progress"),
     reindexConsole: $("reindex-console"),
+    evalBlock: $("eval-block"),
+    evalBtn: $("eval-btn"),
+    evalLabel: $("eval-label"),
+    evalLimit: $("eval-limit"),
+    evalProgress: $("eval-progress"),
+    evalConsole: $("eval-console"),
+    evalReports: $("eval-reports"),
     rebuildBlock: $("rebuild-block"),
     rebuildUnavailable: $("rebuild-unavailable"),
     rebuildControls: $("rebuild-controls"),
@@ -435,6 +443,9 @@
   }
 
   async function refreshStatus(envSettingUp) {
+    // Раздел оценки живёт своим статусом и не должен зависеть от того, дошёл ли
+    // /api/status: он про харнесс в образе, а не про связь с бэкендом.
+    refreshEvalSection();
     let st;
     try {
       st = await apiGet("/api/status");
@@ -1670,6 +1681,111 @@
     dom.reindexProgress.textContent = bits.join(" · ");
   }
 
+  /* ---- прогон оценки качества ---- */
+
+  // Раздел показывается, только если харнесс есть в образе: на сборке без него
+  // кнопка вела бы в 501, а пустая кнопка хуже отсутствующей.
+  async function refreshEvalSection() {
+    if (!dom.evalBlock) return;
+    let st;
+    try {
+      st = await apiGet("/api/eval/status");
+    } catch (e) {
+      dom.evalBlock.hidden = true;
+      return;
+    }
+    dom.evalBlock.hidden = !st.available;
+    if (!st.available) return;
+    renderEvalReports(st.reports || []);
+    if (st.job) {
+      renderEvalJob(st.job);
+      // Прогон переживает перезагрузку страницы — подхватываем его опрос.
+      if (st.job.status === "running") pollEval();
+    }
+  }
+
+  function renderEvalReports(names) {
+    if (!dom.evalReports) return;
+    dom.evalReports.innerHTML = "";
+    if (!names.length) { dom.evalReports.hidden = true; return; }
+    names.forEach((n) => {
+      const a = el("a", "btn ghost");
+      a.textContent = "Скачать " + n;
+      a.href = "/api/eval/report?name=" + encodeURIComponent(n);
+      a.setAttribute("download", n);
+      dom.evalReports.appendChild(a);
+    });
+    dom.evalReports.hidden = false;
+  }
+
+  function renderEvalJob(job) {
+    if (!dom.evalProgress) return;
+    const mins = Math.floor((job.elapsed_sec || 0) / 60);
+    const secs = (job.elapsed_sec || 0) % 60;
+    const clock = mins ? mins + " мин " + secs + " с" : secs + " с";
+    const bits = ["Прогон «" + job.label + "»"];
+    if (job.status === "running") bits.push("идёт " + clock + " — страницу можно закрыть");
+    else if (job.status === "completed") bits.push("готов за " + clock);
+    else bits.push("не удался за " + clock + (job.error ? ": " + job.error : ""));
+    dom.evalProgress.hidden = false;
+    dom.evalProgress.textContent = bits.join(" · ");
+
+    // Лог перерисовываем целиком: сервер отдаёт хвост, а не приращение, и
+    // склеивать их на клиенте значило бы дублировать строки при каждом опросе.
+    if (dom.evalConsole) {
+      dom.evalConsole.innerHTML = "";
+      (job.log || []).forEach((line) => indexLog(dom.evalConsole, "info", line));
+    }
+    if (dom.evalBtn) {
+      dom.evalBtn.disabled = job.status === "running";
+      dom.evalBtn.textContent = job.status === "running" ? "Прогон идёт…" : "Прогнать оценку";
+    }
+  }
+
+  function stopEvalPoll() {
+    if (state.evalTimer) clearTimeout(state.evalTimer);
+    state.evalTimer = null;
+  }
+
+  async function pollEval() {
+    stopEvalPoll();
+    let st;
+    try {
+      st = await apiGet("/api/eval/status");
+    } catch (e) {
+      if (!e.handled) indexLog(dom.evalConsole, "error", "Статус недоступен: " + e.message);
+      return;
+    }
+    if (!st.job) return;
+    renderEvalJob(st.job);
+    renderEvalReports(st.reports || []);
+    if (st.job.status === "running") {
+      // Раз в 5 секунд: прогон идёт минутами, чаще опрашивать незачем.
+      state.evalTimer = setTimeout(pollEval, 5000);
+    } else {
+      toast(st.job.status === "completed" ? "ok" : "err",
+            st.job.status === "completed" ? "Прогон завершён" : "Прогон не удался",
+            st.job.error || "Отчёты внизу раздела");
+    }
+  }
+
+  async function startEval() {
+    const label = (dom.evalLabel && dom.evalLabel.value.trim()) || "baseline";
+    const limit = dom.evalLimit ? parseInt(dom.evalLimit.value, 10) || 0 : 0;
+    const many = limit === 0 || limit > 10;
+    if (many && !confirm(
+      "Прогон сделает около 190 обращений к модели и займёт несколько минут. Запустить?"
+    )) return;
+    if (dom.evalConsole) { dom.evalConsole.innerHTML = ""; dom.evalConsole.hidden = true; }
+    try {
+      const job = await apiSend("/api/eval/run", "POST", { label: label, limit: limit });
+      renderEvalJob(job);
+      pollEval();
+    } catch (e) {
+      if (!e.handled) toast("err", "Не удалось запустить", e.message);
+    }
+  }
+
   function stopReindexPoll() {
     if (state.reindexTimer) clearTimeout(state.reindexTimer);
     state.reindexTimer = null;
@@ -2482,6 +2598,7 @@
 
     // index maintenance — same null-guard discipline as the Confluence block
     if (dom.reindexBtn) dom.reindexBtn.addEventListener("click", startReindex);
+    if (dom.evalBtn) dom.evalBtn.addEventListener("click", startEval);
     if (dom.rebuildBtn) dom.rebuildBtn.addEventListener("click", openRebuildConfirm);
     if (dom.rebuildCancel) dom.rebuildCancel.addEventListener("click", closeRebuildConfirm);
     if (dom.rebuildGo) dom.rebuildGo.addEventListener("click", startRebuild);
