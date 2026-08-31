@@ -44,7 +44,9 @@ def _frag(i: int, *, rank: int | None = None, text: str = "") -> dict:
     }
 
 
-_RCFG = {"grader_threshold": 4, "grader_keep_top": 2}
+# Страховка теперь одна и только для НЕ забракованных (оценка >= 3 либо нет
+# оценки вовсе) — см. `_INSURANCE_MIN_GRADE`.
+_RCFG = {"grader_threshold": 4, "grader_keep_top": 1}
 
 
 def _install_complete_json(monkeypatch, handler):
@@ -88,8 +90,9 @@ def test_select_keeps_only_above_threshold():
     kept, refused = rag_pipeline.select(cands, [5, 2, 4, 1], _RCFG)
 
     assert refused is False
-    # 5 и 4 прошли по порогу; doc2 добран страховкой «топ-2 по ранку».
-    assert [c["path"] for c in kept] == ["doc1.md", "doc3.md", "doc2.md"]
+    # 5 и 4 прошли по порогу. doc2 (оценка 2) страховкой НЕ добирается: судья
+    # его видел и отверг — раньше он проезжал безусловно и давал лишние пункты.
+    assert [c["path"] for c in kept] == ["doc1.md", "doc3.md"]
 
 
 def test_select_falls_back_to_three_when_nothing_reaches_threshold():
@@ -118,21 +121,33 @@ def test_select_insurance_does_not_override_a_total_refusal():
     он забраковал всё — темы просто нет в базе, и два верхних по рангу заведомо
     нерелевантных фрагмента дадут галлюцинацию вместо честного «не нашлось».
     """
-    assert _RCFG["grader_keep_top"] == 2
+    assert _RCFG["grader_keep_top"] == 1
     cands = [_frag(i) for i in range(1, 6)]
 
     assert rag_pipeline.select(cands, [1, 1, 2, 1, 2], _RCFG) == ([], True)
 
 
-def test_select_insurance_applies_once_keep_is_non_empty():
-    """Судья оставил хоть что-то → топ-2 по ранку добираются и доживают до контекста."""
+def test_insurance_skips_fragments_the_judge_rejected():
+    """Единицы страховкой не добираются: судья их ВИДЕЛ и забраковал."""
     cands = [_frag(i) for i in range(1, 6)]
     kept, refused = rag_pipeline.select(cands, [1, 1, 1, 1, 4], _RCFG)
 
     assert refused is False
-    paths = [c["path"] for c in kept]
-    assert paths[0] == "doc5.md"  # прошедший по порогу — первым
-    assert sorted(paths[1:]) == ["doc1.md", "doc2.md"]
+    assert [c["path"] for c in kept] == ["doc5.md"]
+
+
+def test_insurance_saves_the_top_ranked_survivor():
+    """Ради чего страховка и нужна: топ-1 поиска с приличной оценкой не теряется.
+
+    Разбор реального диалога: страница, стоявшая на поиске ПЕРВОЙ, вылетала из
+    ответа из-за одной ошибки судьи, потому что страховку сняли совсем.
+    """
+    cands = [_frag(i) for i in range(1, 6)]
+    # doc1 — топ по рангу, оценка 3: по порогу 4 не проходит, но и не забракован.
+    kept, refused = rag_pipeline.select(cands, [3, 1, 1, 1, 5], _RCFG)
+
+    assert refused is False
+    assert [c["path"] for c in kept] == ["doc5.md", "doc1.md"]
 
 
 def test_select_insurance_is_not_evicted_by_the_cap():
@@ -142,15 +157,17 @@ def test_select_insurance_is_not_evicted_by_the_cap():
     занизил. Без резервирования слотов они уходили в хвост и срезались.
     """
     cands = [_frag(i) for i in range(1, 9)]
-    grades = [1, 1, 5, 5, 5, 5, 5, 5]
+    # doc1 — топ по рангу с оценкой 3: страхуется. doc2 — единица: нет.
+    grades = [3, 1, 5, 5, 5, 5, 5, 5]
     kept, refused = rag_pipeline.select(cands, grades, _RCFG)
 
     assert refused is False
     assert len(kept) == 5
     paths = [c["path"] for c in kept]
-    assert "doc1.md" in paths and "doc2.md" in paths
-    # Слоты страховки зарезервированы, остальное — лучшие по оценке.
-    assert paths == ["doc3.md", "doc4.md", "doc5.md", "doc1.md", "doc2.md"]
+    assert "doc1.md" in paths, "застрахованный вытеснен капом"
+    assert "doc2.md" not in paths, "забракованный проехал страховкой"
+    # Слот страховки зарезервирован, остальное — лучшие по оценке.
+    assert paths == ["doc3.md", "doc4.md", "doc5.md", "doc6.md", "doc1.md"]
 
 
 # --------------------------------------------------------------------------- #
@@ -203,15 +220,15 @@ def test_select_refuses_only_when_every_candidate_is_graded():
 
 
 def test_select_always_keeps_top_by_search_rank():
-    """Правило 4: топ-2 по ранку проходят, даже если судья их занизил."""
+    """Правило 4: топ по ранку проходит, если судья его не забраковал."""
     cands = [_frag(i) for i in range(1, 6)]
-    # Судья оставил только пятый; первые два — «единицы».
-    kept, refused = rag_pipeline.select(cands, [1, 1, 1, 1, 5], _RCFG)
+    # Судья оставил пятый; первый — тройка (не отвергнут), второй — единица.
+    kept, refused = rag_pipeline.select(cands, [3, 1, 1, 1, 5], _RCFG)
 
     assert refused is False
     paths = [c["path"] for c in kept]
     assert paths[0] == "doc5.md"  # лучшая оценка — первой
-    assert set(paths) == {"doc5.md", "doc1.md", "doc2.md"}
+    assert set(paths) == {"doc5.md", "doc1.md"}
 
 
 def test_select_sorts_by_grade_then_rank_and_caps_at_five():
@@ -1084,10 +1101,11 @@ def test_partial_grader_failure_still_answers(monkeypatch):
 
 
 def test_keep_top_reaches_the_context_despite_the_cap(monkeypatch):
-    """Судья оставил шесть «пятёрок», занизив топ-2 по рангу — те всё равно в контексте.
+    """Застрахованный топ-1 по рангу не вытесняется капом в пять блоков.
 
-    Раньше добранные по рангу уходили в хвост сортировки по оценке и срезались
-    капом в пять блоков.
+    Раньше добранный по рангу уходил в хвост сортировки по оценке и срезался.
+    Страхуется только НЕ забракованный: doc1 с тройкой — да, doc2 с единицей —
+    нет.
     """
     hits = [_frag(i) for i in range(1, 9)]
     _install_retrieval(monkeypatch, hits)
@@ -1096,7 +1114,10 @@ def test_keep_top_reaches_the_context_despite_the_cap(monkeypatch):
         if _is_condense(prompt):
             return {"intent": "kb_question", "standalone_question": "вопрос"}
         return {
-            "grades": [{"id": i, "score": 1 if i <= 2 else 5} for i in range(1, 9)]
+            "grades": [
+                {"id": i, "score": 3 if i == 1 else 1 if i == 2 else 5}
+                for i in range(1, 9)
+            ]
         }
 
     _install_complete_json(monkeypatch, handler)
@@ -1106,7 +1127,8 @@ def test_keep_top_reaches_the_context_despite_the_cap(monkeypatch):
     assert ctx.answer_override is None
     paths = [s["path"] for s in ctx.sources]
     assert len(paths) == 5
-    assert "doc1.md" in paths and "doc2.md" in paths
+    assert "doc1.md" in paths, "застрахованный вытеснен капом"
+    assert "doc2.md" not in paths, "забракованный проехал страховкой"
     assert "### Источник 5" in ctx.user_message["content"]
 
 
@@ -1129,11 +1151,11 @@ def test_grades_reach_sources_and_candidates(monkeypatch):
 
     ctx = _build("вопрос про базу знаний", _history())
 
-    # Сортировка по оценке: doc3 (5) → doc1 (4) → doc2 (добран как топ-2 по ранку).
+    # Сортировка по оценке: doc3 (5) → doc1 (4). doc2 с единицей страховкой не
+    # добирается — судья его видел и отверг.
     assert [(s["path"], s["grade"]) for s in ctx.sources] == [
         ("doc3.md", 5),
         ("doc1.md", 4),
-        ("doc2.md", 1),
     ]
     assert len(ctx.candidates) == 3
     assert ctx.candidates[0] == {

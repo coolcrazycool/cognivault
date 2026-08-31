@@ -95,6 +95,11 @@ _MAX_SELECTED = 5
 # Second-chance threshold when nothing clears `grader_threshold`.
 _FALLBACK_GRADE = 3
 
+# Нижняя планка для страховки «топ по сырому рангу». Судья мог ошибиться, но
+# если он поставил 1-2, он фрагмент ВИДЕЛ и отверг — тащить такое в контекст
+# значит возвращать баг, из-за которого в ответы попадали лишние пункты.
+_INSURANCE_MIN_GRADE = 3
+
 # Grade for a fragment the judge SAW and chose not to list.
 #
 # A missing id used to be indistinguishable from a failed batch, so both became
@@ -359,8 +364,19 @@ def _preview(fragment: dict[str, Any], question: str = "") -> str:
     the ``[N]`` markers stay unambiguous. A missing ``content_kind`` (older
     backend, semantic fallback) or an unparseable table degrades to head+tail.
     """
+    # Судить надо то, что УЕДЕТ в контекст. При group_by_section бэкенд отдаёт
+    # `section_text` — целый раздел, — а в контекст его и кладёт; `text` же
+    # содержит лишь чанк-победитель секции. Для длинной таблицы победителем
+    # регулярно оказывается вводная заглушка вида «Стриминговые потоки ПРОМ.
+    # Таблица (часть 1 из 2)» на полторы строки, без единой строки данных:
+    # грейдер видел пустышку, честно ставил низкую оценку и выбрасывал раздел,
+    # который на поиске стоял первым. Воспроизведено на реальном диалоге.
+    section = str(fragment.get("section_text", "") or "")
     text = str(fragment.get("text", "") or "")
-    body = _strip_indexer_prefix(text, str(fragment.get("section_path", "") or ""))
+    # Чанк идёт первым: он объясняет, ПОЧЕМУ этот раздел нашёлся. Хвост раздела
+    # добавляет то, чего в чанке нет, — сами данные.
+    raw = f"{text}\n{section}" if section and section != text else text
+    body = _strip_indexer_prefix(raw, str(fragment.get("section_path", "") or ""))
 
     clipped: str | None = None
     if str(fragment.get("content_kind", "") or "") == "table_rows":
@@ -441,6 +457,37 @@ class Condensed(NamedTuple):
     question: str
     scope: str = corpus_scope.DEFAULT_SCOPE
     shape: str = DEFAULT_SHAPE
+
+
+# Форма ответа, распознанная БЕЗ вызова модели.
+#
+# `answer_shape` приходит из condense, а condense на первой реплике пропущен
+# (`condense_first_turn=False`) — то есть на самом частом способе задать вопрос
+# маршрутизация по форме не работала вовсе. Эти якоря её включают на любом ходе
+# и ноль токенов стоят. Список намеренно короткий: ловим бесспорные случаи,
+# спорное отдаём модели.
+_LIST_ANCHORS = re.compile(
+    r"\b(?:каки[ех]|перечисл|список|списк|все\s|всех\s|полный\s+перечень|перечень)",
+    re.IGNORECASE,
+)
+_PROCEDURE_ANCHORS = re.compile(
+    r"\b(?:как\s+(?:настро|заполн|запуст|получ|подключ)|шаг[иов]|порядок|инструкц|принцип\s+запол)",
+    re.IGNORECASE,
+)
+
+
+def detect_shape(question: str) -> str:
+    """Форма ответа по тексту вопроса, без обращения к модели.
+
+    Проверяется ДО процедуры: «какие шаги» — это всё-таки перечисление, и
+    расширять окно под него правильно.
+    """
+    q = str(question or "")
+    if _LIST_ANCHORS.search(q):
+        return "list"
+    if _PROCEDURE_ANCHORS.search(q):
+        return "procedure"
+    return DEFAULT_SHAPE
 
 
 def _parse_shape(value: Any) -> str:
@@ -743,8 +790,18 @@ def select(
     if not keep:
         return [], True
 
-    # Step 4: only now does the rank insurance join in.
-    insured = set(sorted(range(len(candidates)), key=rank_of)[:keep_top])
+    # Step 4: only now does the rank insurance join in — and only for candidates
+    # the judge did not actively reject. Unconditional insurance was how a
+    # fragment graded 1 ("не связан с вопросом") reached the context; no
+    # insurance at all was how a page that ranked FIRST in search left the answer
+    # on a single judge mistake. One slot, and only above `_INSURANCE_MIN_GRADE`.
+    def insurable(i: int) -> bool:
+        g = _grade_at(grades, i)
+        return g is None or g >= _INSURANCE_MIN_GRADE
+
+    insured = set(
+        [i for i in sorted(range(len(candidates)), key=rank_of) if insurable(i)][:keep_top]
+    )
     pool = keep | insured
 
     def sort_key(i: int) -> tuple[int, int]:
