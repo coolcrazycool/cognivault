@@ -1653,9 +1653,17 @@
   }
 
   function renderReindexProgress(st) {
-    const done = num(st.filesProcessed) || "0";
+    const done = num(st.filesProcessed) || 0;
     const total = num(st.totalFiles);
-    const bits = ["Обработано " + done + (total != null ? " из " + total : "") + " файлов"];
+    // `totalFiles` наполняется только по завершении сканирования вольта, а
+    // счётчик обработанных растёт с первого же события — отсюда «Обработано 120
+    // из 0», которое читается как сломанный счётчик. Пока знаменателя нет,
+    // честнее не показывать его вовсе и сказать, что идёт подсчёт.
+    const knownTotal = total != null && total > 0;
+    const bits = [
+      "Обработано " + done + (knownTotal ? " из " + total : "") + " файлов",
+    ];
+    if (!knownTotal && st.status === "running") bits.push("идёт подсчёт файлов");
     if (st.errorCount) bits.push("ошибок " + st.errorCount);
     if (st.status === "running") bits.push("задача идёт на сервере — окно можно закрыть");
     dom.reindexProgress.hidden = false;

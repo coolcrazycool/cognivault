@@ -45,7 +45,7 @@ Namespace: `ci05490208-oasis-cognivault`.
 > работают оба. (Требование «бэкенд не позже UI» из прошлых релизов относилось к
 > `GET /api/vault/catalog`, который приехал ещё в `sha-8665e36`.)
 >
-> ⚠️ **Этот релиз меняет модель чата: GigaChat → KitAI (`glm-5.2`).** Переключатель —
+> ⚠️ **Этот релиз меняет модель чата: GigaChat → KitAI (`glm-5.1`).** Переключатель —
 > ключ `CHAT_PROVIDER` в ConfigMap UI; полный набор новых ключей и путь отката в
 > одну строку — в разделе «Что нового». Эмбеддинги НЕ затронуты: их считает бэкенд
 > своим провайдером, и смена эмбеддера означала бы новую коллекцию и полную
@@ -74,7 +74,7 @@ Namespace: `ci05490208-oasis-cognivault`.
 > в payload добавилось поле `archived`, а payload-индексы ставятся только при создании
 > коллекции — раздел 3.7. Полный список новых ключей ниже.
 
-#### Модель чата: GigaChat → KitAI (`glm-5.2`)
+#### Модель чата: GigaChat → KitAI (`glm-5.1`)
 
 Чат теперь ходит в платформу KitAI вместо прямого mTLS-эндпоинта GigaChat.
 Реализация своя, без `sber-kitai-sdk-langchain`: вендорский адаптер наследует
@@ -95,7 +95,7 @@ HTTP-вызовов. Плюс он синхронный, а в его цикле
 |------|----------|-------|
 | `CHAT_PROVIDER` | `kitai` | `gigachat` — откат на прежний транспорт |
 | `KITAI_HOST` | `https://hcscr-ift.delta.sbrf.ru` | **без** `/v1` — версия зашита в пути |
-| `KITAI_MODEL` | `glm-5.2` | правится без пересборки |
+| `KITAI_MODEL` | `glm-5.1` | правится без пересборки. Проверено: `glm-5.2` на этом контуре не роутится |
 | `KITAI_SYSTEM_NAME` | `csp_lab` | → `x-identification-system` |
 | `KITAI_MODULE_NAME` | `csp_lab_antifraud_edge` | → `x-identification-module` |
 | `KITAI_PROFANITY_CHECK` | `false` | |
@@ -1222,7 +1222,7 @@ kubectl apply -n $NS -f deploy/dropapp/06-ingress.yaml
 | `GIGACHAT_MODEL_CONTEXT_TOKENS` | `32768` | контекст модели, из него считается тримминг истории |
 | `CHAT_PROVIDER` | **`kitai`** | транспорт чата по умолчанию; `gigachat` — откат на прямой mTLS-клиент со стримингом. **Пользователь может переопределить из UI** — см. врезку в «Что нового» |
 | `KITAI_HOST` | `https://hcscr-ift.delta.sbrf.ru` | **без** `/v1`: версия зашита в пути (`/api/v1/query/...`); тот же хост должен быть в `07-serviceentry-egress.yaml` |
-| `KITAI_MODEL` | `glm-5.2` | модель генерации ответа на KitAI; **правится пользователем из UI** |
+| `KITAI_MODEL` | `glm-5.1` | модель генерации ответа на KitAI; **правится пользователем из UI**. `glm-5.2` на IFT принимается платформой и падает у неё на апстриме (503) — роутинга под этим именем нет |
 | `KITAI_SYSTEM_NAME` | `csp_lab` | заголовок `x-identification-system` |
 | `KITAI_MODULE_NAME` | `csp_lab_antifraud_edge` | заголовок `x-identification-module` |
 | `KITAI_PROFANITY_CHECK` | `false` | проверка на нецензурное на стороне платформы |

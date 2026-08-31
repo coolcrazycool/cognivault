@@ -38,7 +38,7 @@ data:
   CHAT_PROVIDER: "kitai"
   # Без /v1 — версия зашита в пути (/api/v1/query/...).
   KITAI_HOST: "https://hcscr-ift.delta.sbrf.ru"
-  KITAI_MODEL: "glm-5.2"
+  KITAI_MODEL: "glm-5.1"
   # Уезжает в x-identification-system / x-identification-module.
   KITAI_SYSTEM_NAME: "csp_lab"
   KITAI_MODULE_NAME: "csp_lab_antifraud_edge"
