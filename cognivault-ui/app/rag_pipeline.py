@@ -32,7 +32,14 @@ log = logging.getLogger("cognivault-ui.rag_pipeline")
 # Tunables
 # --------------------------------------------------------------------------- #
 
-# Both hidden calls are latency on the critical path — keep the leash short.
+# Оба скрытых вызова — латентность на критическом пути, поэтому поводок короткий.
+# Но это ДЕФОЛТЫ, а не константы: они подбирались под стриминговый GigaChat,
+# который начинает отвечать сразу. KitAI ставит запрос в очередь и опрашивает
+# результат — минимум 4 секунды даже на пустом контуре, а под нагрузкой больше.
+# С жёсткими 10/20 грейдер на KitAI отваливался по таймауту на КАЖДОМ ходе,
+# то есть отбор фрагментов не работал вовсе, и в логе это выглядело как
+# «вызов не удался ()». Значения правятся из конфига (`rag.condense_timeout`,
+# `rag.grader_timeout`).
 _CONDENSE_TIMEOUT = 10.0
 _GRADE_TIMEOUT = 20.0
 
@@ -574,11 +581,14 @@ async def condense(
         data = await _call(
             _condense_prompt(question, history),
             gcfg,
-            timeout=_CONDENSE_TIMEOUT,
+            timeout=float(rcfg.get("condense_timeout") or _CONDENSE_TIMEOUT),
             max_tokens=512,
         )
     except Exception as exc:  # noqa: BLE001 — any failure => raw question
-        log.warning("condense: вызов не удался (%s) — вопрос идёт как есть", exc)
+        log.warning(
+            "condense: вызов не удался (%s: %s) — вопрос идёт как есть",
+            type(exc).__name__, exc or "без текста",
+        )
         return _fallback(question)
 
     if not isinstance(data, dict):
@@ -619,8 +629,15 @@ def _parse_grades(data: dict[str, Any], count: int) -> list[int | None]:
     return out
 
 
+def _grade_timeout(rcfg: dict[str, Any] | None) -> float:
+    return float((rcfg or {}).get("grader_timeout") or _GRADE_TIMEOUT)
+
+
 async def _grade_batch(
-    question: str, fragments: list[dict[str, Any]], gcfg: dict[str, Any] | None
+    question: str,
+    fragments: list[dict[str, Any]],
+    gcfg: dict[str, Any] | None,
+    rcfg: dict[str, Any] | None = None,
 ) -> list[int | None]:
     """Grade one batch.
 
@@ -634,11 +651,17 @@ async def _grade_batch(
         data = await _call(
             _grade_prompt(question, fragments),
             gcfg,
-            timeout=_GRADE_TIMEOUT,
+            timeout=_grade_timeout(rcfg),
             max_tokens=1024,
         )
     except Exception as exc:  # noqa: BLE001 — grading is best-effort
-        log.warning("grader: вызов не удался (%s) — отбор пропущен", exc)
+        # Тип, а не только текст: у `asyncio.TimeoutError` пустой `str()`, и в
+        # логе получалось «вызов не удался ()» — сообщение, по которому нельзя
+        # отличить таймаут от обрыва связи. Наблюдалось на прогоне оценки.
+        log.warning(
+            "grader: вызов не удался (%s: %s) — отбор пропущен",
+            type(exc).__name__, exc or "без текста",
+        )
         return [None] * len(fragments)
     if not isinstance(data, dict):
         log.warning("grader: ответ не объект — отбор пропущен")
@@ -687,7 +710,7 @@ async def grade(
         return [None] * len(candidates)
 
     if len(candidates) <= _BATCH_THRESHOLD:
-        return await _grade_batch(question, candidates, gcfg)
+        return await _grade_batch(question, candidates, gcfg, rcfg)
 
     n_batches = int(math.ceil(len(candidates) / _BATCH_SIZE))
     batches: list[list[dict[str, Any]]] = [[] for _ in range(n_batches)]
@@ -697,7 +720,7 @@ async def grade(
         origins[i % n_batches].append(i)
 
     results = await asyncio.gather(
-        *(_grade_batch(question, batch, gcfg) for batch in batches)
+        *(_grade_batch(question, batch, gcfg, rcfg) for batch in batches)
     )
     out: list[int | None] = [None] * len(candidates)
     for indices, part in zip(origins, results):

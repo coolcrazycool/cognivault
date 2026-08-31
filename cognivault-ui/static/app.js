@@ -1709,13 +1709,45 @@
     dom.evalReports.innerHTML = "";
     if (!names.length) { dom.evalReports.hidden = true; return; }
     names.forEach((n) => {
-      const a = el("a", "btn ghost");
-      a.textContent = "Скачать " + n;
-      a.href = "/api/eval/report?name=" + encodeURIComponent(n);
-      a.setAttribute("download", n);
-      dom.evalReports.appendChild(a);
+      const b = el("button", "btn ghost");
+      b.type = "button";
+      b.textContent = "Скачать " + n;
+      b.addEventListener("click", () => downloadReport(n, b));
+      dom.evalReports.appendChild(b);
     });
     dom.evalReports.hidden = false;
+  }
+
+  // Кнопка, а не <a href>: маршрут закрыт bearer-токеном, а браузерная навигация
+  // по ссылке шлёт куки и НЕ шлёт Authorization — такая ссылка молча отдавала бы
+  // 401 (проверено на живом образе). Поэтому качаем fetch-ем с токеном и
+  // отдаём файл через object URL.
+  async function downloadReport(name, btn) {
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Скачиваю…";
+    try {
+      const res = await fetch("/api/eval/report?name=" + encodeURIComponent(name), {
+        headers: authHeaders(),
+      });
+      if (res.status === 401 && isServerMode()) { handleUnauthorized(); return; }
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Отзываем не сразу: Safari успевает начать загрузку не мгновенно.
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    } catch (e) {
+      toast("err", "Не удалось скачать", e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
   }
 
   function renderEvalJob(job) {

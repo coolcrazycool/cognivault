@@ -1453,3 +1453,35 @@ def test_list_shape_widens_the_section_window(monkeypatch):
     )
 
     assert seen["section_max_chars"] > 4000
+
+
+# --------------------------------------------------------------------------- #
+# Поводки скрытых вызовов настраиваются
+# --------------------------------------------------------------------------- #
+
+
+def test_hidden_call_timeouts_are_configurable():
+    """Дефолты подобраны под стриминговый GigaChat, а KitAI отвечает через очередь.
+
+    С жёсткими 10/20 грейдер на KitAI отваливался по таймауту на КАЖДОМ ходе —
+    видно на прогоне оценки: «grader: вызов не удался () — отбор пропущен».
+    """
+    assert rag_pipeline._grade_timeout({}) == rag_pipeline._GRADE_TIMEOUT
+    assert rag_pipeline._grade_timeout({"grader_timeout": 90}) == 90.0
+    # Пустое/нулевое значение не должно превращаться в мгновенный таймаут.
+    assert rag_pipeline._grade_timeout({"grader_timeout": 0}) == rag_pipeline._GRADE_TIMEOUT
+    assert rag_pipeline._grade_timeout(None) == rag_pipeline._GRADE_TIMEOUT
+
+
+def test_timeout_failure_names_the_exception_type(monkeypatch, caplog):
+    """У `asyncio.TimeoutError` пустой `str()` — без типа лог бесполезен."""
+    async def hang(messages, gcfg, **kwargs):
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(rag_pipeline.llm, "complete_json", hang, raising=False)
+
+    with caplog.at_level(logging.WARNING):
+        grades = asyncio.run(rag_pipeline.grade("вопрос", [_frag(1)], {}, {}))
+
+    assert grades == [None]
+    assert "TimeoutError" in caplog.text

@@ -198,6 +198,12 @@ def server_config() -> dict[str, Any]:
             "corpus_tree_enabled": _env_bool(
                 "RAG_CORPUS_TREE_ENABLED", bool(rag["corpus_tree_enabled"])
             ),
+            "condense_timeout": _env_float(
+                "RAG_CONDENSE_TIMEOUT", float(rag["condense_timeout"])
+            ),
+            "grader_timeout": _env_float(
+                "RAG_GRADER_TIMEOUT", float(rag["grader_timeout"])
+            ),
             "grader_enabled": _env_bool(
                 "RAG_GRADER_ENABLED", bool(rag["grader_enabled"])
             ),
@@ -297,6 +303,8 @@ USER_EDITABLE_KEYS: tuple[str, ...] = (
     "rag.corpus_tree_enabled",
     "rag.grader_enabled",
     "rag.grader_threshold",
+    "rag.condense_timeout",
+    "rag.grader_timeout",
     "rag.grader_keep_top",
     "rag.rerank_candidates",
     "prompts.system",
