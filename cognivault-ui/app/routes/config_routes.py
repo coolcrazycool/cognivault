@@ -162,6 +162,13 @@ def _public_config(cfg: dict[str, Any]) -> dict[str, Any]:
         "mode": "server",
         "gigachat": {
             "model": gc.get("model"),
+            # Which transport actually answers, and its model. Without both, the
+            # form showed `model` — inert while the provider is `kitai` — and
+            # `kitai_model` was PUT-able but not readable, i.e. exactly the
+            # "evaporates on reload" case this docstring warns about.
+            # `provider` is admin-locked, so the UI renders it read-only.
+            "provider": gc.get("provider"),
+            "kitai_model": gc.get("kitai_model"),
             "temperature": gc.get("temperature"),
             "max_tokens": gc.get("max_tokens"),
             "model_context_tokens": gc.get("model_context_tokens"),

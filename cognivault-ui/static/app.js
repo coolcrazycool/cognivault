@@ -795,7 +795,27 @@
    * "int"/"number" become numbers, "bool" a boolean. Each section saves on its
    * own button and PUTs exactly one subtree of /api/config.
    */
-  const MODEL_FIELDS = [
+  // The «Модель» field edits whichever key the ACTIVE transport reads. Two
+  // separate fields would ask the user to know which one is live; a fixed `model`
+  // showed `GigaChat-3-Ultra-preview` while KitAI answered with something else,
+  // and edits to it did nothing at all.
+  function modelKeyFor(gigachat) {
+    return (gigachat && gigachat.provider) === "kitai" ? "kitai_model" : "model";
+  }
+
+  // Name the transport under the field. Without it «Модель» is ambiguous the
+  // moment there is more than one, and the value silently belongs to whichever
+  // one happens to be active.
+  function describeProvider(gigachat) {
+    const node = document.getElementById("cfg-gc-model-hint");
+    if (!node) return;
+    const kitai = (gigachat && gigachat.provider) === "kitai";
+    node.textContent = kitai
+      ? "Модель на платформе KitAI, которая отвечает в чате. Ответ приходит целиком: потоковой печати у этого транспорта нет."
+      : "Идентификатор модели GigaChat, которая отвечает в чате";
+  }
+
+  let MODEL_FIELDS = [
     { key: "model", id: "cfg-gc-model", type: "text", label: "Модель" },
     { key: "temperature", id: "cfg-gc-temperature", type: "number", label: "Температура" },
     { key: "max_tokens", id: "cfg-gc-max-tokens", type: "int", label: "Максимум токенов в ответе" },
@@ -929,7 +949,11 @@
 
   function bindTuningForm() {
     const c = state.config || {};
+    // Re-point the model field before binding: the provider is only known once
+    // the server has answered.
+    MODEL_FIELDS[0].key = modelKeyFor(c.gigachat);
     bindFields(MODEL_FIELDS, "gigachat", c.gigachat);
+    describeProvider(c.gigachat);
     bindFields(RAG_FIELDS, "rag", c.rag);
     bindPrompts();
   }

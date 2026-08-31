@@ -386,3 +386,54 @@ def test_local_get_keeps_full_config_and_adds_contract_fields(tmp_path):
     assert body["prompts"]["system"] == config_routes._default_prompts()["system"]
     assert body["defaults"]["prompts"]["system"]
     assert body["warnings"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Активный провайдер и его модель видны в GET /api/config
+# --------------------------------------------------------------------------- #
+
+
+def test_server_config_exposes_provider_and_kitai_model(monkeypatch):
+    """`kitai_model` можно сохранить — значит его обязано быть видно обратно.
+
+    Регрессия: ключ лежал в USER_EDITABLE_KEYS, но `_server_config` его не
+    возвращал, и значение исчезало при перезагрузке страницы. Плюс форма
+    показывала `model` (GigaChat), пока в чате отвечал KitAI, — редактирование
+    этого поля не делало ничего.
+    """
+    from app.routes import config_routes
+
+    cfg = {
+        "gigachat": {
+            "provider": "kitai",
+            "model": "GigaChat-3-Ultra-preview",
+            "kitai_model": "glm-5.2",
+            "temperature": 0.2,
+            "max_tokens": 4096,
+            "model_context_tokens": 32768,
+        },
+        "rag": {},
+        "ui": {},
+    }
+    out = config_routes._public_config(cfg)
+
+    assert out["gigachat"]["provider"] == "kitai"
+    assert out["gigachat"]["kitai_model"] == "glm-5.2"
+
+
+def test_every_user_editable_gigachat_key_is_readable_back():
+    """Инвариант из докстринга роута, теперь проверяемый."""
+    from app import settings
+    from app.routes import config_routes
+
+    cfg = {
+        "gigachat": {k.split(".", 1)[1]: "x" for k in settings.USER_EDITABLE_KEYS
+                     if k.startswith("gigachat.")},
+        "rag": {},
+        "ui": {},
+    }
+    served = set(config_routes._public_config(cfg)["gigachat"])
+    editable = {k.split(".", 1)[1] for k in settings.USER_EDITABLE_KEYS
+                if k.startswith("gigachat.")}
+
+    assert editable <= served, f"PUT-абельно, но не читается назад: {sorted(editable - served)}"
