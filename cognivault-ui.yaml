@@ -43,6 +43,14 @@ data:
   KITAI_SYSTEM_NAME: "csp_lab"
   KITAI_MODULE_NAME: "csp_lab_antifraud_edge"
   KITAI_PROFANITY_CHECK: "false"
+  # Отдельный клиентский сертификат KitAI. ЗАКОММЕНТИРОВАН намеренно:
+  # пока ключи пусты, KitAI ходит сертификатом GigaChat — это текущее поведение,
+  # и раскомментировать их РАНЬШЕ, чем заведён секрет `cognivault-kitai-certs`,
+  # нельзя: том смонтирован как optional, файлов не будет, и чат ответит 400
+  # «Клиентский сертификат или ключ не найдены».
+  # Порядок: создать секрет → раскомментировать две строки → Restart rollout.
+  # KITAI_CERT_PATH: "/certs/kitai/client_crt.crt"
+  # KITAI_KEY_PATH: "/certs/kitai/client_key.key"
   # Бюджет ОЖИДАНИЯ ответа, не таймаут сокета: запрос стоит в очереди, а мы
   # опрашиваем результат. Скрытые вызовы (condense/грейдер) режут его своими
   # поводками в 10 и 20 с.
@@ -158,6 +166,11 @@ spec:
             - name: gigachat-certs
               mountPath: /certs
               readOnly: true
+            # Отдельный сертификат KitAI. Секрет `optional: true` — без него под
+            # поднимается, и KitAI идёт сертификатом GigaChat.
+            - name: kitai-certs
+              mountPath: /certs/kitai
+              readOnly: true
             - name: data
               mountPath: /data
           startupProbe:
@@ -189,6 +202,11 @@ spec:
               drop:
                 - ALL
       volumes:
+        - name: kitai-certs
+          secret:
+            secretName: cognivault-kitai-certs
+            optional: true
+            defaultMode: 0440
         - name: gigachat-certs
           secret:
             secretName: cognivault-gigachat-certs
