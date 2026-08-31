@@ -138,7 +138,7 @@ spec:
           # (пакет ghcr должен быть PUBLIC).
           # ВНИМАНИЕ: тег должен совпадать с deploy/dropapp/05-ui.yaml, и бэкенд катится
           # НЕ ПОЗЖЕ UI (см. комментарий у образа в cognivault.yaml).
-          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-980ab3e
+          image: sberosc.sigma.sbrf.ru/ghcr.io/coolcrazycool/cognivault-ui:sha-cebdf40
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
