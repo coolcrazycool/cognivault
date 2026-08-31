@@ -81,7 +81,7 @@ data:
   RAG_CONDENSE_ENABLED: "true"
   RAG_GRADER_ENABLED: "true"
   RAG_GRADER_THRESHOLD: "4"
-  RAG_GRADER_KEEP_TOP: "0"
+  RAG_GRADER_KEEP_TOP: "1"
   # Запускать вызов 1 (интент + condense) и на ПЕРВОЙ реплике диалога. Без него
   # первый ход не классифицируется вовсе: истории нет, condense коротит, и поле
   # охвата (document/corpus) на первом сообщении отсутствует. Цена ровно одна —

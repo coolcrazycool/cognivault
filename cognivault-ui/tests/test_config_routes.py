@@ -511,3 +511,47 @@ def test_switching_provider_does_not_clobber_the_other_model():
 
     gc["provider"] = "gigachat"
     assert llm.config_for(gc).model == "GigaChat-3-Ultra-preview"
+
+
+# --------------------------------------------------------------------------- #
+# Манифест не должен молча переопределять дефолты кода
+# --------------------------------------------------------------------------- #
+
+
+def test_prod_configmap_matches_the_code_defaults_for_tuned_keys():
+    """ENV из ConfigMap побеждает дефолт в коде — значит они обязаны совпадать.
+
+    Поймано вживую: `grader_keep_top` подняли в коде с 0 до 1, а в манифесте
+    осталось "0". Правка дефолта не доехала бы до прода, и никто бы не заметил —
+    поведение просто осталось бы прежним.
+
+    Проверяются только ключи, которые мы СОЗНАТЕЛЬНО настраивали в этой ветке;
+    остальные могут расходиться намеренно (окружение стенда).
+    """
+    import pathlib
+
+    import yaml
+
+    from app.config import DEFAULT_CONFIG
+
+    manifest = pathlib.Path(__file__).resolve().parents[2] / "deploy" / "dropapp" / "03-configmap-ui.yaml"
+    if not manifest.exists():
+        pytest.skip("манифест недоступен")
+    data = {}
+    for doc in yaml.safe_load_all(manifest.read_text(encoding="utf-8")):
+        if doc and doc.get("kind") == "ConfigMap":
+            data.update(doc.get("data") or {})
+
+    tuned = {
+        "RAG_SECTION_MAX_CHARS": "section_max_chars",
+        "RAG_MAX_CONTEXT_CHARS": "max_context_chars",
+        "RAG_GRADER_KEEP_TOP": "grader_keep_top",
+        "RAG_GRADER_THRESHOLD": "grader_threshold",
+        "RAG_RERANK_CANDIDATES": "rerank_candidates",
+    }
+    mismatched = {
+        env: (data[env], DEFAULT_CONFIG["rag"][key])
+        for env, key in tuned.items()
+        if env in data and str(data[env]) != str(DEFAULT_CONFIG["rag"][key])
+    }
+    assert not mismatched, f"манифест разошёлся с дефолтами кода: {mismatched}"
