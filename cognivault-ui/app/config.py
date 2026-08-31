@@ -103,6 +103,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "kitai_system_name": "csp_lab",
         "kitai_module_name": "csp_lab_antifraud_edge",
         "kitai_profanity_check": False,
+        # Пусто = «тот же сертификат, что у GigaChat». Заполнять, только если у
+        # KitAI своя пара: это другой контур, и один сертификат на оба — частный
+        # случай, а не правило.
+        "kitai_cert_path": "",
+        "kitai_key_path": "",
+        "kitai_key_passphrase": "",
         # Бюджет ожидания ответа. Это НЕ таймаут сокета: запрос ставится в
         # очередь, и всё это время мы опрашиваем результат.
         "kitai_poll_timeout": 240.0,

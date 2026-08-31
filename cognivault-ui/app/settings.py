@@ -240,6 +240,10 @@ def server_config() -> dict[str, Any]:
             "KITAI_MODULE_NAME", _gc_default("kitai_module_name")
         ),
         "kitai_profanity_check": _env_bool("KITAI_PROFANITY_CHECK", False),
+        # Пусто = взять сертификат GigaChat (см. KitaiConfig.from_dict).
+        "kitai_cert_path": os.path.expanduser(_env_str("KITAI_CERT_PATH", "")),
+        "kitai_key_path": os.path.expanduser(_env_str("KITAI_KEY_PATH", "")),
+        "kitai_key_passphrase": _env_str("KITAI_KEY_PASSPHRASE", ""),
         "kitai_poll_timeout": _env_float("KITAI_POLL_TIMEOUT", 240.0),
         "kitai_poll_initial_delay": _env_float("KITAI_POLL_INITIAL_DELAY", 2.0),
         "kitai_poll_delay": _env_float("KITAI_POLL_DELAY", 2.0),
@@ -319,6 +323,9 @@ ADMIN_LOCKED_KEYS: tuple[str, ...] = (
     # хост и назваться чужой системой. Сам ВЫБОР транспорта и имена моделей —
     # в USER_EDITABLE_KEYS: они ничего никуда не отправляют.
     "gigachat.kitai_host",
+    "gigachat.kitai_cert_path",
+    "gigachat.kitai_key_path",
+    "gigachat.kitai_key_passphrase",
     "gigachat.kitai_system_name",
     "gigachat.kitai_module_name",
     "gigachat.kitai_profanity_check",

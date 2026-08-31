@@ -463,3 +463,36 @@ def test_failed_query_names_the_model_and_logs_the_query_id(caplog):
     assert "unknown model" in (exc.value.detail or "")
     assert "unknown model" in caplog.text
     assert "glm-5.2" in caplog.text
+
+
+def test_kitai_uses_its_own_certificate_when_configured():
+    """KitAI — другой контур; общий с GigaChat сертификат это частный случай.
+
+    Пустой `kitai_cert_path` = «тот же, что у GigaChat», поэтому установка с
+    одной парой ничего не настраивает; установка с двумя кладёт вторую сюда.
+    """
+    shared = {"cert_path": "/certs/client_crt.crt", "key_path": "/certs/client_key.key",
+              "key_passphrase": "s3cret", "kitai_host": "https://k"}
+
+    same = kitai.KitaiConfig.from_dict(shared)
+    assert (same.cert_path, same.key_path, same.key_passphrase) == (
+        "/certs/client_crt.crt", "/certs/client_key.key", "s3cret")
+
+    own = kitai.KitaiConfig.from_dict({
+        **shared,
+        "kitai_cert_path": "/certs/kitai/client_crt.crt",
+        "kitai_key_path": "/certs/kitai/client_key.key",
+        "kitai_key_passphrase": "other",
+    })
+    assert (own.cert_path, own.key_path, own.key_passphrase) == (
+        "/certs/kitai/client_crt.crt", "/certs/kitai/client_key.key", "other")
+
+
+def test_kitai_certificate_paths_stay_admin_only():
+    """Путь к сертификату пользователю не отдаём — это учётные данные."""
+    from app import settings
+
+    for key in ("gigachat.kitai_cert_path", "gigachat.kitai_key_path",
+                "gigachat.kitai_key_passphrase"):
+        assert key in settings.ADMIN_LOCKED_KEYS
+        assert key not in settings.USER_EDITABLE_KEYS

@@ -70,6 +70,13 @@ spec:
             - name: gigachat-certs
               mountPath: /certs
               readOnly: true
+            # Отдельный сертификат KitAI. Секрет `optional: true`, поэтому под
+            # поднимется и без него — тогда KitAI пойдёт сертификатом GigaChat
+            # (пустой KITAI_CERT_PATH = «общий»). Заводить, только если контур
+            # KitAI требует свою пару.
+            - name: kitai-certs
+              mountPath: /certs/kitai
+              readOnly: true
             - name: data
               mountPath: /data
           startupProbe:
@@ -106,6 +113,14 @@ spec:
               drop:
                 - ALL
       volumes:
+        - name: kitai-certs
+          secret:
+            secretName: cognivault-kitai-certs
+            # Секрета может не быть — это не ошибка, а «сертификат общий».
+            optional: true
+            # 0440 по той же причине, что у секрета GigaChat ниже: файлы
+            # принадлежат root, процесс идёт под uid 1000 через fsGroup.
+            defaultMode: 0440
         - name: gigachat-certs
           secret:
             # Тот же секрет, что у бэкенда: клиентские сертификаты + CA-бандл

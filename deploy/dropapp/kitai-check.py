@@ -37,8 +37,14 @@ HOST = os.environ.get("KITAI_HOST", "").rstrip("/")
 MODEL = os.environ.get("KITAI_MODEL", "")
 SYSTEM = os.environ.get("KITAI_SYSTEM_NAME", "")
 MODULE = os.environ.get("KITAI_MODULE_NAME", "")
-CERT = os.environ.get("GIGACHAT_CERT_PATH", "/certs/client_crt.crt")
-KEY = os.environ.get("GIGACHAT_KEY_PATH", "/certs/client_key.key")
+# У KitAI может быть СВОЙ сертификат: это другой контур. Пустой KITAI_CERT_PATH
+# означает «тот же, что у GigaChat» — ровно как в приложении.
+CERT = os.environ.get("KITAI_CERT_PATH") or os.environ.get(
+    "GIGACHAT_CERT_PATH", "/certs/client_crt.crt"
+)
+KEY = os.environ.get("KITAI_KEY_PATH") or os.environ.get(
+    "GIGACHAT_KEY_PATH", "/certs/client_key.key"
+)
 TIMEOUT = float(os.environ.get("KITAI_POLL_TIMEOUT", "60"))
 
 
@@ -63,7 +69,10 @@ def main() -> int:
     print("KITAI_MODEL       =", MODEL or "(пусто!)")
     print("KITAI_SYSTEM_NAME =", SYSTEM or "(пусто!)")
     print("KITAI_MODULE_NAME =", MODULE or "(не задан)")
-    print("сертификат        =", CERT, "|", "есть" if os.path.isfile(CERT) else "НЕТ ФАЙЛА")
+    own = bool(os.environ.get("KITAI_CERT_PATH"))
+    print("сертификат        =", CERT,
+          "|", "есть" if os.path.isfile(CERT) else "НЕТ ФАЙЛА",
+          "|", "свой у KitAI" if own else "общий с GigaChat")
     print("ключ              =", KEY, "|", "есть" if os.path.isfile(KEY) else "НЕТ ФАЙЛА")
     if not HOST or not SYSTEM:
         print("\nНечего проверять: не задан хост или имя системы.")
