@@ -101,6 +101,19 @@ async def complete_json(
     return await gigachat.complete_json(messages, cfg, **kwargs)
 
 
+async def list_models(cfg: ChatConfig) -> list[dict[str, str]] | None:
+    """Models the active provider offers, or ``None`` when it cannot say.
+
+    `None` is not `[]`. An empty list is a real answer meaning "this provider
+    has no models"; `None` means "there is no catalogue here" — GigaChat has no
+    such endpoint, its model is whatever the deployment configured. The form
+    uses the distinction to choose between a dropdown and a free-text field.
+    """
+    if isinstance(cfg, KitaiConfig):
+        return await kitai.list_models(cfg)
+    return None
+
+
 __all__ = [
     "DEFAULT_PROVIDER",
     "PROVIDERS",
@@ -109,6 +122,7 @@ __all__ = [
     "complete_json",
     "config_for",
     "files_present",
+    "list_models",
     "provider_of",
     "stream_chat",
     "supports_streaming",

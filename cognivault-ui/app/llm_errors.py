@@ -23,6 +23,17 @@ class GigaChatError(Exception):
         self.message = message
         self.detail = detail
 
+    def __str__(self) -> str:
+        """Message AND detail.
+
+        Every caller logs the exception with ``%s``, and ``Exception.__str__``
+        returns only the message — so the one field that says WHY (the platform's
+        own error text, the HTTP body) was carried all the way to the log and
+        dropped there. Observed in production as three identical lines reading
+        «KitAI завершил запрос со статусом "error"» with no cause anywhere.
+        """
+        return f"{self.message} — {self.detail}" if self.detail else self.message
+
 
 class GigaChatCertMissing(GigaChatError):
     """Client cert or key file is absent — surfaced as a pre-flight 400."""

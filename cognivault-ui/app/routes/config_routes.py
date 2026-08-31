@@ -8,7 +8,9 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
-from .. import cognivault, history, rag, rag_pipeline, settings
+import logging
+
+from .. import cognivault, history, llm, rag, rag_pipeline, settings
 from ..config import (
     DEFAULT_CONFIG,
     PATHS,
@@ -19,6 +21,9 @@ from ..config import (
     save_config,
 )
 from ..deps import ApiError, get_token, resolve_paths
+from ..llm_errors import GigaChatError
+
+log = logging.getLogger("cognivault-ui.config")
 
 router = APIRouter(prefix="/api")
 
@@ -303,3 +308,42 @@ async def get_status(
         },
         "history_count": history.count_chats(),
     }
+
+
+@router.get("/config/models")
+async def get_models(
+    request: Request, _token: str = Depends(get_token)
+) -> dict[str, Any]:
+    """Models the active provider offers, for the settings dropdown.
+
+    Deliberately NOT part of ``GET /api/config``: that call renders the whole
+    form and must stay fast and offline-safe, while this one leaves the pod and
+    can time out. A settings page that cannot open because the model platform is
+    slow would be a bad trade.
+
+    ``{"models": null}`` means "this provider has no catalogue" (GigaChat) —
+    distinct from ``{"models": []}``, "the platform offers none". The form shows
+    a free-text field for the first and an empty dropdown for the second.
+    ``error`` is filled instead of raising: an unreachable platform must degrade
+    the field to free text, not break the page.
+    """
+    paths = _optional_paths(request)
+    cfg = (
+        settings.effective_config_for(paths)
+        if paths is not None and hasattr(settings, "effective_config_for")
+        else settings.effective_config()
+    )
+    gc = cfg.get("gigachat", {})
+    try:
+        models = await llm.list_models(llm.config_for(gc))
+    except GigaChatError as exc:
+        log.warning("список моделей недоступен [%s]: %s", exc.code, exc)
+        return {"provider": llm.provider_of(gc), "models": None, "error": exc.message}
+    except Exception as exc:  # noqa: BLE001 — the form must still render
+        log.warning("список моделей недоступен: %s", exc)
+        return {
+            "provider": llm.provider_of(gc),
+            "models": None,
+            "error": "Не удалось получить список моделей",
+        }
+    return {"provider": llm.provider_of(gc), "models": models, "error": None}

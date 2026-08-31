@@ -473,6 +473,31 @@ def test_kitai_address_and_identity_stay_admin_only():
         assert key not in settings.USER_EDITABLE_KEYS
 
 
+def test_models_endpoint_degrades_instead_of_breaking_the_page(monkeypatch):
+    """Недоступная платформа не должна ронять страницу настроек."""
+    import asyncio
+
+    from app import llm
+    from app.llm_errors import GigaChatHTTP
+    from app.routes import config_routes
+
+    async def boom(cfg):
+        raise GigaChatHTTP("GIGACHAT_HTTP", "KitAI вернул HTTP 503", "down")
+
+    monkeypatch.setattr(config_routes.llm, "list_models", boom)
+    monkeypatch.setattr(
+        config_routes.settings, "effective_config",
+        lambda: {"gigachat": {"provider": "kitai", "kitai_host": "https://k"}},
+    )
+    monkeypatch.setattr(config_routes, "_optional_paths", lambda request: None)
+
+    out = asyncio.run(config_routes.get_models(request=None, _token="t"))
+
+    assert out["models"] is None
+    assert out["error"]
+    assert out["provider"] == "kitai"
+
+
 def test_switching_provider_does_not_clobber_the_other_model():
     """Модели хранятся раздельно — переключение туда-обратно ничего не теряет."""
     from app import llm

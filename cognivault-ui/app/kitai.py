@@ -179,17 +179,41 @@ def _build_body(messages: list[dict[str, Any]], cfg: KitaiConfig, query_id: str)
     return json.dumps(payload, ensure_ascii=False).encode()
 
 
+def _failure_detail(data: dict[str, Any]) -> str | None:
+    """Everything the platform said about why, in one line.
+
+    `QueryResultPDto` carries the reason in up to three places and fills
+    whichever one it feels like: `error` (its own status/message), plus
+    `response_code`/`response_body` passed through from upstream. Reading only
+    `error.message` — as the first cut did — produced a failure with an empty
+    detail and nothing to act on.
+    """
+    parts: list[str] = []
+    err = data.get("error") or {}
+    if isinstance(err, dict):
+        if err.get("status") is not None:
+            parts.append(f"error.status={err['status']}")
+        if err.get("message"):
+            parts.append(str(err["message"]))
+    elif err:
+        parts.append(str(err))
+    if data.get("response_code") is not None:
+        parts.append(f"response_code={data['response_code']}")
+    if data.get("response_body"):
+        parts.append(f"response_body={str(data['response_body'])[:300]}")
+    return "; ".join(parts)[:600] or None
+
+
 def _extract(result: dict[str, Any]) -> tuple[str, str | None]:
     """``(content, finish_reason)`` out of a finished ``QueryResultPDto``."""
     data = result.get("data") or {}
     response = data.get("response") or {}
     choices = response.get("choices") or []
     if not choices:
-        err = data.get("error") or {}
         raise KitaiQueryFailed(
             "KITAI_EMPTY_RESULT",
             "KitAI завершил запрос без единого варианта ответа",
-            str(err.get("message") or "")[:500] or None,
+            _failure_detail(data),
         )
     first = choices[0] or {}
     message = first.get("message") or {}
@@ -278,11 +302,22 @@ async def _run_query(
 
             # `is_final` on a non-finished status means the platform gave up.
             if data.get("is_final"):
-                err = data.get("error") or {}
+                detail = _failure_detail(data)
+                # Logged here as well as raised: the query_id is the only handle
+                # the platform side has, and it is not part of the user-facing
+                # message. Without it a support request is "it said error".
+                log.warning(
+                    "kitai: запрос %s завершился со статусом %r (модель %s): %s",
+                    query_id,
+                    status or "неизвестно",
+                    cfg.model,
+                    detail or "платформа не сообщила причину",
+                )
                 raise KitaiQueryFailed(
                     "KITAI_QUERY_FAILED",
-                    f"KitAI завершил запрос со статусом «{status or 'неизвестно'}»",
-                    str(err.get("message") or "")[:500] or None,
+                    f"KitAI завершил запрос со статусом «{status or 'неизвестно'}»"
+                    f" (модель {cfg.model})",
+                    detail,
                 )
 
             if loop.time() >= deadline:
@@ -292,6 +327,70 @@ async def _run_query(
                     f"query_id={query_id}, последний статус: {status or 'неизвестно'}",
                 )
             await _sleep(cfg.poll_delay)
+
+
+async def list_models(
+    cfg: KitaiConfig,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> list[dict[str, str]]:
+    """Models the platform currently offers: ``GET /api/v1/meta/model``.
+
+    Returns ``[{"name", "label"}]``. `display_name` is what the platform wants
+    shown to a human; it is optional, so the wire name is the fallback and also
+    the value we send back in `model_name`.
+
+    Errors are the caller's to handle — a settings form that cannot reach the
+    platform should say so and fall back to a free-text field, not pretend the
+    list is empty (an empty list reads as "no models available").
+    """
+    if not cfg.host:
+        raise GigaChatError(
+            "KITAI_NOT_CONFIGURED", "Не задан адрес KitAI (KITAI_HOST)", None
+        )
+    try:
+        client = _make_client(cfg, transport)
+    except ssl.SSLError as exc:
+        raise GigaChatTLS(
+            "GIGACHAT_TLS", "Не удалось загрузить сертификат/ключ", str(exc)
+        ) from exc
+
+    async with client:
+        try:
+            resp = await client.get(
+                f"{cfg.host}/api/v1/meta/model", headers=_headers(cfg)
+            )
+        except httpx.HTTPError as exc:
+            raise mtls.classify_connect_error(exc, what="KitAI") from exc
+        if resp.status_code != 200:
+            raise GigaChatHTTP(
+                "GIGACHAT_HTTP",
+                f"KitAI вернул HTTP {resp.status_code} на список моделей",
+                resp.text[:500],
+            )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise GigaChatBadJSON(
+                "GIGACHAT_BAD_JSON", "KitAI вернул не-JSON на список моделей", str(exc)
+            ) from exc
+
+    # The endpoint answers with a bare array; tolerate a wrapper too, since the
+    # rest of this API wraps everything in `{description, data}`.
+    items = body if isinstance(body, list) else (body or {}).get("data") or []
+    out: list[dict[str, str]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("model_name") or "").strip()
+        if not name:
+            continue
+        label = str(item.get("display_name") or "").strip() or name
+        version = str(item.get("version") or "").strip()
+        if version and version not in label:
+            label = f"{label} ({version})"
+        out.append({"name": name, "label": label})
+    return out
 
 
 async def stream_chat(

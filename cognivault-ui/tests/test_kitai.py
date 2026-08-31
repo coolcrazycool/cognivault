@@ -307,6 +307,53 @@ def test_missing_host_fails_before_any_request():
 # --------------------------------------------------------------------------- #
 
 
+def test_list_models_maps_the_catalogue(monkeypatch):
+    """`GET /api/v1/meta/model` → пары (имя для запроса, подпись для человека)."""
+    seen = {}
+
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["sys"] = request.headers.get("x-identification-system")
+        return httpx.Response(200, json=[
+            {"id": 1, "model_name": "glm-5.2", "display_name": "GLM 5.2", "version": "1.0"},
+            {"id": 2, "model_name": "GigaChat-3-Ultra", "display_name": None},
+            {"id": 3, "model_name": ""},  # без имени — отбрасываем
+            "мусор",
+        ])
+
+    out = asyncio.run(kitai.list_models(_cfg(), transport=httpx.MockTransport(handler)))
+
+    assert seen["path"] == "/api/v1/meta/model"
+    assert seen["sys"] == "csp_lab"
+    assert out == [
+        {"name": "glm-5.2", "label": "GLM 5.2 (1.0)"},
+        {"name": "GigaChat-3-Ultra", "label": "GigaChat-3-Ultra"},
+    ]
+
+
+def test_list_models_tolerates_the_wrapped_shape():
+    """Остальной API заворачивает всё в {description, data} — примем и так."""
+    body = {"description": None, "data": [{"id": 1, "model_name": "glm-5.2"}]}
+    out = asyncio.run(kitai.list_models(
+        _cfg(), transport=httpx.MockTransport(lambda r: httpx.Response(200, json=body))))
+    assert out == [{"name": "glm-5.2", "label": "glm-5.2"}]
+
+
+def test_list_models_raises_so_the_form_can_degrade():
+    """Ошибку не глотаем: пустой список читался бы как «моделей нет»."""
+    with pytest.raises(GigaChatHTTP):
+        asyncio.run(kitai.list_models(
+            _cfg(), transport=httpx.MockTransport(lambda r: httpx.Response(503, text="down"))))
+
+
+def test_gigachat_has_no_catalogue_and_says_so():
+    """None ≠ [] — форма по этому различию выбирает поле ввода или список."""
+    from app import llm
+    from app.gigachat import GigaConfig
+
+    assert asyncio.run(llm.list_models(GigaConfig.from_dict({}))) is None
+
+
 def test_provider_dispatch_picks_the_config_type():
     from app import llm
     from app.gigachat import GigaConfig
@@ -339,3 +386,46 @@ def test_kitai_model_falls_back_to_the_shared_model_key():
         {"kitai_host": HOST, "kitai_model": "", "model": "GigaChat-3-Ultra"}
     )
     assert cfg.model == "GigaChat-3-Ultra"
+
+
+def test_failure_detail_gathers_every_field_the_platform_may_fill():
+    """Причина приезжает в одном из трёх полей — читаем все."""
+    detail = kitai._failure_detail({
+        "error": {"status": 500, "message": "model not found: glm-5.2"},
+        "response_code": 404,
+        "response_body": '{"error":"unknown model"}',
+    })
+    assert "model not found: glm-5.2" in detail
+    assert "error.status=500" in detail
+    assert "response_code=404" in detail
+    assert "unknown model" in detail
+
+
+def test_error_str_carries_the_detail_to_the_log():
+    """Регрессия: логи писали `%s` от исключения и теряли причину целиком."""
+    from app.llm_errors import GigaChatError
+
+    exc = GigaChatError("KITAI_QUERY_FAILED", "статус «error»", "model not found")
+    assert str(exc) == "статус «error» — model not found"
+    assert str(GigaChatError("X", "без детали")) == "без детали"
+
+
+def test_failed_query_names_the_model_and_logs_the_query_id(caplog):
+    """По логу должно быть видно И модель, И query_id для обращения в поддержку."""
+    failed = {
+        "description": None,
+        "data": {
+            "query_status": "error",
+            "is_final": True,
+            "error": {"status": 400, "message": "unknown model"},
+        },
+    }
+    transport, _ = _recorder(failed)
+
+    with caplog.at_level("WARNING"), pytest.raises(KitaiQueryFailed) as exc:
+        _run(_cfg(), transport)
+
+    assert "glm-5.2" in exc.value.message
+    assert "unknown model" in (exc.value.detail or "")
+    assert "unknown model" in caplog.text
+    assert "glm-5.2" in caplog.text

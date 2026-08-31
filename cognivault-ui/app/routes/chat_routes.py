@@ -585,7 +585,8 @@ async def chat(request: Request) -> Any:
 
             except GigaChatError as exc:
                 errored = True
-                log.warning("gigachat error [%s]: %s", exc.code, exc.message)
+                # `exc`, not `exc.message`: the detail is where the cause is.
+                log.warning("chat error [%s]: %s", exc.code, exc)
                 yield sse_error(exc.code, exc.message, exc.detail)
             except asyncio.CancelledError:
                 truncated = True

@@ -795,24 +795,17 @@
    * "int"/"number" become numbers, "bool" a boolean. Each section saves on its
    * own button and PUTs exactly one subtree of /api/config.
    */
-  // Both models are shown, always, and the provider says which one answers.
-  // Hiding the inactive one would make switching transports a two-step dance
-  // (switch, save, come back, fill the model); showing one field that silently
-  // re-points is worse still — it looks like the same setting changed value.
-  function markActiveModel(provider) {
-    const kitai = provider === "kitai";
-    const badge = (id, on) => {
-      const n = document.getElementById(id);
-      if (n) n.textContent = on ? "· отвечает в чате" : "· не используется";
-    };
-    badge("cfg-gc-model-active", !kitai);
-    badge("cfg-gc-kitai-model-active", kitai);
+  // One provider, one model — the model key follows the provider, because the
+  // two transports keep their names apart (switching back must not have
+  // clobbered the other one). The user never sees that split: they pick a
+  // provider and a model, and the form writes whichever key is live.
+  function modelKeyFor(provider) {
+    return provider === "kitai" ? "kitai_model" : "model";
   }
 
   const MODEL_FIELDS = [
     { key: "provider", id: "cfg-gc-provider", type: "text", label: "Провайдер" },
-    { key: "model", id: "cfg-gc-model", type: "text", label: "Модель GigaChat" },
-    { key: "kitai_model", id: "cfg-gc-kitai-model", type: "text", label: "Модель KitAI" },
+    { key: "model", id: "cfg-gc-model", type: "text", label: "Модель" },
     { key: "temperature", id: "cfg-gc-temperature", type: "number", label: "Температура" },
     { key: "max_tokens", id: "cfg-gc-max-tokens", type: "int", label: "Максимум токенов в ответе" },
     // the context window is sized by the deployment, never by the user
@@ -945,9 +938,11 @@
 
   function bindTuningForm() {
     const c = state.config || {};
+    const provider = (c.gigachat || {}).provider || "gigachat";
+    MODEL_FIELDS[1].key = modelKeyFor(provider);
     bindFields(MODEL_FIELDS, "gigachat", c.gigachat);
-    markActiveModel((c.gigachat || {}).provider);
-    bindProviderLiveBadge();
+    bindProviderChange();
+    refreshModelChoices();
     bindFields(RAG_FIELDS, "rag", c.rag);
     bindPrompts();
   }
@@ -998,14 +993,75 @@
     await putConfigSubtree(body, btn, savedNode, okMessage);
   }
 
-  // Live feedback: the badge must follow the select immediately, otherwise the
-  // user changes the provider, sees «не используется» still on the model they
-  // just selected, and reasonably concludes nothing happened.
-  function bindProviderLiveBadge() {
+  // Switching the provider re-points the model field at that provider's stored
+  // name and re-fetches its catalogue. Done live, not on save: otherwise the
+  // user picks KitAI, still sees the GigaChat model name, and reasonably
+  // concludes the switch did nothing.
+  function bindProviderChange() {
     const sel = document.getElementById("cfg-gc-provider");
-    if (!sel || sel.dataset.badgeBound) return;
-    sel.dataset.badgeBound = "1";
-    sel.addEventListener("change", () => markActiveModel(sel.value));
+    if (!sel || sel.dataset.bound) return;
+    sel.dataset.bound = "1";
+    sel.addEventListener("change", () => {
+      const key = modelKeyFor(sel.value);
+      MODEL_FIELDS[1].key = key;
+      const stored = (state.config && state.config.gigachat) || {};
+      const input = document.getElementById("cfg-gc-model");
+      if (input) input.value = stored[key] == null ? "" : String(stored[key]);
+      refreshModelChoices();
+    });
+  }
+
+  // Turn the model field into a dropdown when the provider publishes a
+  // catalogue, and leave it as free text when it does not.
+  //
+  // `models === null` means "no catalogue here" (GigaChat has no such endpoint);
+  // `[]` means the platform answered and offers none. Collapsing the two would
+  // show an empty dropdown with no way to type a name — locking the user out of
+  // a setting because a listing call failed.
+  async function refreshModelChoices() {
+    const input = document.getElementById("cfg-gc-model");
+    const select = document.getElementById("cfg-gc-model-select");
+    const hint = document.getElementById("cfg-gc-model-hint");
+    if (!input || !select) return;
+
+    const asText = (note) => {
+      select.hidden = true;
+      input.hidden = false;
+      if (hint) hint.textContent = note;
+    };
+    asText("Загружаю список моделей…");
+
+    let payload;
+    try {
+      payload = await apiGet("/api/config/models");
+    } catch (e) {
+      asText("Список моделей недоступен — впишите имя вручную");
+      return;
+    }
+    const models = payload && payload.models;
+    if (!Array.isArray(models) || !models.length) {
+      asText(
+        payload && payload.error
+          ? payload.error + " — впишите имя модели вручную"
+          : "Модель, которая отвечает в чате"
+      );
+      return;
+    }
+
+    const current = input.value.trim();
+    select.innerHTML = "";
+    // The stored value may not be in the catalogue (renamed, retired, or typed
+    // by hand). Dropping it would silently rewrite the setting on the next save.
+    if (current && !models.some((m) => m.name === current)) {
+      select.appendChild(new Option(current + " — сейчас выбрана, нет в списке", current));
+    }
+    models.forEach((m) => select.appendChild(new Option(m.label, m.name)));
+    select.value = current || models[0].name;
+    input.value = select.value;
+    select.onchange = () => { input.value = select.value; };
+    select.hidden = false;
+    input.hidden = true;
+    if (hint) hint.textContent = "Список получен от провайдера";
   }
 
   function saveModelSettings() {
