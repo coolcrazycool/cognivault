@@ -346,12 +346,46 @@ def test_list_models_raises_so_the_form_can_degrade():
             _cfg(), transport=httpx.MockTransport(lambda r: httpx.Response(503, text="down"))))
 
 
-def test_gigachat_has_no_catalogue_and_says_so():
-    """None ≠ [] — форма по этому различию выбирает поле ввода или список."""
+def test_gigachat_also_publishes_a_catalogue():
+    """У GigaChat есть OpenAI-совместимый `{base_url}/models` — он и спрашивается.
+
+    Сначала я решил, что каталога у него нет, и захардкодил `None`. Проверка по
+    исходникам официального SDK (`gigachat/api/models.py`) это опровергла.
+    """
     from app import llm
     from app.gigachat import GigaConfig
 
-    assert asyncio.run(llm.list_models(GigaConfig.from_dict({}))) is None
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json={
+            "object": "list",
+            "data": [{"id": "GigaChat-3-Ultra-preview", "object": "model",
+                      "owned_by": "salutedevices"}],
+        })
+
+    from app import gigachat as gc
+    out = asyncio.run(gc.list_models(
+        GigaConfig.from_dict({"base_url": "https://giga.test/v1"}),
+        transport=httpx.MockTransport(handler),
+    ))
+
+    assert seen["url"] == "https://giga.test/v1/models"
+    assert out == [{"name": "GigaChat-3-Ultra-preview",
+                    "label": "GigaChat-3-Ultra-preview"}]
+
+
+def test_gigachat_listing_failure_propagates():
+    """Пустой список означал бы «моделей нет» — это другое утверждение."""
+    from app import gigachat as gc
+    from app.gigachat import GigaConfig
+
+    with pytest.raises(GigaChatHTTP):
+        asyncio.run(gc.list_models(
+            GigaConfig.from_dict({"base_url": "https://giga.test/v1"}),
+            transport=httpx.MockTransport(lambda r: httpx.Response(404, text="nope")),
+        ))
 
 
 def test_provider_dispatch_picks_the_config_type():

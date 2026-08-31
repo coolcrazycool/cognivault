@@ -321,11 +321,10 @@ async def get_models(
     can time out. A settings page that cannot open because the model platform is
     slow would be a bad trade.
 
-    ``{"models": null}`` means "this provider has no catalogue" (GigaChat) —
-    distinct from ``{"models": []}``, "the platform offers none". The form shows
-    a free-text field for the first and an empty dropdown for the second.
-    ``error`` is filled instead of raising: an unreachable platform must degrade
-    the field to free text, not break the page.
+    Both providers publish a catalogue, so ``models`` is a list on success and
+    ``null`` only when the call failed — with ``error`` saying why. Filled rather
+    than raised: an unreachable platform must degrade the field to free text, not
+    break the settings page.
     """
     paths = _optional_paths(request)
     cfg = (

@@ -101,17 +101,18 @@ async def complete_json(
     return await gigachat.complete_json(messages, cfg, **kwargs)
 
 
-async def list_models(cfg: ChatConfig) -> list[dict[str, str]] | None:
-    """Models the active provider offers, or ``None`` when it cannot say.
+async def list_models(cfg: ChatConfig) -> list[dict[str, str]]:
+    """Models the active provider offers, as ``[{"name", "label"}]``.
 
-    `None` is not `[]`. An empty list is a real answer meaning "this provider
-    has no models"; `None` means "there is no catalogue here" — GigaChat has no
-    such endpoint, its model is whatever the deployment configured. The form
-    uses the distinction to choose between a dropdown and a free-text field.
+    Both transports publish a catalogue, so both are asked:
+    KitAI at ``/api/v1/meta/model``, GigaChat at the OpenAI-compatible
+    ``{base_url}/models``. Failures propagate — the caller turns them into a
+    free-text field, because an empty list would claim the provider offers
+    nothing, which is not the same as "we could not ask".
     """
     if isinstance(cfg, KitaiConfig):
         return await kitai.list_models(cfg)
-    return None
+    return await gigachat.list_models(cfg)
 
 
 __all__ = [

@@ -47,6 +47,7 @@ __all__ = [
     "GigaConfig",
     "complete_json",
     "extract_json",
+    "list_models",
     "stream_chat",
 ]
 
@@ -111,6 +112,60 @@ def _classify_connect_error(exc: Exception) -> GigaChatError:
 # --------------------------------------------------------------------------- #
 # Streaming
 # --------------------------------------------------------------------------- #
+
+
+async def list_models(
+    gcfg: GigaConfig,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> list[dict[str, str]]:
+    """Models the gateway offers: ``GET {base_url}/models``.
+
+    The OpenAI-compatible companion to ``/chat/completions`` — same base URL,
+    same client certificate. Shape is OpenAI's:
+    ``{"object": "list", "data": [{"id", "object", "owned_by"}]}``.
+
+    Returns ``[{"name", "label"}]`` to match the other transport, so the settings
+    form does not care which provider answered. Errors propagate: an empty list
+    would read as "the gateway offers no models", which is a different claim from
+    "we could not ask".
+    """
+    if not gcfg.base_url:
+        raise GigaChatError(
+            "GIGACHAT_NOT_CONFIGURED", "Не задан адрес GigaChat", None
+        )
+    client = _make_json_client(gcfg, 30.0, transport)
+    async with client:
+        try:
+            resp = await client.get(
+                f"{gcfg.base_url}/models", headers={"Accept": "application/json"}
+            )
+        except httpx.HTTPError as exc:
+            raise _classify_connect_error(exc) from exc
+        if resp.status_code != 200:
+            raise GigaChatHTTP(
+                "GIGACHAT_HTTP",
+                f"GigaChat вернул HTTP {resp.status_code} на список моделей",
+                resp.text[:500],
+            )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise GigaChatBadJSON(
+                "GIGACHAT_BAD_JSON",
+                "GigaChat вернул не-JSON на список моделей",
+                str(exc),
+            ) from exc
+
+    items = (body or {}).get("data") if isinstance(body, dict) else body
+    out: list[dict[str, str]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("id") or "").strip()
+        if name:
+            out.append({"name": name, "label": name})
+    return out
 
 
 async def stream_chat(

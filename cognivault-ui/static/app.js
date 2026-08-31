@@ -1014,10 +1014,11 @@
   // Turn the model field into a dropdown when the provider publishes a
   // catalogue, and leave it as free text when it does not.
   //
-  // `models === null` means "no catalogue here" (GigaChat has no such endpoint);
-  // `[]` means the platform answered and offers none. Collapsing the two would
-  // show an empty dropdown with no way to type a name — locking the user out of
-  // a setting because a listing call failed.
+  // Both providers publish a catalogue (KitAI `/api/v1/meta/model`, GigaChat the
+  // OpenAI-compatible `{base_url}/models`), so a missing list means the call
+  // failed — not that the provider offers nothing. Either way the field falls
+  // back to free text: an empty dropdown with no way to type a name would lock
+  // the user out of a setting because a listing call timed out.
   async function refreshModelChoices() {
     const input = document.getElementById("cfg-gc-model");
     const select = document.getElementById("cfg-gc-model-select");
