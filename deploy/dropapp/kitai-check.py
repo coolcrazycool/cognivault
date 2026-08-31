@@ -39,12 +39,14 @@ SYSTEM = os.environ.get("KITAI_SYSTEM_NAME", "")
 MODULE = os.environ.get("KITAI_MODULE_NAME", "")
 # У KitAI может быть СВОЙ сертификат: это другой контур. Пустой KITAI_CERT_PATH
 # означает «тот же, что у GigaChat» — ровно как в приложении.
-CERT = os.environ.get("KITAI_CERT_PATH") or os.environ.get(
-    "GIGACHAT_CERT_PATH", "/certs/client_crt.crt"
-)
-KEY = os.environ.get("KITAI_KEY_PATH") or os.environ.get(
-    "GIGACHAT_KEY_PATH", "/certs/client_key.key"
-)
+_SHARED_CERT = os.environ.get("GIGACHAT_CERT_PATH", "/certs/client_crt.crt")
+_SHARED_KEY = os.environ.get("GIGACHAT_KEY_PATH", "/certs/client_key.key")
+_OWN_CERT = os.environ.get("KITAI_CERT_PATH") or ""
+_OWN_KEY = os.environ.get("KITAI_KEY_PATH") or ""
+# Тот же откат, что в приложении: путь задан, файла нет -> общая пара.
+_use_own = bool(_OWN_CERT) and os.path.isfile(_OWN_CERT) and os.path.isfile(_OWN_KEY)
+CERT = _OWN_CERT if _use_own else _SHARED_CERT
+KEY = _OWN_KEY if _use_own else _SHARED_KEY
 TIMEOUT = float(os.environ.get("KITAI_POLL_TIMEOUT", "60"))
 
 
@@ -69,10 +71,18 @@ def main() -> int:
     print("KITAI_MODEL       =", MODEL or "(пусто!)")
     print("KITAI_SYSTEM_NAME =", SYSTEM or "(пусто!)")
     print("KITAI_MODULE_NAME =", MODULE or "(не задан)")
-    own = bool(os.environ.get("KITAI_CERT_PATH"))
-    print("сертификат        =", CERT,
-          "|", "есть" if os.path.isfile(CERT) else "НЕТ ФАЙЛА",
-          "|", "свой у KitAI" if own else "общий с GigaChat")
+    # Показываем ФАКТ, а не намерение: приложение при отсутствии файла молча
+    # (с WARNING в логе) откатывается на сертификат GigaChat, поэтому «путь
+    # задан» и «сертификат используется» — разные вещи.
+    wanted = os.environ.get("KITAI_CERT_PATH") or ""
+    if wanted and not os.path.isfile(wanted):
+        shared = os.environ.get("GIGACHAT_CERT_PATH", "/certs/client_crt.crt")
+        print(f"сертификат        = {wanted} | НЕТ ФАЙЛА -> откат на {shared}")
+        print("                    (секрет cognivault-kitai-certs не заведён?)")
+    else:
+        print("сертификат        =", CERT,
+              "|", "есть" if os.path.isfile(CERT) else "НЕТ ФАЙЛА",
+              "|", "свой у KitAI" if wanted else "общий с GigaChat")
     print("ключ              =", KEY, "|", "есть" if os.path.isfile(KEY) else "НЕТ ФАЙЛА")
     if not HOST or not SYSTEM:
         print("\nНечего проверять: не задан хост или имя системы.")

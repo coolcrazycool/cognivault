@@ -1224,8 +1224,8 @@ kubectl apply -n $NS -f deploy/dropapp/06-ingress.yaml
 | `KITAI_SYSTEM_NAME` | `csp_lab` | заголовок `x-identification-system` |
 | `KITAI_MODULE_NAME` | `csp_lab_antifraud_edge` | заголовок `x-identification-module` |
 | `KITAI_PROFANITY_CHECK` | `false` | проверка на нецензурное на стороне платформы |
-| `KITAI_CERT_PATH` | *(пусто)* | Свой клиентский сертификат KitAI. Пусто = взять сертификат GigaChat. Заполнять, если контур KitAI требует свою пару: `/certs/kitai/client_crt.crt` |
-| `KITAI_KEY_PATH` | *(пусто)* | Ключ к нему: `/certs/kitai/client_key.key` |
+| `KITAI_CERT_PATH` | `/certs/kitai/client_crt.crt` | Свой клиентский сертификат KitAI (секрет `cognivault-kitai-certs`). Файла нет → берётся сертификат GigaChat + WARNING в лог |
+| `KITAI_KEY_PATH` | `/certs/kitai/client_key.key` | Ключ к нему |
 | `KITAI_KEY_PASSPHRASE` | *(пусто)* | Пароль ключа, если он зашифрован |
 | `KITAI_POLL_TIMEOUT` | `240` | бюджет **ожидания** ответа, не таймаут сокета: запрос стоит в очереди, UI опрашивает результат |
 | `KITAI_POLL_INITIAL_DELAY` | `2` | пауза перед первым опросом |
@@ -1612,18 +1612,18 @@ host cognivault-ui.apps.bcayrqks.k8s.delta.sbrf.ru  →  cognivault-ui:8787
 коллекции (3.7), из-за нового payload-поля `archived`. Без него архивные страницы
 продолжат отвечать как актуальные, и ошибки нигде не будет.
 
-> **Если у KitAI свой сертификат — порядок именно такой, иначе чат ляжет:**
-> 1. создать секрет `cognivault-kitai-certs` (шаблон в `00-secrets.example.yaml`);
-> 2. переимпортировать `05-ui.yaml` — в нём появился том `/certs/kitai`
->    (`optional: true`, поэтому шаг 2 без шага 1 безопасен);
-> 3. только теперь раскомментировать `KITAI_CERT_PATH` / `KITAI_KEY_PATH` в
->    ConfigMap UI;
-> 4. **Restart rollout** и проверить `kitai-check.py`.
+> **Сертификат KitAI.** `KITAI_CERT_PATH` / `KITAI_KEY_PATH` в ConfigMap UI уже
+> проставлены на `/certs/kitai/…`, том в `05-ui.yaml` смонтирован. Осталось
+> завести секрет `cognivault-kitai-certs` — шаблон в `00-secrets.example.yaml`.
 >
-> Раскомментировать пути раньше, чем заведён секрет, нельзя: том смонтируется
-> пустым, файлов не будет, и чат ответит 400 «Клиентский сертификат или ключ не
-> найдены». Пока пути закомментированы, KitAI ходит сертификатом GigaChat — это
-> текущее поведение стенда.
+> **Порядок не критичен.** Секрет смонтирован `optional: true`: если его ещё
+> нет, каталог окажется пустым, приложение возьмёт сертификат GigaChat и
+> напишет в лог пода WARNING с обоими путями. Чат при этом работает — падать
+> из-за ошибки в порядке выкатки он не должен.
+>
+> Отсюда следствие: **отсутствие ошибки не означает, что свой сертификат
+> используется.** Проверять фактическое — `kitai-check.py`, он печатает
+> выбранный сертификат и пометку «свой у KitAI» / «общий с GigaChat».
 
 Порядок в консоли:
 

@@ -93,21 +93,7 @@ class KitaiConfig:
         return cls(
             host=str(gc.get("kitai_host", "")).rstrip("/"),
             model=str(gc.get("kitai_model", "") or gc.get("model", "")),
-            # KitAI и GigaChat — РАЗНЫЕ контуры, и сертификат у них может быть
-            # разный. Пустой `kitai_cert_path` означает «тот же, что у GigaChat»:
-            # у кого одна пара на оба — ничего настраивать не надо, у кого две —
-            # есть куда положить вторую. Изначально я жёстко брал сертификат
-            # GigaChat, и на стенде с отдельным сертификатом KitAI это давало
-            # принятый запрос, который затем финишировал со статусом `error`.
-            cert_path=os.path.expanduser(
-                str(gc.get("kitai_cert_path") or gc.get("cert_path", ""))
-            ),
-            key_path=os.path.expanduser(
-                str(gc.get("kitai_key_path") or gc.get("key_path", ""))
-            ),
-            key_passphrase=str(
-                gc.get("kitai_key_passphrase") or gc.get("key_passphrase", "") or ""
-            ),
+            **_resolve_cert(gc),
             verify_ssl=bool(gc.get("verify_ssl", False)),
             temperature=float(gc.get("temperature", 0.2)),
             max_tokens=int(gc.get("max_tokens", 4096)),
@@ -118,6 +104,60 @@ class KitaiConfig:
             poll_initial_delay=float(gc.get("kitai_poll_initial_delay", 2.0)),
             poll_delay=float(gc.get("kitai_poll_delay", 2.0)),
         )
+
+
+def _resolve_cert(gc: dict[str, Any]) -> dict[str, str]:
+    """Which client certificate KitAI presents.
+
+    KitAI and GigaChat are DIFFERENT contours and may want different
+    certificates, so `kitai_cert_path` exists; empty means "the GigaChat one",
+    which is what an install with a single pair wants and what shipped before.
+
+    The subtle part is the CONFIGURED-BUT-ABSENT case. The secret is mounted
+    `optional: true`, so setting the path before creating the secret leaves an
+    empty directory — and a hard failure there takes the whole chat down with
+    "certificate not found" for what is really a deployment ordering mistake.
+    We fall back to the shared pair and say so, loudly and every time: the chat
+    keeps answering, and the log names both paths so the cause is not a mystery.
+
+    Not silent, deliberately. If the KitAI contour genuinely requires its own
+    certificate, the fallback will still be rejected — and the operator needs to
+    see WHY that happened rather than conclude the certificate is in use.
+    """
+    shared_cert = os.path.expanduser(str(gc.get("cert_path", "")))
+    shared_key = os.path.expanduser(str(gc.get("key_path", "")))
+    shared_pass = str(gc.get("key_passphrase", "") or "")
+
+    own_cert = os.path.expanduser(str(gc.get("kitai_cert_path") or ""))
+    own_key = os.path.expanduser(str(gc.get("kitai_key_path") or ""))
+    if not own_cert and not own_key:
+        return {
+            "cert_path": shared_cert,
+            "key_path": shared_key,
+            "key_passphrase": shared_pass,
+        }
+
+    if os.path.isfile(own_cert) and os.path.isfile(own_key):
+        return {
+            "cert_path": own_cert,
+            "key_path": own_key,
+            "key_passphrase": str(
+                gc.get("kitai_key_passphrase") or gc.get("key_passphrase", "") or ""
+            ),
+        }
+
+    log.warning(
+        "kitai: свой сертификат задан (%s / %s), но файлов нет — иду сертификатом "
+        "GigaChat (%s). Секрет cognivault-kitai-certs заведён?",
+        own_cert or "—",
+        own_key or "—",
+        shared_cert or "—",
+    )
+    return {
+        "cert_path": shared_cert,
+        "key_path": shared_key,
+        "key_passphrase": shared_pass,
+    }
 
 
 def _headers(cfg: KitaiConfig) -> dict[str, str]:

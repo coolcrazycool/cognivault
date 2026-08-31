@@ -465,27 +465,59 @@ def test_failed_query_names_the_model_and_logs_the_query_id(caplog):
     assert "glm-5.2" in caplog.text
 
 
-def test_kitai_uses_its_own_certificate_when_configured():
-    """KitAI — другой контур; общий с GigaChat сертификат это частный случай.
+def test_kitai_uses_its_own_certificate_when_the_files_exist(tmp_path):
+    """KitAI — другой контур; общий с GigaChat сертификат это частный случай."""
+    own_crt = tmp_path / "k.crt"
+    own_key = tmp_path / "k.key"
+    own_crt.write_text("x")
+    own_key.write_text("x")
 
-    Пустой `kitai_cert_path` = «тот же, что у GigaChat», поэтому установка с
-    одной парой ничего не настраивает; установка с двумя кладёт вторую сюда.
-    """
-    shared = {"cert_path": "/certs/client_crt.crt", "key_path": "/certs/client_key.key",
-              "key_passphrase": "s3cret", "kitai_host": "https://k"}
-
-    same = kitai.KitaiConfig.from_dict(shared)
-    assert (same.cert_path, same.key_path, same.key_passphrase) == (
-        "/certs/client_crt.crt", "/certs/client_key.key", "s3cret")
-
-    own = kitai.KitaiConfig.from_dict({
-        **shared,
-        "kitai_cert_path": "/certs/kitai/client_crt.crt",
-        "kitai_key_path": "/certs/kitai/client_key.key",
-        "kitai_key_passphrase": "other",
+    cfg = kitai.KitaiConfig.from_dict({
+        "cert_path": "/certs/client_crt.crt",
+        "key_path": "/certs/client_key.key",
+        "key_passphrase": "shared",
+        "kitai_host": "https://k",
+        "kitai_cert_path": str(own_crt),
+        "kitai_key_path": str(own_key),
+        "kitai_key_passphrase": "own",
     })
-    assert (own.cert_path, own.key_path, own.key_passphrase) == (
-        "/certs/kitai/client_crt.crt", "/certs/kitai/client_key.key", "other")
+
+    assert (cfg.cert_path, cfg.key_path, cfg.key_passphrase) == (
+        str(own_crt), str(own_key), "own")
+
+
+def test_no_kitai_certificate_means_the_shared_one():
+    """Установка с одной парой не настраивает ничего."""
+    cfg = kitai.KitaiConfig.from_dict({
+        "cert_path": "/certs/client_crt.crt",
+        "key_path": "/certs/client_key.key",
+        "key_passphrase": "shared",
+        "kitai_host": "https://k",
+    })
+    assert (cfg.cert_path, cfg.key_path, cfg.key_passphrase) == (
+        "/certs/client_crt.crt", "/certs/client_key.key", "shared")
+
+
+def test_configured_but_missing_certificate_degrades_instead_of_killing_chat(caplog):
+    """Путь задан, а секрета ещё нет — это ошибка ПОРЯДКА выкатки, не повод лечь.
+
+    Том смонтирован `optional: true`, поэтому каталог окажется пустым. Жёсткий
+    отказ здесь уронил бы весь чат сообщением «сертификат не найден»; вместо
+    этого идём общей парой и громко пишем об этом — иначе оператор решит, что
+    свой сертификат используется, хотя это не так.
+    """
+    with caplog.at_level("WARNING"):
+        cfg = kitai.KitaiConfig.from_dict({
+            "cert_path": "/certs/client_crt.crt",
+            "key_path": "/certs/client_key.key",
+            "kitai_host": "https://k",
+            "kitai_cert_path": "/certs/kitai/client_crt.crt",
+            "kitai_key_path": "/certs/kitai/client_key.key",
+        })
+
+    assert cfg.cert_path == "/certs/client_crt.crt"
+    assert "/certs/kitai/client_crt.crt" in caplog.text
+    assert "cognivault-kitai-certs" in caplog.text
 
 
 def test_kitai_certificate_paths_stay_admin_only():
