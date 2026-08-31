@@ -7,6 +7,9 @@ on:
       - emdash/k8s-gigachat-integration-yce22
     paths:
       - 'cognivault-ui/**'
+      # Харнесс оценки едет в этом же образе (см. Dockerfile) — значит его
+      # правки обязаны пересобирать UI, иначе в поде останется старая версия.
+      - 'tools/eval/**'
       - '.github/workflows/docker-publish-ui.yml'
   workflow_dispatch: {}
 
@@ -72,7 +75,8 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          context: ./cognivault-ui
+          # Корень репозитория: Dockerfile тянет и cognivault-ui/, и tools/eval/.
+          context: .
           file: ./cognivault-ui/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}

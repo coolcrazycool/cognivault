@@ -68,47 +68,49 @@
 
 ## Запуск в k8s (закрытый контур)
 
-Стенд снаружи недоступен, а харнессу нужны и UI, и mTLS-сертификат для судьи.
-Оба уже есть **внутри пода UI**, поэтому прогон делается там. Судья читает
-`GIGACHAT_BASE_URL` / `GIGACHAT_CERT_PATH` / `GIGACHAT_KEY_PATH` из окружения —
-в поде они проставлены, настраивать нечего.
+Харнесс **уже лежит в образе UI** — в `/srv/cognivault-ui/eval`. Класть файлы в
+под не нужно: снаружи закрытого контура недоступны ни UI, ни mTLS-эндпоинт
+судьи, а прав на `kubectl cp` может не быть. Зависимостей сверх уже
+установленных нет — только stdlib и `httpx`.
 
-Судья намеренно ходит в GigaChat напрямую, а НЕ через KitAI: оценивать систему
-той же моделью, которая в ней отвечает, — плохая идея, а так судья остаётся
-независимым от смены провайдера чата.
+Судья читает `GIGACHAT_BASE_URL` / `GIGACHAT_CERT_PATH` / `GIGACHAT_KEY_PATH` из
+окружения — в поде они проставлены, настраивать нечего. В GigaChat он ходит
+НАПРЯМУЮ, а не через KitAI: оценивать систему той же моделью, которая в ней
+отвечает, — плохая идея, и так судья не зависит от смены провайдера чата.
 
 ```bash
 NS=ci05490208-oasis-cognivault
 POD=$(kubectl get pod -n $NS -l app.kubernetes.io/name=cognivault-ui -o name | head -1)
 
-# 1. Положить харнесс в под (в образ он не входит: только stdlib + httpx)
-kubectl cp tools/eval "$NS/${POD#pod/}:/tmp/eval"
+# Пробный прогон на пяти парах — убедиться, что судья отвечает
+kubectl exec -n $NS "$POD" -- env COGNIVAULT_UI_TOKEN='<ваш токен>' \
+    python3 eval/run.py --label smoke --limit 5 \
+      --rag-log /data/rag_log.jsonl --out-dir /data/eval-reports
 
-# 2. Прогон. UI_TOKEN — тот же токен, которым вы ходите в UI:
-#    настройки привязаны к нему, и A/B надо гонять под одним и тем же.
-kubectl exec -n $NS "$POD" -- env \
-    COGNIVAULT_UI_TOKEN='<ваш токен>' \
-    python3 /tmp/eval/run.py \
-      --label after-w5 \
-      --ui-url http://localhost:8787 \
-      --rag-log /data/rag_log.jsonl \
-      --out-dir /tmp/eval-reports \
-      --concurrency 2
-
-# 3. Забрать отчёты
-kubectl cp "$NS/${POD#pod/}:/tmp/eval-reports" ./eval-reports
+# Полный прогон = новая точка отсчёта
+kubectl exec -n $NS "$POD" -- env COGNIVAULT_UI_TOKEN='<ваш токен>' \
+    python3 eval/run.py --label after-w5 --concurrency 2 \
+      --rag-log /data/rag_log.jsonl --out-dir /data/eval-reports
 ```
 
-Что забирать и присылать: **`report-after-w5.md`** (человекочитаемый) и
-**`report-after-w5.json`** (по нему считается `--compare`). В `.md` смотреть не
-средние, а таблицу по парам и колонку «чанк найден» — она достоверна без судьи и
-делит проблемы на «не нашли» и «нашли, но ответили плохо».
+`--ui-url` не нужен: дефолт `http://localhost:8787` — это и есть свой же процесс.
+`COGNIVAULT_UI_TOKEN` — тот же токен, которым вы ходите в UI: настройки привязаны
+к нему, и обе метки A/B надо гонять под одним и тем же.
 
-Сколько это стоит: 47 пар × ~4 судейских вызова ≈ 190 обращений к GigaChat,
-`--concurrency 2`. Ограничить на пробу — `--limit 5`.
+Отчёты пишутся в `/data/eval-reports` (это `emptyDir` — заберите до перезапуска
+пода). Забрать без `kubectl cp` можно так:
 
-Если `/tmp` в поде недоступен на запись, замените пути на `/data/...` — он
-смонтирован и пишется (но эфемерный: заберите отчёты до перезапуска пода).
+```bash
+kubectl exec -n $NS "$POD" -- cat /data/eval-reports/report-after-w5.md  > report-after-w5.md
+kubectl exec -n $NS "$POD" -- cat /data/eval-reports/report-after-w5.json > report-after-w5.json
+```
+
+То же самое из вкладки **Terminal** в консоли OpenShift: команда без
+`kubectl exec -n $NS "$POD" --`, а отчёт прочитать через `cat` и скопировать
+из окна терминала.
+
+Сколько это стоит: 47 пар × ~4 судейских вызова ≈ 190 обращений к GigaChat при
+`--concurrency 2`.
 
 ## Порядок работы
 

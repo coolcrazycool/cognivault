@@ -13,15 +13,25 @@ FROM python:3.12-alpine
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /srv/cognivault-ui
 
-COPY requirements.txt .
+# Контекст сборки — КОРЕНЬ репозитория, а не cognivault-ui/: в образ нужен ещё
+# и харнесс оценки из tools/eval, а Docker не умеет COPY выше контекста.
+# Корневой .dockerignore (тот же, что у бэкенда) отсекает node_modules и .git.
+COPY cognivault-ui/requirements.txt .
 # Upgrade pip/setuptools (harden the toolchain), then install pinned deps.
 # --only-binary=:all: makes the build fail loudly if any wheel is missing
 # rather than silently compiling from source on musl.
 RUN pip install --no-cache-dir --upgrade pip setuptools \
  && pip install --no-cache-dir --only-binary=:all: -r requirements.txt
 
-COPY app/ app/
-COPY static/ static/
+COPY cognivault-ui/app/ app/
+COPY cognivault-ui/static/ static/
+
+# Харнесс оценки качества ответов. Лежит в образе, потому что запускать его надо
+# ИЗНУТРИ пода: снаружи закрытого контура недоступны ни UI, ни mTLS-эндпоинт
+# судьи, а класть файлы в под правами не всегда разрешено. Зависимостей сверх
+# уже установленных нет — только stdlib и httpx.
+#   python3 -m eval.run --label baseline --ui-url http://localhost:8787
+COPY tools/eval/ eval/
 
 # Run as non-root uid:gid 1000 (matches the restricted PodSecurity in the
 # namespace). /data is an emptyDir mounted at runtime; fsGroup 1000 makes it

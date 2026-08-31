@@ -389,6 +389,7 @@ https://console.bcayrqks.k8s.delta.sbrf.ru/k8s/ns/ci05490208-oasis-cognivault/
 | `06-ingress.yaml` | Ingress `oasis-cognivault-ingress` | **Да при чистом старте.** Если объект в namespace уже есть (его заводит платформа) — не импортировать, а проверить правила: шаги 7 и 7.1 |
 | `07-serviceentry-egress.yaml` | ServiceEntry `gigachat-egress`, **`kitai-egress`**, `qdrant-external-egress`, `confluence-egress` | Только при Istio `REGISTRY_ONLY` |
 | `kitai-check.py` | Диагностика KitAI из пода: список моделей + сырой результат тестового запроса | Не манифест, применять не надо — запускать по месту |
+| *(в образе UI)* `eval/` | Харнесс оценки качества ответов. Запускается ИЗ пода: `kubectl exec … python3 eval/run.py`. Подробности — `tools/eval/README.md` | Ничего копировать не нужно |
 | `99-qdrant-inhouse.yaml` | Service `qdrant` + Deployment `qdrant` | **Нет.** Откат на внутрикластерный Qdrant, по умолчанию НЕ применять |
 
 Внешние зависимости, которые набор не создаёт:
