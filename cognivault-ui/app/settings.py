@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .llm import PROVIDERS
 from .config import (
     DEFAULT_CONFIG,
     AppPaths,
@@ -279,6 +280,7 @@ USER_EDITABLE_KEYS: tuple[str, ...] = (
     # Имя модели у KitAI своё — иначе переключение транспорта затирало бы
     # настройку соседнего. Правится так же, как `model`.
     "gigachat.kitai_model",
+    "gigachat.provider",
     "rag.default_on",
     "rag.limit",
     "rag.min_score",
@@ -310,10 +312,12 @@ ADMIN_LOCKED_KEYS: tuple[str, ...] = (
     "gigachat.key_passphrase",
     "gigachat.verify_ssl",
     "gigachat.model_context_tokens",
-    # Выбор транспорта и адресация KitAI — деплойная забота, не пользовательская:
-    # у пользователя нет ни сертификата под другой контур, ни права называться
-    # чужой системой в x-identification-system.
-    "gigachat.provider",
+    # Адресация KitAI остаётся деплойной заботой, и это не осторожность ради
+    # осторожности: `kitai_host` — адрес, КУДА уедет клиентский сертификат, а
+    # `kitai_system_name` — то, чьим именем мы представляемся платформе.
+    # Пользователь, который может править их, может увести сертификат на свой
+    # хост и назваться чужой системой. Сам ВЫБОР транспорта и имена моделей —
+    # в USER_EDITABLE_KEYS: они ничего никуда не отправляют.
     "gigachat.kitai_host",
     "gigachat.kitai_system_name",
     "gigachat.kitai_module_name",
@@ -464,6 +468,13 @@ def validate_user_overrides(
             gigachat["max_tokens"] = _int_in(
                 "gigachat.max_tokens", gigachat["max_tokens"], 1, ctx_tokens
             )
+        if "provider" in gigachat:
+            provider = gigachat["provider"]
+            if not isinstance(provider, str) or provider.strip().lower() not in PROVIDERS:
+                raise ConfigValueError(
+                    "gigachat.provider", f"одно из {list(PROVIDERS)}", provider
+                )
+            gigachat["provider"] = provider.strip().lower()
         for key in ("model", "kitai_model"):
             if key not in gigachat:
                 continue

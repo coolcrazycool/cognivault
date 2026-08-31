@@ -97,9 +97,21 @@
     <section class="section" id="section-model" aria-labelledby="s-model">
       <span class="eyebrow" id="s-model">Модель и генерация</span>
       <div class="field">
-        <label for="cfg-gc-model">Модель</label>
+        <label for="cfg-gc-provider">Провайдер</label>
+        <select class="input" id="cfg-gc-provider">
+          <option value="gigachat">GigaChat — прямой доступ, ответ печатается по мере генерации</option>
+          <option value="kitai">KitAI — платформа, ответ приходит целиком</option>
+        </select>
+        <small class="hint">Куда уходит запрос на генерацию ответа. Адрес и учётные данные обоих транспортов задаёт администратор; переключение их не меняет.</small>
+      </div>
+      <div class="field">
+        <label for="cfg-gc-model">Модель GigaChat <span class="hint" id="cfg-gc-model-active"></span></label>
         <input class="input" id="cfg-gc-model" placeholder="GigaChat-3-Ultra-preview">
-        <small class="hint" id="cfg-gc-model-hint">Идентификатор модели GigaChat, которая отвечает в чате</small>
+      </div>
+      <div class="field">
+        <label for="cfg-gc-kitai-model">Модель KitAI <span class="hint" id="cfg-gc-kitai-model-active"></span></label>
+        <input class="input" id="cfg-gc-kitai-model" placeholder="glm-5.2">
+        <small class="hint" id="cfg-gc-model-hint">Обе модели хранятся отдельно, поэтому переключение провайдера не затирает соседнюю настройку.</small>
       </div>
       <div class="field">
         <label for="cfg-gc-temperature">Температура</label>

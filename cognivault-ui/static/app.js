@@ -795,28 +795,24 @@
    * "int"/"number" become numbers, "bool" a boolean. Each section saves on its
    * own button and PUTs exactly one subtree of /api/config.
    */
-  // The «Модель» field edits whichever key the ACTIVE transport reads. Two
-  // separate fields would ask the user to know which one is live; a fixed `model`
-  // showed `GigaChat-3-Ultra-preview` while KitAI answered with something else,
-  // and edits to it did nothing at all.
-  function modelKeyFor(gigachat) {
-    return (gigachat && gigachat.provider) === "kitai" ? "kitai_model" : "model";
+  // Both models are shown, always, and the provider says which one answers.
+  // Hiding the inactive one would make switching transports a two-step dance
+  // (switch, save, come back, fill the model); showing one field that silently
+  // re-points is worse still — it looks like the same setting changed value.
+  function markActiveModel(provider) {
+    const kitai = provider === "kitai";
+    const badge = (id, on) => {
+      const n = document.getElementById(id);
+      if (n) n.textContent = on ? "· отвечает в чате" : "· не используется";
+    };
+    badge("cfg-gc-model-active", !kitai);
+    badge("cfg-gc-kitai-model-active", kitai);
   }
 
-  // Name the transport under the field. Without it «Модель» is ambiguous the
-  // moment there is more than one, and the value silently belongs to whichever
-  // one happens to be active.
-  function describeProvider(gigachat) {
-    const node = document.getElementById("cfg-gc-model-hint");
-    if (!node) return;
-    const kitai = (gigachat && gigachat.provider) === "kitai";
-    node.textContent = kitai
-      ? "Модель на платформе KitAI, которая отвечает в чате. Ответ приходит целиком: потоковой печати у этого транспорта нет."
-      : "Идентификатор модели GigaChat, которая отвечает в чате";
-  }
-
-  let MODEL_FIELDS = [
-    { key: "model", id: "cfg-gc-model", type: "text", label: "Модель" },
+  const MODEL_FIELDS = [
+    { key: "provider", id: "cfg-gc-provider", type: "text", label: "Провайдер" },
+    { key: "model", id: "cfg-gc-model", type: "text", label: "Модель GigaChat" },
+    { key: "kitai_model", id: "cfg-gc-kitai-model", type: "text", label: "Модель KitAI" },
     { key: "temperature", id: "cfg-gc-temperature", type: "number", label: "Температура" },
     { key: "max_tokens", id: "cfg-gc-max-tokens", type: "int", label: "Максимум токенов в ответе" },
     // the context window is sized by the deployment, never by the user
@@ -949,11 +945,9 @@
 
   function bindTuningForm() {
     const c = state.config || {};
-    // Re-point the model field before binding: the provider is only known once
-    // the server has answered.
-    MODEL_FIELDS[0].key = modelKeyFor(c.gigachat);
     bindFields(MODEL_FIELDS, "gigachat", c.gigachat);
-    describeProvider(c.gigachat);
+    markActiveModel((c.gigachat || {}).provider);
+    bindProviderLiveBadge();
     bindFields(RAG_FIELDS, "rag", c.rag);
     bindPrompts();
   }
@@ -1002,6 +996,16 @@
     const body = {};
     body[prefix] = collected.payload;
     await putConfigSubtree(body, btn, savedNode, okMessage);
+  }
+
+  // Live feedback: the badge must follow the select immediately, otherwise the
+  // user changes the provider, sees «не используется» still on the model they
+  // just selected, and reasonably concludes nothing happened.
+  function bindProviderLiveBadge() {
+    const sel = document.getElementById("cfg-gc-provider");
+    if (!sel || sel.dataset.badgeBound) return;
+    sel.dataset.badgeBound = "1";
+    sel.addEventListener("change", () => markActiveModel(sel.value));
   }
 
   function saveModelSettings() {

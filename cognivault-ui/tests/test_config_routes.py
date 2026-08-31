@@ -437,3 +437,52 @@ def test_every_user_editable_gigachat_key_is_readable_back():
                 if k.startswith("gigachat.")}
 
     assert editable <= served, f"PUT-абельно, но не читается назад: {sorted(editable - served)}"
+
+
+# --------------------------------------------------------------------------- #
+# Провайдер настраивается из UI
+# --------------------------------------------------------------------------- #
+
+
+def test_provider_is_user_editable_and_validated():
+    from app import settings
+
+    assert "gigachat.provider" in settings.USER_EDITABLE_KEYS
+    assert "gigachat.provider" not in settings.ADMIN_LOCKED_KEYS
+
+    ok = settings.validate_user_overrides({"gigachat": {"provider": " KitAI "}})
+    assert ok["gigachat"]["provider"] == "kitai"
+
+    for bad in ("openai", "", 5, None):
+        with pytest.raises(settings.ConfigValueError):
+            settings.validate_user_overrides({"gigachat": {"provider": bad}})
+
+
+def test_kitai_address_and_identity_stay_admin_only():
+    """Хост и имя системы пользователю не отдаём — и это не вкусовщина.
+
+    `kitai_host` — адрес, КУДА уедет клиентский сертификат; `kitai_system_name`
+    — то, чьим именем сервис представляется платформе. Пользователь, способный
+    их править, уводит сертификат на свой хост и называется чужой системой.
+    """
+    from app import settings
+
+    for key in ("gigachat.kitai_host", "gigachat.kitai_system_name",
+                "gigachat.kitai_module_name"):
+        assert key in settings.ADMIN_LOCKED_KEYS
+        assert key not in settings.USER_EDITABLE_KEYS
+
+
+def test_switching_provider_does_not_clobber_the_other_model():
+    """Модели хранятся раздельно — переключение туда-обратно ничего не теряет."""
+    from app import llm
+
+    gc = {"provider": "gigachat", "model": "GigaChat-3-Ultra-preview",
+          "kitai_model": "glm-5.2", "kitai_host": "https://h"}
+    assert llm.config_for(gc).model == "GigaChat-3-Ultra-preview"
+
+    gc["provider"] = "kitai"
+    assert llm.config_for(gc).model == "glm-5.2"
+
+    gc["provider"] = "gigachat"
+    assert llm.config_for(gc).model == "GigaChat-3-Ultra-preview"
