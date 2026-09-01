@@ -548,10 +548,27 @@ def test_prod_configmap_matches_the_code_defaults_for_tuned_keys():
         "RAG_GRADER_KEEP_TOP": "grader_keep_top",
         "RAG_GRADER_THRESHOLD": "grader_threshold",
         "RAG_RERANK_CANDIDATES": "rerank_candidates",
+        # Поводки скрытых вызовов: расхождение здесь бесшумно ломает грейдер.
+        # Ровно так и вышло на прогоне `baseline` — в манифесте 90, в коде 20,
+        # ConfigMap до пода не доехал, и реранкера в пайплайне не было.
+        "RAG_GRADER_TIMEOUT": "grader_timeout",
+        "RAG_CONDENSE_TIMEOUT": "condense_timeout",
     }
+    def same(manifest_value, default_value) -> bool:
+        """Сравнение по значению, а не по написанию: `"90"` == `90.0`.
+
+        Ключ читается через `_env_float`/`_env_int`, поэтому «90» в манифесте и
+        `90.0` в коде — одно и то же число; строковое сравнение видело бы здесь
+        расхождение, которого нет.
+        """
+        try:
+            return float(manifest_value) == float(default_value)
+        except (TypeError, ValueError):
+            return str(manifest_value) == str(default_value)
+
     mismatched = {
         env: (data[env], DEFAULT_CONFIG["rag"][key])
         for env, key in tuned.items()
-        if env in data and str(data[env]) != str(DEFAULT_CONFIG["rag"][key])
+        if env in data and not same(data[env], DEFAULT_CONFIG["rag"][key])
     }
     assert not mismatched, f"манифест разошёлся с дефолтами кода: {mismatched}"
