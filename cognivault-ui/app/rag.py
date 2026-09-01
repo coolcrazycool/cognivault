@@ -933,6 +933,9 @@ async def _build_auto(
     # boundaries, which beats re-deriving them from the rendered document here.
     # The semantic fallback returns neither field; `add_sections` degrades to the
     # bare chunk in that case.
+    # Архив в выдаче — по умолчанию да: бэкенд иначе молча вырезает всё под
+    # папкой «Архив», а на живом дереве туда уехали актуальные страницы.
+    include_archived = bool(rcfg.get("include_archived", True))
     try:
         try:
             raw = await cognivault.hybrid_search(
@@ -941,9 +944,12 @@ async def _build_auto(
                 cv=cv,
                 group_by_section=True,
                 section_max_chars=section_max_chars,
+                include_archived=include_archived,
             )
         except Exception:  # noqa: BLE001 — hybrid missing/404 => semantic fallback
-            raw = await cognivault.semantic_search(rq, limit, cv=cv)
+            raw = await cognivault.semantic_search(
+                rq, limit, cv=cv, include_archived=include_archived
+            )
     except Exception:  # noqa: BLE001 — any retrieval failure => graceful fallback
         return RagContext(
             notice=_RETRIEVAL_UNAVAILABLE,

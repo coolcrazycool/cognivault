@@ -88,18 +88,26 @@ async def health(cv: dict[str, Any] | None = None) -> tuple[bool, int, str | Non
 
 
 async def semantic_search(
-    query: str, limit: int, cv: dict[str, Any] | None = None
+    query: str,
+    limit: int,
+    cv: dict[str, Any] | None = None,
+    *,
+    include_archived: bool | None = None,
 ) -> dict[str, Any]:
     """POST ``/api/vault/search/semantic``.
 
     The body is sent as raw UTF-8 (``ensure_ascii=False``) so Cyrillic queries
     are not escaped over the wire.
+
+    ``include_archived`` is written only when set, so an older backend that does
+    not know the key still sees the historical ``{query, limit}`` payload.
     """
     base, token = _resolve_cv(cv)
     url = f"{base}/api/vault/search/semantic"
-    body = json.dumps({"query": query, "limit": limit}, ensure_ascii=False).encode(
-        "utf-8"
-    )
+    payload: dict[str, Any] = {"query": query, "limit": limit}
+    if include_archived is not None:
+        payload["include_archived"] = bool(include_archived)
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = _auth_headers(
         token, {"Content-Type": "application/json; charset=utf-8"}
     )
@@ -121,6 +129,7 @@ async def hybrid_search(
     *,
     group_by_section: bool = False,
     section_max_chars: int | None = None,
+    include_archived: bool | None = None,
 ) -> dict[str, Any]:
     """POST ``/api/vault/search/hybrid``.
 
@@ -141,6 +150,8 @@ async def hybrid_search(
         payload["group_by_section"] = True
     if section_max_chars is not None:
         payload["section_max_chars"] = section_max_chars
+    if include_archived is not None:
+        payload["include_archived"] = bool(include_archived)
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = _auth_headers(
         token, {"Content-Type": "application/json; charset=utf-8"}
