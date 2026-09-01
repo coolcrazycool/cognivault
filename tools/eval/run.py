@@ -125,6 +125,43 @@ BUCKET_NOTE = (
     "ветку меряет `meta_answered_rate`."
 )
 
+CLIPPED_CONTEXT_WARNING = (
+    "**Судья видел меньше контекста, чем модель, на {clipped} парах из "
+    "{total}.** `context_text` в `rag_log.jsonl` обрезан своим капом "
+    "(`rag_log.MAX_TEXT_CHARS`), и часть блоков до судьи не доехала — а ответ "
+    "на них ссылается. Провалы `faithfulness` и `context_precision` на этих "
+    "парах говорят про отсутствующий у судьи текст, а не про качество ответа. "
+    "Лечится подъёмом капа ВЫШЕ `max_context_chars`; пары помечены "
+    "`context_clipped`."
+)
+
+GRADER_SILENT_WARNING = (
+    "**Грейдер молча не отработал: оценки есть только у {graded} пар(ы) из "
+    "{applicable}.** Провалившийся батч деградирует во все `None`, а отбор при "
+    "`None` пропускает кандидатов В СЫРОМ ПОРЯДКЕ ПОИСКА — то есть измерен "
+    "пайплайн БЕЗ реранкера, хотя `грейдер: включён` в параметрах говорит "
+    "обратное. Ошибки при этом нет нигде: ответы получены, метрики посчитаны. "
+    "Сравнивать такой прогон с прогоном, где грейдер жив, нельзя — это разные "
+    "системы. Смотрите таблицу стадий: время `grade`, совпавшее с поводком, "
+    "означает таймаут, а не работу."
+)
+
+CONDENSE_NOT_CALLED = (
+    "включён, но НЕ ВЫЗЫВАЛСЯ: каждый вопрос задан в новом чате, а "
+    "condense_first_turn выключен"
+)
+
+JUDGE_FAILURE_WARNING = (
+    "**Судья не ответил на {failed} вызов(ов) из {expected}; затронуто пар: "
+    "{affected}.** Каждый несостоявшийся вызов — это прочерк в таблице, а не "
+    "ноль, так что средние он не занижает: он считает их по НЕПОЛНОМУ и заведомо "
+    "НЕСЛУЧАЙНОМУ подмножеству (терялись длинные и медленные пары). Колонка "
+    "«Оценено пар» показывает, сколько чисел реально стоит за каждым средним; "
+    "пока она заметно меньше числа пар, дельта с другим прогоном ловит только "
+    "очень крупные сдвиги. Причины — в разбивке ниже; строка `HTTP 429` "
+    "означает, что прогон шёл слишком параллельно для контура."
+)
+
 FALSE_REFUSAL_NOTE = (
     "`false_refusal_rate` — **меньше лучше**, это единственное такое число в "
     "отчёте. Оно ловит обратную ошибку: у вопроса ответ есть, а ассистент "
@@ -204,11 +241,27 @@ def is_refusal(answer: str, *, finish_reason: str | None = None) -> bool:
 
     Две улики: служебный ``finish_reason == "no_context"`` (грейдер не оставил
     ни одного фрагмента — генерации не было вовсе) и формулировка отказа из
-    системного промпта.
+    системного промпта В ПЕРВОМ ПРЕДЛОЖЕНИИ.
+
+    Привязка к первому предложению обязательна. Те же слова в середине —
+    честная оговорка о неполноте («ID потока — 4832. В источниках нет явного
+    описания его назначения, однако…»), и поиск по всему тексту засчитывал такой
+    содержательный ответ как полный отказ: в прогоне `baseline` так был потерян
+    x35, то есть треть всей метрики `false_refusal_rate`. Отказ по системному
+    промпту всегда стоит первой фразой, поэтому окно ничего не теряет.
     """
     if finish_reason == "no_context":
         return True
-    return bool(_REFUSAL_RE.search(answer or ""))
+    return bool(_REFUSAL_RE.search(_opening_sentence(answer)))
+
+
+def _opening_sentence(answer: str) -> str:
+    """Первое предложение ответа (весь текст, если сегментация ничего не дала)."""
+    text = (answer or "").strip()
+    if not text:
+        return ""
+    sentences = metrics_mod.split_sentences_ru(text)
+    return sentences[0] if sentences else text
 
 
 # --------------------------------------------------------------------------- #
@@ -337,7 +390,31 @@ def load_golden(path: str, *, include_rejected: bool = False) -> list[dict[str, 
             if not include_rejected and row.get("accepted") is False:
                 continue
             rows.append(row)
+    for ids, question in duplicate_questions(rows):
+        _log(f"golden: дубль вопроса {ids} — {question[:70]!r}")
     return rows
+
+
+def duplicate_questions(rows: Sequence[dict[str, Any]]) -> list[tuple[list[str], str]]:
+    """Пары с одним и тем же вопросом — считаются дважды и портят агрегаты.
+
+    Найдено на живом наборе: `x24` ≡ `fb31` и `x29` ≡ `fb18` дали побайтово
+    одинаковые ответы, то есть одно наблюдение попало в средние и в разброс
+    два раза. Набор от этого не падает — решать, какую из пар оставить, должен
+    человек (у `fb*` есть `expected_items`, у `x*` — `source_path`), поэтому
+    здесь только предупреждение.
+    """
+    seen: dict[str, list[str]] = {}
+    order: list[str] = []
+    for row in rows:
+        key = " ".join(str(row.get("question") or "").lower().split()).rstrip("?!. ")
+        if not key:
+            continue
+        if key not in seen:
+            seen[key] = []
+            order.append(key)
+        seen[key].append(str(row.get("id") or "?"))
+    return [(seen[k], k) for k in order if len(seen[k]) > 1]
 
 
 # --------------------------------------------------------------------------- #
@@ -822,11 +899,25 @@ async def run_sample(
     if record is not None:
         sample["run_settings"] = record.get("settings")
         sample["timings_ms"] = record.get("timings_ms")
+        # ВСЕ кандидаты поиска до отбора, с рангом и оценкой грейдера. Без них
+        # главный вопрос тюнинга — «нужный документ вообще нашёлся, но не доехал
+        # до контекста, или его не было в выдаче?» — по отчёту неотвечаем, а
+        # именно на нём стоят правки глубины, стемминга и аббревиатур.
+        sample["candidates"] = record.get("candidates")
 
     # Метаданные источников: из лога они богаче (`chunk_index`), из SSE — беднее.
     sample["sources"] = resolved.sources or outcome.sources
     sample["context_count"] = len(resolved.contexts)
     sample["context_origin"] = resolved.origin
+    # Судья видит `context_text` из лога. Если лог обрезан своим капом, блоков
+    # там меньше, чем источников у ответа, и судья штрафует ответ за текст,
+    # которого ему не дали. Сэмпл из-за этого не выбрасывается (ответ и ретрив
+    # измерены честно), но молчать об этом нельзя.
+    sample["context_clipped"] = (
+        len(sample["sources"] or []) > len(resolved.contexts)
+        if resolved.origin == "rag_log"
+        else False
+    )
     refused = is_refusal(outcome.answer, finish_reason=outcome.finish_reason)
     sample[REFUSAL_KEY] = refused
     # Ложный отказ меряется ТОЛЬКО на отвечаемых парах: на паре-ловушке отказ —
@@ -868,7 +959,14 @@ async def run_all(
     context_cap: int,
     rag_log: RagLogIndex | None = None,
 ) -> list[dict[str, Any]]:
-    """Run every golden pair with bounded concurrency (GigaChat is fragile)."""
+    """Run every golden pair with bounded concurrency (GigaChat is fragile).
+
+    По умолчанию `concurrency=1`. У судьи на контуре фактически один слот: второй
+    одновременный запрос получает 429 сразу, а ждать освобождения дольше, чем
+    длится чужой вызов, ретраи не могут. Прогон `baseline` шёл в два потока и
+    потерял 95 судейских вызовов из 188 — ровно через строку, 0 или все 4 метрики
+    сэмпла. Поднимать это число можно, только убедившись, что 429 не вернулись.
+    """
     semaphore = asyncio.Semaphore(max(1, concurrency))
     cache: dict[str, str] = {}
     out: list[dict[str, Any]] = [{} for _ in rows]
@@ -1007,6 +1105,135 @@ def meta_answered_rate(samples: Sequence[dict[str, Any]]) -> float | None:
     if not values:
         return None
     return round(sum(1 for v in values if v) / len(values), 4)
+
+
+def grader_health(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Отработал ли грейдер — по его собственным оценкам, а не по таймингам.
+
+    У каждого источника есть `grade` (1..5 от грейдера, ``None`` — не оценён).
+    Провалившийся батч деградирует во все ``None``, и `select` пропускает
+    кандидатов В СЫРОМ ПОРЯДКЕ ПОИСКА: пайплайн отвечает, ошибки нигде нет, но
+    реранкера в нём не было. Прогон `baseline` так прошёл целиком — оценки
+    появились ровно у 2 пар из 47, и по отчёту это было не видно никак.
+
+    Знаменатель — пары, где грейдеру было что оценивать: он включён и источники
+    есть. Пара без источников ничего о его здоровье не говорит.
+    """
+    applicable = 0
+    graded = 0
+    partial = 0
+    enabled_seen = False
+    for sample in samples:
+        rag_cfg = ((sample.get("run_settings") or {}).get("rag")) or {}
+        if not rag_cfg.get("grader_enabled"):
+            continue
+        enabled_seen = True
+        grades = [
+            src.get("grade")
+            for src in (sample.get("sources") or [])
+            if isinstance(src, dict)
+        ]
+        if not grades:
+            continue
+        applicable += 1
+        scored = [g for g in grades if g is not None]
+        if scored:
+            graded += 1
+            if len(scored) < len(grades):
+                partial += 1
+    return {
+        "enabled": enabled_seen,
+        "applicable": applicable,
+        "graded": graded,
+        "ungraded": applicable - graded,
+        "partial": partial,
+    }
+
+
+def stage_timings(samples: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Медиана/максимум по стадиям хода + сравнение с их поводком.
+
+    `deadline_ms` берётся из снимка настроек хода (`condense_timeout`,
+    `grader_timeout`). `at_deadline` — сколько ходов уложились В САМ дедлайн:
+    стадия, у которой время совпало с поводком, не «работала ровно столько»,
+    а была им обрезана. Живой пример: 41 ход из 46 с `grade` в диапазоне
+    20003–20023 мс при `grader_timeout = 20`.
+    """
+    deadlines = {"condense": "condense_timeout", "grade": "grader_timeout"}
+    buckets: dict[str, list[float]] = {}
+    limits: dict[str, float] = {}
+    for sample in samples:
+        rag_cfg = ((sample.get("run_settings") or {}).get("rag")) or {}
+        for stage_name, key in deadlines.items():
+            value = rag_cfg.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                limits[stage_name] = float(value) * 1000.0
+        for name, ms in (sample.get("timings_ms") or {}).items():
+            if isinstance(ms, (int, float)) and not isinstance(ms, bool):
+                buckets.setdefault(str(name), []).append(float(ms))
+    out: dict[str, dict[str, Any]] = {}
+    for name in sorted(buckets):
+        values = sorted(buckets[name])
+        deadline = limits.get(name)
+        entry: dict[str, Any] = {
+            "n": len(values),
+            "median_ms": round(statistics.median(values), 1),
+            "max_ms": round(values[-1], 1),
+            "deadline_ms": deadline,
+            # Дедлайн срабатывает ЧУТЬ позже назначенного (планировщик добавляет
+            # миллисекунды), поэтому окно односторонее и с запасом сверху.
+            "at_deadline": (
+                sum(1 for v in values if deadline * 0.995 <= v <= deadline * 1.05)
+                if deadline
+                else None
+            ),
+        }
+        out[name] = entry
+    return out
+
+
+def judge_failures(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Сколько судейских вызовов не вернулось и почему.
+
+    Отчёт до сих пор считал только упавшие СЭМПЛЫ (сбой чата), а упавший вызов
+    судьи не считал никак: прогон `baseline` показывал «ошибок 0», потеряв при
+    этом 95 вызовов из 188 на HTTP 429. Средние от этого не смещаются вниз (у
+    метрики стоит ``None``, а `aggregate` пропускает ``None``), но считаются по
+    подмножеству, и молчать об этом нельзя — иначе `n=15` читается как свойство
+    набора, а не как сбой контура.
+
+    Считаются только метрики с вызовом судьи и только по флагу ``failed``:
+    «пустой ground_truth» и «в вопросе нет expected_items» — это структурные
+    пропуски, вызова там не было.
+    """
+    expected = 0
+    failed = 0
+    affected = 0
+    by_error: dict[str, int] = {}
+    for sample in samples:
+        metrics = sample.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        hit = False
+        for name in metrics_mod.JUDGE_METRIC_NAMES:
+            entry = metrics.get(name)
+            if not isinstance(entry, dict):
+                continue
+            expected += 1
+            if not entry.get("failed"):
+                continue
+            failed += 1
+            hit = True
+            reason = str(entry.get("error") or "неизвестная ошибка")[:120]
+            by_error[reason] = by_error.get(reason, 0) + 1
+        if hit:
+            affected += 1
+    return {
+        "expected": expected,
+        "failed": failed,
+        "samples_affected": affected,
+        "by_error": dict(sorted(by_error.items(), key=lambda kv: (-kv[1], kv[0]))),
+    }
 
 
 def metric_values(samples: Sequence[dict[str, Any]], name: str) -> list[float]:
@@ -1186,6 +1413,9 @@ def build_report(
             "total": len(samples),
             "failed": len(failed),
             "evaluated": len(ok),
+            # Пары, где судье достался урезанный контекст: сэмпл цел, метрики
+            # посчитаны, но посчитаны не по тому, что видела модель.
+            "context_clipped": sum(1 for s in samples if s.get("context_clipped")),
         },
         # Состав оценённых пар: судейские средние покрывают только `answerable`,
         # и без этих двух чисел прогон на 39 вопросах молча сравнится с
@@ -1206,6 +1436,14 @@ def build_report(
         "coverage_refusal": coverage(ok_refusal),
         "coverage_meta": coverage(ok_meta),
         "by_category": group_by_category(samples),
+        # Здоровье судьи, а не качество ответов: без него «оценено пар: 15» из
+        # 36 выглядит как свойство набора, а не как сбой контура.
+        "judge_failures": judge_failures(samples),
+        # То же для скрытых вызовов самого пайплайна: молча не отработавший
+        # грейдер меняет смысл ВСЕХ чисел отчёта (контекст собран сырым
+        # порядком поиска), а по метрикам качества это неотличимо.
+        "grader_health": grader_health(samples),
+        "stage_timings": stage_timings(samples),
         "retrieval_granularity": granularity_counts(samples),
         "retrieval_degradation": granularity_degradation(samples),
         "run_params": run_parameters(
@@ -1236,6 +1474,27 @@ def _fmt_spread(entry: Any) -> str:
         return "—"
     tail = f" ±{sd:.3f}" if isinstance(sd, (int, float)) else ""
     return f"{mean:.3f}{tail} (n={n})"
+
+
+def _condense_state(report: dict[str, Any], rag_cfg: dict[str, Any]) -> Any:
+    """Значение строки «condense включён» — с поправкой на то, вызывался ли он.
+
+    Флаг в настройках и факт вызова — разные вещи. Харнесс задаёт КАЖДЫЙ вопрос
+    в новом чате, то есть всегда первым ходом; при выключенном
+    `condense_first_turn` переписывание вопроса не запускается ни разу, и
+    прогон меряет пайплайн без одного из двух скрытых вызовов. Отчёт при этом
+    честно писал «да» — формально верно и полностью вводит в заблуждение.
+    """
+    enabled = rag_cfg.get("condense_enabled")
+    stage = (report.get("stage_timings") or {}).get("condense")
+    if not enabled or not isinstance(stage, dict):
+        # Стадия не размечена вовсе (старый отчёт, прогон без rag_log) —
+        # «не знаю» лучше уверенной лжи в любую сторону.
+        return enabled
+    ran = stage.get("max_ms")
+    if isinstance(ran, (int, float)) and ran > 0:
+        return enabled
+    return CONDENSE_NOT_CALLED
 
 
 def _render_run_params(report: dict[str, Any]) -> list[str]:
@@ -1270,7 +1529,7 @@ def _render_run_params(report: dict[str, Any]) -> list[str]:
                 ("грейдер: включён", rag_cfg.get("grader_enabled")),
                 ("грейдер: порог", rag_cfg.get("grader_threshold")),
                 ("грейдер: keep_top", rag_cfg.get("grader_keep_top")),
-                ("condense включён", rag_cfg.get("condense_enabled")),
+                ("condense включён", _condense_state(report, rag_cfg)),
                 ("бюджет контекста, симв.", rag_cfg.get("max_context_chars")),
                 ("промпт system (отпечаток)", prompts.get("system") or "встроенный"),
                 (
@@ -1282,7 +1541,11 @@ def _render_run_params(report: dict[str, Any]) -> list[str]:
     else:
         rows.append(("настройки UI", ui if ui else "не найдены (нет rag_log)"))
     for name, value in rows:
-        lines.append(f"| {name} | `{_fmt(value)}` |")
+        text = _fmt(value)
+        # Значение-фраза в бэктиках — сломанная разметка и нечитаемая строка;
+        # моноширинным набирается только то, что действительно идентификатор.
+        cell = text if " " in text else f"`{text}`"
+        lines.append(f"| {name} | {cell} |")
     lines.append("")
     return lines
 
@@ -1413,6 +1676,75 @@ def _render_categories(report: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _render_stages(report: dict[str, Any]) -> list[str]:
+    """Секция «Скрытые вызовы» — что происходило внутри хода.
+
+    Метрики качества описывают ОТВЕТ; эта таблица описывает пайплайн, который
+    его собрал. Без неё «грейдер: включён» в параметрах читается как «грейдер
+    работал», и разница между этими двумя утверждениями стоила прогону
+    `baseline` всего смысла.
+    """
+    stages = report.get("stage_timings") or {}
+    grader = report.get("grader_health") or {}
+    if not stages and not grader.get("applicable"):
+        return []
+    lines = ["## Скрытые вызовы", ""]
+    if grader.get("enabled"):
+        line = (
+            f"- грейдер вернул оценки на {grader.get('graded', 0)} парах из "
+            f"{grader.get('applicable', 0)}"
+        )
+        if grader.get("partial"):
+            line += f" (из них частично, батчами: {grader['partial']})"
+        lines.append(line)
+        if grader.get("ungraded"):
+            lines.append(
+                f"  - на остальных {grader['ungraded']} контекст собран сырым "
+                "порядком поиска: порог и `keep_top` к ним не применялись"
+            )
+    if stages:
+        lines.append("")
+        lines.append("| стадия | медиана, мс | максимум, мс | поводок, мс | упёрлось в поводок |")
+        lines.append("|---|---:|---:|---:|---:|")
+        for name, entry in stages.items():
+            deadline = entry.get("deadline_ms")
+            hits = entry.get("at_deadline")
+            # У стадии без известного поводка нет и знаменателя: «— из 46»
+            # выглядело бы как измерение, которого не было.
+            hit_cell = "—" if deadline is None else f"{_fmt(hits)} из {entry.get('n')}"
+            lines.append(
+                f"| {name} | {entry.get('median_ms')} | {entry.get('max_ms')} | "
+                f"{_fmt(deadline)} | {hit_cell} |"
+            )
+        lines.append("")
+        lines.append(
+            "Время, совпавшее с поводком, — это таймаут, а не работа: стадия не "
+            "«успела ровно за столько», её на этом месте оборвали."
+        )
+    lines.append("")
+    return lines
+
+
+def _render_judge_health(report: dict[str, Any]) -> list[str]:
+    """Строка о несостоявшихся судейских вызовах — печатается ВСЕГДА.
+
+    В том числе с нулём: «0 из 188» это утверждение о прогоне, а отсутствие
+    строки читалось бы как «не мерили».
+    """
+    health = report.get("judge_failures") or {}
+    expected = health.get("expected", 0)
+    failed = health.get("failed", 0)
+    if not expected:
+        return []
+    line = f"- судейских вызовов не вернулось: **{failed}** из {expected}"
+    if failed:
+        line += f" (затронуто пар: {health.get('samples_affected', 0)})"
+    lines = [line]
+    for reason, count in (health.get("by_error") or {}).items():
+        lines.append(f"  - {count} × `{reason}`")
+    return lines
+
+
 def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
     """Render the markdown report: disclaimer → aggregates → per-sample table."""
     counts = report.get("counts", {})
@@ -1438,6 +1770,36 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
             )
         )
         lines.append("")
+    clipped = int((report.get("counts") or {}).get("context_clipped", 0) or 0)
+    if clipped:
+        lines.append(
+            "> "
+            + CLIPPED_CONTEXT_WARNING.format(
+                clipped=clipped, total=(report.get("counts") or {}).get("total", 0)
+            )
+        )
+        lines.append("")
+    grader = report.get("grader_health") or {}
+    if grader.get("enabled") and grader.get("ungraded"):
+        lines.append(
+            "> "
+            + GRADER_SILENT_WARNING.format(
+                graded=grader.get("graded", 0),
+                applicable=grader.get("applicable", 0),
+            )
+        )
+        lines.append("")
+    judge_health = report.get("judge_failures") or {}
+    if judge_health.get("failed"):
+        lines.append(
+            "> "
+            + JUDGE_FAILURE_WARNING.format(
+                failed=judge_health.get("failed", 0),
+                expected=judge_health.get("expected", 0),
+                affected=judge_health.get("samples_affected", 0),
+            )
+        )
+        lines.append("")
     lines.append(f"- дата: `{report.get('generated_at')}`")
     lines.append(f"- golden-set: `{report.get('golden')}`")
     lines.append(f"- UI: `{report.get('ui_url')}`")
@@ -1453,6 +1815,7 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
         f"- **упало и исключено из средних: {counts.get('failed', 0)}** "
         "(сбой чата или недоступный текст контекста — не качество)"
     )
+    lines.extend(_render_judge_health(report))
     lines.append(f"- источник контекста: `{report.get('context_origin', {})}`")
     lines.append(
         f"- гранулярность `retrieval_hit`: `{report.get('retrieval_granularity', {})}`"
@@ -1464,6 +1827,7 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
     )
     lines.append("")
     lines.extend(_render_run_params(report))
+    lines.extend(_render_stages(report))
     lines.append("## Средние значения")
     lines.append("")
     lines.append(BUCKET_NOTE.format(**_bucket_numbers(report)))
@@ -1947,8 +2311,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=2,
-        help="параллельных вопросов (держите маленьким — GigaChat)",
+        default=1,
+        help="параллельных вопросов (1 — судья держит один слот, см. README)",
     )
     parser.add_argument("--out-dir", default=_default_out_dir(), help="куда писать отчёты")
     parser.add_argument(

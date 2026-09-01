@@ -13,10 +13,14 @@ import os
 import sys
 
 import pytest
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app import eval_runner  # noqa: E402
+from app import eval_runner, settings  # noqa: E402
+from app.config import AppPaths  # noqa: E402
+from app.main import create_app  # noqa: E402
+from app.routes import eval_routes  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -157,6 +161,35 @@ def test_report_lookup_is_a_whitelist_not_a_path_join(tmp_path):
     assert "report-ok.md" in allowed
     for attack in ("../secret.txt", "/etc/passwd", "report-ok.md/../../secret.txt"):
         assert attack not in allowed
+
+
+def test_run_is_started_strictly_single_threaded(tmp_path, monkeypatch):
+    """У судьи на контуре один слот — прогон обязан идти в один поток.
+
+    На `--concurrency 2` прогон `baseline` потерял 95 судейских вызовов из 188:
+    второй одновременный запрос получал 429 сразу, а ретраи короче чужого
+    вызова, поэтому проигравший терял метрики целыми сэмплами. Число живёт
+    здесь, а не в дефолте харнесса, — значит и стеречь его надо здесь.
+    """
+    monkeypatch.setattr(settings, "is_server", lambda: False)
+    monkeypatch.setattr(
+        eval_routes, "resolve_paths", lambda request: AppPaths(root=tmp_path)
+    )
+    monkeypatch.setattr(eval_runner, "available", lambda: True)
+    seen: dict = {}
+
+    def fake_start(*, label, argv, out_dir):
+        seen["argv"] = argv
+        return eval_runner.EvalJob(label=label)
+
+    monkeypatch.setattr(eval_runner.RUNNER, "start", fake_start)
+
+    with TestClient(create_app()) as client:
+        resp = client.post("/api/eval/run", json={"label": "smoke", "limit": 5})
+
+    assert resp.status_code == 200
+    argv = seen["argv"]
+    assert argv[argv.index("--concurrency") + 1] == "1"
 
 
 def test_status_shape_survives_a_run(tmp_path, monkeypatch):

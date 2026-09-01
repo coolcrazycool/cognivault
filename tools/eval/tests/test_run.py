@@ -17,11 +17,13 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gen_golden import BackendError  # noqa: E402
+from metrics import JUDGE_METRIC_NAMES  # noqa: E402
 
 from run import (  # noqa: E402
     _bucket_numbers,
     APPROXIMATE_WARNING,
     CATEGORY_KEY,
+    CONDENSE_NOT_CALLED,
     DEFAULT_UI_URL,
     FALSE_REFUSAL_KEY,
     FALSE_REFUSAL_RATE_KEY,
@@ -333,6 +335,27 @@ def test_is_refusal_recognises_the_prompt_wording_and_no_context():
     assert not is_refusal("Порог грейдера задаётся ключом RAG_GRADER_THRESHOLD.")
 
 
+def test_is_refusal_ignores_a_caveat_after_a_real_answer():
+    """Пара x35 прогона `baseline`: ответ по существу с оговоркой о неполноте.
+
+    Поиск отказа по всему тексту засчитывал такой ответ как полный отказ и
+    завышал `false_refusal_rate` — на 36 отвечаемых парах это треть метрики.
+    """
+    answered = (
+        "ID батчевого потока afpc_sss_inc_safp_rsa_mapping — 4832 [Источник 1].\n\n"
+        "В источниках нет явного описания назначения потока, однако из его "
+        "структуры следует, что он переносит данные из src- в inc-слой."
+    )
+    assert not is_refusal(answered)
+    # А тот же оборот первой фразой — по-прежнему отказ (пара x22).
+    refused = (
+        "В доступных мне документах ответа на этот вопрос не нашлось. "
+        "В структуре базы знаний указано, что страница «Data Quality» "
+        "находится в разделе «Архив»."
+    )
+    assert is_refusal(refused)
+
+
 def test_slice_section_extracts_named_section():
     content = "# Док\n\nвступление\n\n## Раздел\n\nтело раздела\n\n## Другой\n\nне то\n"
     sliced = slice_section(content, "Док > Раздел")
@@ -622,7 +645,158 @@ def test_build_report_counts_failures():
         ui_url="u",
         judge_model="m",
     )
-    assert report["counts"] == {"total": 2, "failed": 1, "evaluated": 1}
+    assert report["counts"] == {
+        "total": 2,
+        "failed": 1,
+        "evaluated": 1,
+        "context_clipped": 0,
+    }
+
+
+def _turn(ident: str, *, grades, grade_ms, condense_ms=0.0, **cfg) -> dict:
+    """Пара с разметкой хода: оценки грейдера у источников + тайминги стадий."""
+    rag_cfg = {
+        "grader_enabled": True,
+        "condense_enabled": True,
+        "condense_first_turn": False,
+        "grader_timeout": 20.0,
+        "condense_timeout": 45.0,
+    }
+    rag_cfg.update(cfg)
+    return _sample(
+        ident,
+        0.8,
+        sources=[{"n": i + 1, "path": "a.md", "grade": g} for i, g in enumerate(grades)],
+        timings_ms={"condense": condense_ms, "search": 1100.0, "grade": grade_ms},
+        run_settings={"rag": rag_cfg},
+    )
+
+
+def test_a_grader_that_never_graded_is_not_a_grader():
+    """Прогон `baseline`: оценки появились у 2 пар из 47, и отчёт молчал.
+
+    Провалившийся батч отдаёт все `None`, отбор пропускает кандидатов сырым
+    порядком поиска — измерен пайплайн БЕЗ реранкера, а «грейдер: включён» в
+    параметрах утверждает обратное.
+    """
+    report = _report(
+        "x",
+        0.8,
+        samples=[
+            _turn("dead", grades=[None, None, None], grade_ms=20017.5),
+            _turn("alive", grades=[5, 4], grade_ms=11368.0),
+            _turn("partial", grades=[5, None], grade_ms=20015.5),
+        ],
+    )
+
+    assert report["grader_health"] == {
+        "enabled": True,
+        "applicable": 3,
+        "graded": 2,
+        "ungraded": 1,
+        "partial": 1,
+    }
+    text = render_report_md(report)
+    assert "Грейдер молча не отработал" in text
+    assert "грейдер вернул оценки на 2 парах из 3" in text
+
+
+def test_time_equal_to_the_leash_is_reported_as_a_timeout():
+    """41 ход из 46 с `grade` в 20003–20023 мс при поводке 20 с — это таймаут.
+
+    Разброс в 20 мс на вызове модели невозможен, но по одной медиане это не
+    видно: нужен сам поводок рядом, поэтому он и попал в снимок настроек.
+    """
+    report = _report(
+        "x",
+        0.8,
+        samples=[
+            _turn("a", grades=[None], grade_ms=20003.2),
+            _turn("b", grades=[None], grade_ms=20023.2),
+            _turn("c", grades=[5], grade_ms=11368.0),
+        ],
+    )
+
+    grade = report["stage_timings"]["grade"]
+    assert grade["deadline_ms"] == 20000.0
+    assert grade["at_deadline"] == 2
+    assert grade["n"] == 3
+    text = render_report_md(report)
+    assert "## Скрытые вызовы" in text
+    assert "упёрлось в поводок" in text
+
+
+def test_condense_is_not_called_when_every_question_is_a_first_turn():
+    """Харнесс задаёт каждый вопрос в новом чате — condense не запускается.
+
+    Формально `condense_enabled: true`, фактически из двух скрытых вызовов на
+    ход меряется один. «да» в параметрах было верно и вводило в заблуждение.
+    """
+    report = _report("x", 0.8, samples=[_turn("a", grades=[5], grade_ms=900.0)])
+    assert CONDENSE_NOT_CALLED in render_report_md(report)
+
+    ran = _report(
+        "x", 0.8, samples=[_turn("a", grades=[5], grade_ms=900.0, condense_ms=410.0)]
+    )
+    assert CONDENSE_NOT_CALLED not in render_report_md(ran)
+
+
+def test_condense_state_stays_honest_without_stage_marks():
+    """Прогон без `rag_log`: стадий нет, значит и утверждать нечего."""
+    plain = _report("x", 0.8, samples=[_sample("a", 0.8)])
+    assert CONDENSE_NOT_CALLED not in render_report_md(plain)
+
+
+def test_judge_failures_are_counted_and_shouted_about():
+    """Прогон `baseline` печатал «ошибок 0», потеряв 95 вызовов судьи из 188.
+
+    Упавший вызов судьи — не упавший сэмпл: сэмпл цел, а метрики у него нет.
+    Пока это число не в шапке, `n=15` при 36 парах читается как свойство
+    набора, а не как сбой контура.
+    """
+    dead = {
+        "score": None,
+        "error": "GigaChatHTTPError: GigaChat вернул HTTP 429",
+        "failed": True,
+    }
+    lost = _sample(
+        "lost", 0.0, metrics={name: dict(dead) for name in JUDGE_METRIC_NAMES}
+    )
+    report = _report("x", 0.0, samples=[_sample("ok", 0.9), lost])
+
+    health = report["judge_failures"]
+    assert health["expected"] == 8
+    assert health["failed"] == 4
+    assert health["samples_affected"] == 1
+    assert health["by_error"] == {"GigaChatHTTPError: GigaChat вернул HTTP 429": 4}
+
+    text = render_report_md(report)
+    assert "судейских вызовов не вернулось: **4** из 8" in text
+    assert "HTTP 429" in text
+
+
+def test_structural_metric_skips_are_not_judge_failures():
+    """«Пустой ground_truth» — вызова не было; списывать это на судью нельзя."""
+    skipped = _sample(
+        "skip",
+        0.0,
+        metrics={
+            "faithfulness_ru": {"score": 0.5},
+            "answer_relevancy_ru": {"score": 0.5},
+            "context_precision": {"score": 0.5},
+            "context_recall": {"score": None, "error": "пустой ground_truth"},
+            # Судья тут не участвует вообще — в знаменатель не попадает.
+            "item_recall": {"score": None, "error": "в вопросе нет expected_items"},
+        },
+    )
+    report = _report("x", 0.0, samples=[skipped])
+    assert report["judge_failures"] == {
+        "expected": 4,
+        "failed": 0,
+        "samples_affected": 0,
+        "by_error": {},
+    }
+    assert "судейских вызовов не вернулось: **0** из 4" in render_report_md(report)
 
 
 def test_failed_samples_stay_out_of_every_average():
@@ -646,7 +820,12 @@ def test_failed_samples_stay_out_of_every_average():
     )
     report = _report("x", 0.0, samples=[good, broken])
 
-    assert report["counts"] == {"total": 2, "failed": 1, "evaluated": 1}
+    assert report["counts"] == {
+        "total": 2,
+        "failed": 1,
+        "evaluated": 1,
+        "context_clipped": 0,
+    }
     assert report["aggregate"]["faithfulness_ru"] == 0.9  # не 0.45
     assert report["coverage"]["faithfulness_ru"] == 1
     assert report["dispersion"]["faithfulness_ru"]["n"] == 1
