@@ -18,6 +18,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gigachat_client import (  # noqa: E402
+    MAX_ATTEMPTS,
+    MAX_BACKOFF_SECONDS,
     GigaChatHTTPError,
     GigaChatJSONError,
     GigaChatJudge,
@@ -167,7 +169,33 @@ def test_retries_on_500_and_gives_up():
     with pytest.raises(GigaChatHTTPError) as exc:
         asyncio.run(go())
     assert exc.value.code == "GIGACHAT_HTTP_500"
-    assert calls["n"] == 4  # MAX_ATTEMPTS
+    assert calls["n"] == MAX_ATTEMPTS
+
+
+def test_backoff_is_capped_so_late_attempts_stay_bounded():
+    """Экспонента без потолка на 6 попытках дала бы 32 с на последнем шаге.
+
+    Суммарное ожидание при этом должно остаться заметно больше прежних ~7 с:
+    именно их нехватка теряла метрики на 429.
+    """
+    delays: list[float] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async def go() -> None:
+        async with _judge(handler, sleep=sleep) as judge:
+            await judge.complete("prompt")
+
+    with pytest.raises(GigaChatHTTPError):
+        asyncio.run(go())
+    assert len(delays) == MAX_ATTEMPTS - 1
+    # Джиттер добавляет до 25% сверху — потолок ограничивает базу, не результат.
+    assert max(delays) <= MAX_BACKOFF_SECONDS * 1.25
+    assert sum(delays) >= 30.0  # прежние 4 попытки давали ~7 с
 
 
 def test_client_error_is_not_retried():

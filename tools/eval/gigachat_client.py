@@ -37,8 +37,15 @@ JitterFn = Callable[[], float]
 DEFAULT_CONFIG_PATH = "~/.cognivault-ui/config.json"
 
 # Retry policy for the judge calls: 429 / 5xx only, everything else fails fast.
-MAX_ATTEMPTS = 4
+#
+# Прежние 4 попытки сдавались через ~7 с суммарного ожидания — меньше, чем
+# длится ОДИН вызов судьи, поэтому при параллельном прогоне проигравший в гонке
+# за слот терял все свои метрики на 429 (половина метрик baseline-прогона).
+# Основное лечение — прогон в один поток; здесь запас: 6 попыток дают ~31 с.
+# Потолок нужен, чтобы экспонента не выросла до 32 с на последнем шаге.
+MAX_ATTEMPTS = 6
 BASE_BACKOFF_SECONDS = 1.0
+MAX_BACKOFF_SECONDS = 30.0
 
 
 # --------------------------------------------------------------------------- #
@@ -109,7 +116,12 @@ class JudgeConfig:
     ca_path: str = ""
     verify_ssl: bool = False
     temperature: float = 0.0
-    max_tokens: int = 1024
+    # Судья отвечает вердиктом НА КАЖДОЕ утверждение, и обрезанный ответ здесь
+    # не ошибка, а тихое занижение: недостающие вердикты считаются
+    # отрицательными. При 1024 запаса хватало на ~17 утверждений; после того как
+    # сегментация перестала слипать списки в одну строку, длинный ответ даёт их
+    # больше сорока.
+    max_tokens: int = 4096
     timeout: float = 120.0
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -143,7 +155,10 @@ class JudgeConfig:
             ca_path=os.path.expanduser(pick("GIGACHAT_CA_PATH", "ca_path")),
             verify_ssl=_env_bool("GIGACHAT_VERIFY_SSL", verify_default),
             temperature=float(os.environ.get("EVAL_JUDGE_TEMPERATURE", "0") or 0),
-            max_tokens=int(os.environ.get("EVAL_JUDGE_MAX_TOKENS", "1024") or 1024),
+            max_tokens=int(
+                os.environ.get("EVAL_JUDGE_MAX_TOKENS", "")
+                or JudgeConfig.max_tokens
+            ),
             timeout=float(os.environ.get("EVAL_JUDGE_TIMEOUT", "120") or 120),
         )
 
@@ -422,7 +437,8 @@ class GigaChatJudge:
         return extract_json(text)
 
     def _backoff(self, attempt: int) -> float:
-        return BASE_BACKOFF_SECONDS * (2**attempt) * (1.0 + 0.25 * self._jitter())
+        delay = BASE_BACKOFF_SECONDS * (2**attempt)
+        return min(delay, MAX_BACKOFF_SECONDS) * (1.0 + 0.25 * self._jitter())
 
 
 def _retry_after(value: str | None) -> float:
