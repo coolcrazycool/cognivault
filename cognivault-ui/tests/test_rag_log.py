@@ -192,6 +192,33 @@ def test_settings_snapshot_keeps_knobs_and_drops_credentials():
     assert json.dumps(snapshot, ensure_ascii=False).find("hunter2") == -1
 
 
+def test_log_cap_stays_above_the_context_budget():
+    """Кап лога — это то, что харнесс отдаёт судье, а не просто размер записи.
+
+    32 000 писались под бюджет в 24 000 и пережили его подъём до 48 000: судья
+    получал меньше блоков, чем видела модель, и штрафовал ответ за текст,
+    которого у него не было (7 пар из 47 в прогоне `baseline`).
+    """
+    from app.config import DEFAULT_CONFIG
+
+    assert rag_log.MAX_TEXT_CHARS > DEFAULT_CONFIG["rag"]["max_context_chars"]
+
+
+def test_settings_snapshot_records_the_hidden_call_deadlines():
+    """Без поводков в записи таймаут стадии неотличим от её работы.
+
+    Прогон `baseline`: `grade` = 20 с на 41 ходе из 46 при `grader_timeout` в
+    20 с — то есть грейдер обрывался, а выглядело как «отработал за 20 с».
+    Харнесс оценки читает эти два ключа, чтобы назвать таймаут таймаутом.
+    """
+    snapshot = rag_log.settings_snapshot(
+        {"grader_timeout": 90.0, "condense_timeout": 45.0}, {}, {}
+    )
+
+    assert snapshot["rag"]["grader_timeout"] == 90.0
+    assert snapshot["rag"]["condense_timeout"] == 45.0
+
+
 def test_settings_snapshot_fingerprints_prompt_overrides():
     default = rag_log.settings_snapshot({}, {}, {"system": None, "context_reminder": " "})
     custom = rag_log.settings_snapshot({}, {}, {"system": "мои правила"})

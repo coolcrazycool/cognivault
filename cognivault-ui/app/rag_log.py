@@ -23,8 +23,10 @@ Deliberate choices:
   caller's own directory) and :func:`append` scrubs any key that looks like a
   credential before writing.
 * **The rendered context and the answer are written in full** (capped by
-  :data:`MAX_TEXT_CHARS`, which sits above both the RAG char budget and the
-  model's own output cap, so in practice nothing is lost). Without them the
+  :data:`MAX_TEXT_CHARS`, which MUST stay above the RAG char budget
+  ``max_context_chars`` — the cap is what the eval harness feeds the judge, and
+  a cap below the budget silently gives the judge fewer blocks than the model
+  saw). Without them the
   eval harness has to *guess* what the model saw by re-slicing documents from
   metadata, and that guess is biased in both directions — see
   ``tools/eval/README.md``. The price is record size: a full turn is ~30 KB, so
@@ -67,10 +69,14 @@ MAX_BYTES = 5 * 1024 * 1024
 BACKUP_SUFFIX = ".1"
 
 #: Hard cap for the two free-text fields (``answer_text``, ``context_text``).
-#: The RAG context budget is 24 000 chars and ``max_tokens`` is 4096 (≈12 000
-#: chars of Russian), so this never truncates a real turn — it only bounds a
-#: pathological one. Truncation is always flagged (``*_truncated_in_log``).
-MAX_TEXT_CHARS = 32_000
+#: Must stay ABOVE ``rag.max_context_chars`` — the harness judges what this
+#: field holds, so a lower cap silently hands the judge a shorter context than
+#: the model actually got. Установленные 32 000 писались под бюджет в 24 000 и
+#: пережили его подъём до 48 000: в прогоне `baseline` судья недосчитался
+#: блоков на 7 парах из 47 (x05, x19, x27, x36, x38, fb21, fb56), и провалы
+#: faithfulness там — про отсутствующий у судьи текст, а не про ответ.
+#: Truncation is always flagged (``*_truncated_in_log``).
+MAX_TEXT_CHARS = 64_000
 
 # Keys whose values are (or may embed) credentials. Never written, at any depth.
 _SECRET_KEYS = frozenset(
@@ -243,6 +249,7 @@ _RAG_SNAPSHOT_KEYS = (
     "condense_enabled",
     "condense_first_turn",
     "corpus_tree_enabled",
+    "include_archived",
     "grader_enabled",
     "grader_threshold",
     "grader_keep_top",
@@ -251,6 +258,12 @@ _RAG_SNAPSHOT_KEYS = (
     "section_max_chars",
     "max_expanded_files",
     "token_budget",
+    # Поводки скрытых вызовов. Без них в записи не отличить «грейдер отработал
+    # за 20 с» от «грейдер упёрся в свой дедлайн»: и то и другое выглядит как
+    # 20 с в `timings_ms`. Наблюдалось на прогоне `baseline`, где грейдер молча
+    # не отработал на 41 ходе из 46.
+    "condense_timeout",
+    "grader_timeout",
 )
 
 #: GigaChat knobs. Whitelisted rather than filtered: the section also holds
