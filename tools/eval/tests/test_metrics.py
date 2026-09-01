@@ -5,6 +5,7 @@ No live GigaChat: the judge is a stub implementing ``complete_json``.
 
 from __future__ import annotations
 
+
 import asyncio
 import os
 import sys
@@ -24,6 +25,7 @@ from metrics import (  # noqa: E402
     coverage,
     faithfulness_ru,
     format_context,
+    _verdict_fraction,
     split_sentences_ru,
     split_statements,
 )
@@ -108,8 +110,51 @@ def test_empty_text_gives_no_sentences():
 
 
 def test_split_statements_strips_markdown_and_dedupes():
+    # Заголовок сам по себе утверждением не считается — см. тест ниже.
     text = "## Заголовок\n\n- Первый пункт.\n- Первый пункт.\n\n1) Второй пункт."
-    assert split_statements(text) == ["Заголовок", "Первый пункт.", "Второй пункт."]
+    assert split_statements(text) == ["Первый пункт.", "Второй пункт."]
+
+
+def test_list_items_are_separate_statements():
+    """Списочный ответ — основной формат продукта, и он сливался в одно утверждение.
+
+    Пункты не кончаются точкой, а `1.` в начале строки считается номером, а не
+    границей, поэтому весь список копился до пустой строки. Прогон `baseline`:
+    процедура из одиннадцати шагов на 1305 символов (x14) давала РОВНО одно
+    утверждение, и `faithfulness` на списках вырождался в 0 или 1.
+    """
+    text = (
+        "Шаги получения доступа:\n"
+        "1. Открыть заявку в CTL\n"
+        "2. Дождаться согласования\n"
+        "- Уточнить у владельца\n"
+        "- Проверить роль\n"
+        "### Примечание\n"
+        "Доступ выдаётся на год"
+    )
+    parts = split_sentences_ru(text)
+    assert len(parts) == 6
+    assert parts[1] == "1. Открыть заявку в CTL"
+    assert parts[3] == "- Уточнить у владельца"
+    # Заголовок со своим абзацем — одно утверждение: проверять надо абзац.
+    assert parts[-1] == "### Примечание\nДоступ выдаётся на год"
+
+
+def test_a_bare_heading_is_not_a_statement():
+    """«Где почитать» подтвердить контекстом нельзя — судья ставит 0 за структуру."""
+    text = "## Где почитать\n\nДокументация лежит в Confluence."
+    assert split_statements(text) == ["Документация лежит в Confluence."]
+
+
+def test_numbering_inside_a_line_still_does_not_split():
+    """Граница — только НАЧАЛО строки: «п. 1) видимость» не список."""
+    assert len(split_sentences_ru("Смотри п. 1) настройки и живи спокойно")) == 1
+
+
+def test_verdict_key_is_read_in_russian_too():
+    """Судья изредка переводит ключ сам, и пункт молча уходил в отрицательные."""
+    raw = {"verdicts": [{"id": 1, "verdict": 1}, {"id": 2, "вердикт": 1}]}
+    assert _verdict_fraction(raw, "verdict", 2) == 1.0
 
 
 def test_format_context_numbers_and_caps():

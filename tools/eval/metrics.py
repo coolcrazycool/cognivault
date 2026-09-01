@@ -39,6 +39,10 @@ METRIC_NAMES = (
     "item_recall",
 )
 
+#: Метрики, за которыми стоит вызов судьи. Только у них ``score is None`` может
+#: означать «судья не ответил»; у `item_recall` пропуск всегда структурный.
+JUDGE_METRIC_NAMES = METRIC_NAMES[:4]
+
 
 class Judge(Protocol):
     """The slice of :class:`gigachat_client.GigaChatJudge` metrics rely on."""
@@ -60,6 +64,11 @@ class MetricResult:
     score: float | None
     raw: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    #: Судья был вызван и не ответил. Отличает сбой контура от структурного
+    #: пропуска («пустой ground_truth», «в вопросе нет expected_items»), где
+    #: вызова не было вовсе: без этого флага отчёт не может отделить «судья
+    #: лежал» от «мерить было нечего», а это разные диагнозы.
+    failed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +76,7 @@ class MetricResult:
             "score": self.score,
             "raw": self.raw,
             "error": self.error,
+            "failed": self.failed,
         }
 
 
@@ -181,7 +191,7 @@ def split_sentences_ru(text: str) -> list[str]:
         ch = text[i]
         buf.append(ch)
 
-        if ch == "\n" and _blank_next(text, i):
+        if ch == "\n" and (_blank_next(text, i) or _block_start_ahead(text, i)):
             chunk = "".join(buf).strip()
             if chunk:
                 sentences.append(chunk)
@@ -211,6 +221,22 @@ def split_sentences_ru(text: str) -> list[str]:
     return sentences
 
 
+#: Начало пункта списка или заголовка — граница утверждения не хуже точки.
+_BLOCK_START_RE = re.compile(r"[ \t]*(?:[-*•+]\s|\d+[.)]\s|#{1,6}\s|\|)")
+
+
+def _block_start_ahead(text: str, i: int) -> bool:
+    """True, когда со следующей строки начинается пункт списка, заголовок или таблица.
+
+    Без этого правила списочный ответ — основной формат продукта — сливался в
+    ОДНО утверждение: пункты не кончаются точкой, а `1.` в начале строки
+    считается номером, а не концом предложения. Прогон `baseline`: процедура из
+    одиннадцати шагов на 1305 символов (x14) давала ровно одно утверждение, и
+    `faithfulness` на списках вырождался в 0 или 1 — отсюда и разброс ±0.44.
+    """
+    return bool(_BLOCK_START_RE.match(text, i + 1))
+
+
 def _blank_next(text: str, i: int) -> bool:
     """True when position ``i`` starts a blank-line separator."""
     j = i
@@ -234,10 +260,18 @@ def _boundary_ahead(rest: str) -> bool:
 
 
 def split_statements(text: str, *, min_chars: int = 3) -> list[str]:
-    """Sentences worth judging: segmented, stripped of markdown noise, deduped."""
+    """Sentences worth judging: segmented, stripped of markdown noise, deduped.
+
+    Одинокий заголовок утверждением НЕ считается: подтвердить «Где почитать» по
+    контексту нельзя, судья честно ставит 0, и структура ответа штрафует его
+    автора (x05 в прогоне `baseline`). Заголовок вместе с его абзацем — другое
+    дело, там есть что проверять, и он остаётся.
+    """
     out: list[str] = []
     seen: set[str] = set()
     for sentence in split_sentences_ru(text):
+        if sentence.lstrip().startswith("#") and "\n" not in sentence.strip():
+            continue
         cleaned = sentence.strip().strip("*_ ").strip()
         cleaned = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", cleaned)
         cleaned = re.sub(r"^#{1,6}\s*", "", cleaned)
@@ -333,7 +367,16 @@ CONTEXT_RECALL_PROMPT = """Оцени, покрывает ли найденны�
 
 
 def format_context(contexts: Sequence[str], *, max_chars: int = 4000) -> str:
-    """Render retrieved chunks as a numbered block for a judge prompt."""
+    """Render retrieved chunks as a numbered block for a judge prompt.
+
+    ``max_chars`` режет КАЖДЫЙ блок, и это единственное место, где судья видит
+    меньше модели по нашей вине. Одно значение на все метрики: `context_precision`
+    раньше резала до 1500 символов, то есть при `section_max_chars = 12000` судила
+    по восьмой части фрагмента и отвечала «в источнике этого нет» про текст,
+    который в источнике был (x24, fb31 в прогоне `baseline`). Выше 4000 не
+    поднимаем: пять блоков — уже 20 000 символов промпта, а у судьи свой предел
+    контекста.
+    """
     if not contexts:
         return "(контекст пуст)"
     parts: list[str] = []
@@ -350,12 +393,26 @@ def format_statements(statements: Sequence[str]) -> str:
     return "\n".join(f"{i}. {s}" for i, s in enumerate(statements, start=1))
 
 
+#: Русские написания ключей вердикта — судья иногда переводит их сам.
+_KEY_ALIASES = {
+    "verdict": "вердикт",
+    "relevant": "релевантен",
+    "attributed": "подтверждено",
+}
+
+
 def _verdict_fraction(raw: dict[str, Any], key: str, expected: int) -> float:
     """Fraction of positive verdicts, tolerant of a short/long judge reply.
 
     Missing verdicts count as negative (the judge did not confirm them), which
     is the conservative direction for every metric here.
+
+    Ключ вердикта ищется и в русском написании: судья изредка отвечает
+    `{"id": 14, "вердикт": 1}` вместо `"verdict"` (один случай на 47 пар в
+    прогоне `baseline`), и такой пункт молча уходил в отрицательные — то есть
+    метрику опускала опечатка модели, а не ответ.
     """
+    alias = _KEY_ALIASES.get(key)
     verdicts = raw.get("verdicts")
     if not isinstance(verdicts, list) or not verdicts:
         return 0.0
@@ -372,6 +429,8 @@ def _verdict_fraction(raw: dict[str, Any], key: str, expected: int) -> float:
             continue
         seen.add(ident)
         value = item.get(key)
+        if value is None and alias is not None:
+            value = item.get(alias)
         if isinstance(value, bool):
             positive += int(value)
         else:
@@ -395,12 +454,18 @@ async def _judge(
     try:
         raw = await judge.complete_json(prompt, system=JUDGE_SYSTEM, temperature=0.0)
     except Exception as exc:  # noqa: BLE001 — one bad sample must not kill the run
-        return MetricResult(name=name, score=None, error=f"{type(exc).__name__}: {exc}")
+        return MetricResult(
+            name=name, score=None, error=f"{type(exc).__name__}: {exc}", failed=True
+        )
     try:
         return MetricResult(name=name, score=float(score_fn(raw)), raw=raw)
     except Exception as exc:  # noqa: BLE001 — malformed but parseable JSON
         return MetricResult(
-            name=name, score=None, raw=raw, error=f"{type(exc).__name__}: {exc}"
+            name=name,
+            score=None,
+            raw=raw,
+            error=f"{type(exc).__name__}: {exc}",
+            failed=True,
         )
 
 
@@ -456,7 +521,7 @@ async def context_precision(
     if not contexts:
         return MetricResult("context_precision", 0.0, raw={"note": "контекст пуст"})
     prompt = CONTEXT_PRECISION_PROMPT.format(
-        question=question, context=format_context(contexts, max_chars=1500)
+        question=question, context=format_context(contexts)
     )
     return await _judge(
         judge,
