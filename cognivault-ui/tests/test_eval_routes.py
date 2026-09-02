@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -59,14 +61,28 @@ def test_label_rejects_everything_else(bad):
 
 def _fake_harness(monkeypatch, *, code=0, out="строка прогресса\nещё одна\n", boom=None):
     class FakeRun:
+        # Тот же крючок, что у настоящего `run.py`: раннер ставит сюда приёмник
+        # на время прогона, `_log` печатает в stderr только без него.
+        LOG_SINK = None
+
+        @staticmethod
+        def _log(message):
+            sink = FakeRun.LOG_SINK
+            if sink is not None:
+                sink(message)
+                return
+            print(message, file=sys.stderr, flush=True)
+
         @staticmethod
         async def main_async(argv):
             if boom is not None:
                 raise boom
-            print(out, end="", file=sys.stderr)
+            for line in out.splitlines():
+                FakeRun._log(line)
             return code
 
     monkeypatch.setattr(eval_runner, "_load_harness", lambda: FakeRun)
+    return FakeRun
 
 
 def _run_job(tmp_path, monkeypatch, **kw):
@@ -214,3 +230,208 @@ def test_unwritable_report_dir_is_a_readable_error_not_a_500(tmp_path, monkeypat
             eval_runner.RUNNER.start(label="t", argv=[], out_dir=locked / "eval-reports")
     finally:
         locked.chmod(0o700)
+
+
+# --------------------------------------------------------------------------- #
+# Лог прогона: не перехватывать stderr процесса, писать файл, копировать логгер
+# --------------------------------------------------------------------------- #
+
+
+def test_run_does_not_hijack_the_process_stderr(tmp_path, monkeypatch):
+    """`redirect_stderr` на весь процесс уводил в буфер и лог приложения.
+
+    Логгер UI выводит через `logging.lastResort`, который берёт `sys.stderr`
+    в момент вывода, — на время прогона предупреждения грейдера пропадали из
+    лога пода. Прогресс харнесса теперь идёт через явный приёмник.
+    """
+    seen = {}
+
+    class Spy:
+        LOG_SINK = None
+
+        @staticmethod
+        async def main_async(argv):
+            seen["stderr"] = sys.stderr
+            seen["stdout"] = sys.stdout
+            Spy.LOG_SINK("прогресс")
+            return 0
+
+    monkeypatch.setattr(eval_runner, "_load_harness", lambda: Spy)
+    before = (sys.stderr, sys.stdout)
+
+    async def go():
+        job = eval_runner.RUNNER.start(label="t", argv=[], out_dir=tmp_path / "rep")
+        await eval_runner.RUNNER._task
+        return job
+
+    job = asyncio.run(go())
+
+    assert seen["stderr"] is before[0] and seen["stdout"] is before[1]
+    assert job.lines == ["прогресс"]
+    assert Spy.LOG_SINK is None  # снят после прогона
+
+
+def test_harness_without_the_hook_still_prints_to_stderr(tmp_path, monkeypatch, capsys):
+    fake = _fake_harness(monkeypatch)
+    fake.LOG_SINK = None
+    fake._log("мимо раннера")
+    assert "мимо раннера" in capsys.readouterr().err
+
+
+def test_run_writes_the_full_log_to_a_file_and_exposes_its_path(tmp_path, monkeypatch):
+    """В памяти — хвост, на диске — всё; путь виден в статусе."""
+    out = "".join(f"строка {i}\n" for i in range(450))
+    job = _run_job(tmp_path, monkeypatch, out=out)
+
+    path = Path(job.log_path)
+    assert path == tmp_path / "rep" / "eval-t.log"
+    assert path.read_text(encoding="utf-8").splitlines() == [f"строка {i}" for i in range(450)]
+    status = job.to_dict()
+    assert status["log_path"] == str(path)
+    assert status["log"] == [f"строка {i}" for i in range(250, 450)]
+    assert len(job.lines) <= 2 * eval_runner._MEMORY_LINES
+
+
+def test_failure_reason_lands_in_the_log_file_too(tmp_path, monkeypatch):
+    job = _run_job(tmp_path, monkeypatch, boom=ValueError("судья недоступен"))
+    assert "ValueError: судья недоступен" in Path(job.log_path).read_text(encoding="utf-8")
+
+
+def test_app_warnings_reach_both_the_pod_log_and_the_job_log(tmp_path, monkeypatch):
+    """Предупреждение грейдера во время прогона: и в stderr, и в лог прогона.
+
+    Обработчик на корневом логгере отключает `lastResort` — без явного эха
+    «починка» просто перенесла бы потерю лога пода в другое место.
+    """
+
+    class Loud:
+        LOG_SINK = None
+
+        @staticmethod
+        async def main_async(argv):
+            logging.getLogger("cognivault-ui.rag_pipeline").warning(
+                "grader: батч 2 (модель glm-5.1): вызов не удался (KitaiQueryFailed: 404)"
+            )
+            return 0
+
+    echoed: list[str] = []
+
+    class Recorder(logging.Handler):
+        def emit(self, record):
+            echoed.append(self.format(record))
+
+    root = logging.getLogger()
+    # Как в поде без своей настройки логгера: ни у корня, ни у логгера
+    # приложения нет обработчиков, записи уходят через lastResort.
+    monkeypatch.setattr(root, "handlers", [])
+    monkeypatch.setattr(logging.getLogger("cognivault-ui"), "handlers", [])
+    monkeypatch.setattr(logging, "lastResort", Recorder(level=logging.WARNING))
+    monkeypatch.setattr(eval_runner, "_load_harness", lambda: Loud)
+
+    async def go():
+        job = eval_runner.RUNNER.start(label="t", argv=[], out_dir=tmp_path / "rep")
+        await eval_runner.RUNNER._task
+        return job
+
+    job = asyncio.run(go())
+
+    assert any("glm-5.1" in line for line in job.lines)
+    assert any("glm-5.1" in line for line in echoed)
+    assert "glm-5.1" in Path(job.log_path).read_text(encoding="utf-8")
+    assert root.handlers == []  # обработчик снят после прогона
+
+
+def test_copy_handler_does_not_double_print_when_root_already_has_handlers(tmp_path, monkeypatch):
+    class Loud:
+        LOG_SINK = None
+
+        @staticmethod
+        async def main_async(argv):
+            logging.getLogger("cognivault-ui.rag_pipeline").warning("одно предупреждение")
+            return 0
+
+    echoed: list[str] = []
+
+    class Recorder(logging.Handler):
+        def emit(self, record):
+            echoed.append(self.format(record))
+
+    root = logging.getLogger()
+    own = Recorder(level=logging.WARNING)
+    monkeypatch.setattr(root, "handlers", [own])
+    lost: list[str] = []
+
+    class Never(logging.Handler):
+        def emit(self, record):
+            lost.append(self.format(record))
+
+    monkeypatch.setattr(logging, "lastResort", Never(level=logging.WARNING))
+    monkeypatch.setattr(eval_runner, "_load_harness", lambda: Loud)
+
+    async def go():
+        job = eval_runner.RUNNER.start(label="t", argv=[], out_dir=tmp_path / "rep")
+        await eval_runner.RUNNER._task
+        return job
+
+    job = asyncio.run(go())
+
+    assert [line for line in echoed if "одно предупреждение" in line] == ["одно предупреждение"]
+    assert lost == []
+    assert any("одно предупреждение" in line for line in job.lines)
+
+
+def test_log_file_is_downloadable_through_the_report_route(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "is_server", lambda: False)
+    out = tmp_path / "eval-reports"
+    out.mkdir()
+    (out / "eval-t.log").write_text("строка", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("чужое", encoding="utf-8")
+    monkeypatch.setattr(eval_routes, "resolve_paths", lambda request: AppPaths(root=tmp_path))
+
+    with TestClient(create_app()) as client:
+        ok = client.get("/api/eval/report", params={"name": "eval-t.log"})
+        bad = client.get("/api/eval/report", params={"name": "../secret.txt"})
+
+    assert ok.status_code == 200 and ok.text == "строка"
+    assert bad.status_code == 404
+
+
+def test_copy_handler_respects_a_handler_on_the_app_logger(tmp_path, monkeypatch):
+    """Обработчик может стоять не на корне, а на `cognivault-ui` (см. main.py):
+    такую запись уже напечатали, эхо через lastResort дало бы её дважды."""
+
+    class Loud:
+        LOG_SINK = None
+
+        @staticmethod
+        async def main_async(argv):
+            logging.getLogger("cognivault-ui.rag_pipeline").warning("одно предупреждение")
+            return 0
+
+    printed: list[str] = []
+
+    class Recorder(logging.Handler):
+        def emit(self, record):
+            printed.append(self.format(record))
+
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
+    monkeypatch.setattr(logging.getLogger("cognivault-ui"), "handlers", [Recorder()])
+    lost: list[str] = []
+
+    class Never(logging.Handler):
+        def emit(self, record):
+            lost.append(self.format(record))
+
+    monkeypatch.setattr(logging, "lastResort", Never(level=logging.WARNING))
+    monkeypatch.setattr(eval_runner, "_load_harness", lambda: Loud)
+
+    async def go():
+        job = eval_runner.RUNNER.start(label="t", argv=[], out_dir=tmp_path / "rep")
+        await eval_runner.RUNNER._task
+        return job
+
+    job = asyncio.run(go())
+
+    assert printed == ["одно предупреждение"]
+    assert lost == []
+    assert any("одно предупреждение" in line for line in job.lines)

@@ -681,19 +681,28 @@ def test_the_warning_is_rearmed_by_a_working_tree(monkeypatch, caplog):
 
 
 def test_a_warning_from_this_module_actually_reaches_stderr():
-    """Логгер тут не украшение: WARNING виден без `basicConfig`.
+    """Логгер тут не украшение: WARNING и INFO видны в логе пода.
 
-    Приложение нигде не зовёт `logging.basicConfig`, а uvicorn настраивает
-    только свои три логгера и корневой не трогает — значит запись уходит через
-    `logging.lastResort` в stderr, но лишь от WARNING и выше (потому `rag_log` и
-    пишет, что `log.info` не доехал бы никуда). Машиночитаемый сигнал всё равно
-    первичен — поле `head_block` в `rag_log.jsonl`; строка в логе вторична.
+    Раньше приложение нигде не звало `logging.basicConfig`, и записи уходили
+    через `logging.lastResort`: WARNING в stderr, `log.info` — никуда. Теперь
+    `app.main._configure_logging` вешает на логгер `cognivault-ui` свой
+    обработчик с уровнем из `UI_LOG_LEVEL` (по умолчанию INFO), чтобы второй
+    проход грейдера и пропущенные фрагменты были видны оператору. Машиночитаемый
+    сигнал всё равно первичен — поле `head_block` в `rag_log.jsonl`; строка в
+    логе вторична.
     """
+    from app.main import create_app
+
+    create_app()
     root = logging.getLogger()
     assert root.level <= logging.WARNING
-    assert rag.log.getEffectiveLevel() <= logging.WARNING
     assert rag.log.isEnabledFor(logging.WARNING)
-    assert not rag.log.isEnabledFor(logging.INFO)
+    assert rag.log.isEnabledFor(logging.INFO)
+    # Обработчик стоит на логгере приложения, а не на корневом: uvicorn и чужие
+    # библиотеки от этого не становятся болтливее.
+    app_logger = logging.getLogger("cognivault-ui")
+    assert any(getattr(h, "_cognivault_ui", False) for h in app_logger.handlers)
+    assert app_logger.propagate  # чтобы обработчик прогона оценки на корне тоже видел записи
 
 
 def test_meta_branch_prefers_the_tree_and_degrades_to_the_listing(monkeypatch):

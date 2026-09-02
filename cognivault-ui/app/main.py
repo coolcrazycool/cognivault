@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
+import sys
 import warnings
 from pathlib import Path
 from typing import Any
@@ -109,8 +111,45 @@ def _auto_sync_scheduler_enabled() -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+_APP_LOGGER = "cognivault-ui"
+
+
+def _configure_logging() -> None:
+    """Make the application's own log lines visible in the pod log.
+
+    Nobody calls ``logging.basicConfig`` here and uvicorn configures only its own
+    loggers, so every ``cognivault-ui.*`` record used to fall through to Python's
+    last-resort handler: WARNING and above reached stderr, ``log.info`` went
+    nowhere at all. That hid exactly the lines an operator needs when the RAG
+    pipeline degrades quietly — the grader's fallback pass, the "batch graded but
+    fragments omitted" note, the KitAI query id.
+
+    One handler on the ``cognivault-ui`` logger, level from ``UI_LOG_LEVEL``
+    (default INFO). Propagation stays ON so a handler attached to the root logger
+    for the duration of an eval run (``eval_runner``) still receives the records;
+    the last-resort handler is skipped automatically once a handler exists in
+    the chain, so nothing is printed twice. Idempotent: ``create_app`` runs once
+    per process in production but many times under the test client.
+    """
+    logger = logging.getLogger(_APP_LOGGER)
+    if any(getattr(h, "_cognivault_ui", False) for h in logger.handlers):
+        return
+    level_name = (os.environ.get("UI_LOG_LEVEL") or "INFO").strip().upper()
+    level = logging.getLevelName(level_name)
+    if not isinstance(level, int):
+        level = logging.INFO
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    handler._cognivault_ui = True  # type: ignore[attr-defined]
+    logger.addHandler(handler)
+    logger.setLevel(level)
+
+
 def create_app() -> FastAPI:
     _suppress_insecure_warnings()
+    _configure_logging()
 
     app = FastAPI(title="CogniVault UI", version="1.0.0")
 

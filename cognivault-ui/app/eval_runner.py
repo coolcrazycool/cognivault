@@ -17,15 +17,26 @@ UI, ни mTLS-эндпоинта судьи), а прав на `kubectl exec`/`c
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import importlib.util
-import io
+import logging
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
+
+log = logging.getLogger("cognivault-ui.eval_runner")
+
+# Сколько строк лога прогона держится в памяти (и отдаётся в статус). Полный
+# лог лежит в файле `eval-<label>.log` рядом с отчётами.
+_MEMORY_LINES = 200
+
+# Что из логгера приложения копируется в лог прогона. Предупреждения грейдера
+# и KitAI — ровно то, ради чего это нужно: без них прогон, у которого умер
+# реранкер, выглядит как прогон с плохими метриками.
+_COPY_LEVEL = logging.WARNING
 
 # Каталог харнесса внутри образа (см. Dockerfile: `COPY tools/eval/ eval/`).
 # В dev-запуске из репозитория он лежит на два уровня выше.
@@ -65,6 +76,9 @@ class EvalJob:
     lines: list[str] = field(default_factory=list)
     error: str | None = None
     out_dir: str = ""
+    # Полный лог прогона на диске (`eval-<label>.log` в `out_dir`); `None`,
+    # пока файл не открыт или если открыть его не удалось.
+    log_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -73,36 +87,116 @@ class EvalJob:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             # Хвост: лог прогона — сотни строк, а окно показывает последние.
-            "log": self.lines[-200:],
+            "log": self.lines[-_MEMORY_LINES:],
+            "log_path": self.log_path,
             "error": self.error,
             "elapsed_sec": int((self.finished_at or time.time()) - self.started_at),
         }
 
 
-class _LineSink(io.TextIOBase):
-    """Приёмник stderr харнесса: копит целые строки в списке задачи.
+def log_file(out_dir: Path, label: str) -> Path:
+    """Where the full log of a run goes. ``label`` is already validated
+    (:func:`valid_label`), so it cannot escape ``out_dir``."""
+    return out_dir / f"eval-{label}.log"
 
-    Харнесс печатает прогресс в stderr (`run._log`), другого канала прогресса у
-    него нет. Перехват здесь дешевле, чем прикручивать к нему колбэки, и не
-    расходится с тем, что видно при запуске из консоли.
+
+class _JobLog:
+    """Приёмник строк прогона: хвост в памяти задачи, всё — в файл.
+
+    Раньше раннер перехватывал `sys.stderr` ВСЕГО процесса на время прогона
+    (`contextlib.redirect_stderr`). Но туда же пишет логгер приложения: у UI
+    нет своего обработчика, записи уходят через `logging.lastResort`, а он
+    берёт `sys.stderr` в момент вывода. Итог — на время прогона каждое
+    предупреждение грейдера и KitAI пропадало из лога пода в буфер на 200
+    строк. Теперь у харнесса явный приёмник (`run.LOG_SINK`), а записи
+    логгера копируются сюда обработчиком (:class:`_CopyHandler`) — и остаются
+    в stderr.
     """
 
-    def __init__(self, job: EvalJob) -> None:
+    def __init__(self, job: EvalJob, path: Path | None) -> None:
         self._job = job
-        self._buf = ""
+        self._lock = threading.Lock()
+        self._fh: TextIO | None = None
+        if path is None:
+            return
+        try:
+            self._fh = path.open("a", encoding="utf-8")
+        except OSError as exc:
+            # Не фатально: прогон идёт, статус показывает хвост. Но сказать
+            # надо — иначе «файла нет» ищут не там.
+            log.warning("eval: лог прогона не пишется в %s: %s", path, exc)
+            return
+        job.log_path = str(path)
 
-    def write(self, s: str) -> int:  # noqa: D102 — интерфейс TextIOBase
-        self._buf += s
-        while "\n" in self._buf:
-            line, self._buf = self._buf.split("\n", 1)
-            if line.strip():
-                self._job.lines.append(line.rstrip())
-        return len(s)
+    def line(self, text: str) -> None:
+        """Одна или несколько строк (текст может содержать переводы строк)."""
+        for raw in str(text).splitlines():
+            entry = raw.rstrip()
+            if not entry.strip():
+                continue
+            with self._lock:
+                lines = self._job.lines
+                lines.append(entry)
+                # Амортизированная обрезка: в памяти только хвост, в файле всё.
+                if len(lines) > 2 * _MEMORY_LINES:
+                    del lines[:-_MEMORY_LINES]
+                if self._fh is not None:
+                    try:
+                        self._fh.write(entry + "\n")
+                        self._fh.flush()
+                    except OSError:
+                        pass
 
-    def flush(self) -> None:  # noqa: D102
-        if self._buf.strip():
-            self._job.lines.append(self._buf.rstrip())
-            self._buf = ""
+    def close(self) -> None:
+        with self._lock:
+            if self._fh is not None:
+                try:
+                    self._fh.close()
+                except OSError:
+                    pass
+                self._fh = None
+
+
+class _CopyHandler(logging.Handler):
+    """Копирует записи логгера (WARNING и выше) в лог прогона.
+
+    Висит на корневом логгере только на время прогона. Тонкость: пока в цепочке
+    логгеров записи нет ни одного обработчика, Python выводит её через
+    `logging.lastResort` в stderr — и перестаёт это делать, как только
+    обработчик появляется. То есть наивная копия ЗАМЕНИЛА бы вывод в лог пода
+    вместо того, чтобы его дополнить. Поэтому запись, у которой в цепочке нет
+    других обработчиков, кроме этого, дополнительно отдаётся `lastResort` —
+    ровно так, как её вывели бы без нас. Решение принимается ПО ЗАПИСИ, а не
+    при подключении: обработчик может стоять не на корне, а на логгере
+    приложения (`cognivault-ui`), и такую запись уже напечатали.
+    """
+
+    def __init__(self, sink: _JobLog) -> None:
+        super().__init__(level=_COPY_LEVEL)
+        self._sink = sink
+        self.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+
+    def _would_reach_last_resort(self, record: logging.LogRecord) -> bool:
+        """Повторяет подсчёт `Logger.callHandlers`: любой чужой обработчик в
+        цепочке (независимо от его уровня) отключает `lastResort`."""
+        logger: logging.Logger | None = logging.getLogger(record.name)
+        while logger is not None:
+            if any(h is not self for h in logger.handlers):
+                return False
+            if not logger.propagate:
+                break
+            logger = logger.parent
+        return True
+
+    def emit(self, record: logging.LogRecord) -> None:  # noqa: D102
+        try:
+            self._sink.line(self.format(record))
+        except Exception:  # noqa: BLE001 — лог прогона не должен ронять логгер
+            self.handleError(record)
+        last_resort = logging.lastResort
+        if last_resort is not None and self._would_reach_last_resort(record):
+            if record.levelno >= last_resort.level:
+                last_resort.handle(record)
 
 
 class EvalRunner:
@@ -134,14 +228,19 @@ class EvalRunner:
         return job
 
     async def _run(self, job: EvalJob, argv: list[str]) -> None:
+        sink = _JobLog(job, log_file(Path(job.out_dir), job.label) if job.out_dir else None)
+        root = logging.getLogger()
+        handler = _CopyHandler(sink)
+        run_mod: Any = None
+        prev_sink: Any = None
         try:
             run_mod = _load_harness()
-            sink = _LineSink(job)
-            # `main_async` пишет только в stderr; stdout перехватываем на всякий
-            # случай, чтобы случайный print не улетел в лог пода вперемешку.
-            with contextlib.redirect_stderr(sink), contextlib.redirect_stdout(sink):
-                code = await run_mod.main_async(argv)
-            sink.flush()
+            # Явный приёмник прогресса вместо перехвата stderr всего процесса —
+            # см. `_JobLog`. Снимается в `finally`, даже если харнесс упал.
+            prev_sink = getattr(run_mod, "LOG_SINK", None)
+            setattr(run_mod, "LOG_SINK", sink.line)
+            root.addHandler(handler)
+            code = await run_mod.main_async(argv)
             if code == 0:
                 job.status = "completed"
             else:
@@ -155,6 +254,12 @@ class EvalRunner:
             job.status = "failed"
             job.error = f"{type(exc).__name__}: {exc}"
         finally:
+            root.removeHandler(handler)
+            if run_mod is not None:
+                setattr(run_mod, "LOG_SINK", prev_sink)
+            if job.error:
+                sink.line(job.error)
+            sink.close()
             job.finished_at = time.time()
 
 

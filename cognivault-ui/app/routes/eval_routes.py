@@ -135,9 +135,14 @@ async def eval_report(
     out_dir = _reports_dir(request)
     if not out_dir.is_dir():
         return _error(404, "EVAL_NO_REPORTS", "Отчётов пока нет")
+    # Полный лог прогона (`eval-<label>.log`, см. `eval_runner.log_file`)
+    # выгружается тем же маршрутом: статус отдаёт лишь хвост в 200 строк.
     allowed = {p.name: p for p in out_dir.glob("report-*.*")}
+    allowed.update({p.name: p for p in out_dir.glob("eval-*.log")})
     target = allowed.get(name)
     if target is None:
         return _error(404, "EVAL_NO_REPORT", "Такого отчёта нет", name)
-    media = "text/markdown" if target.suffix == ".md" else "application/json"
+    media = {".md": "text/markdown", ".log": "text/plain"}.get(
+        target.suffix, "application/json"
+    )
     return FileResponse(target, media_type=media, filename=target.name)
