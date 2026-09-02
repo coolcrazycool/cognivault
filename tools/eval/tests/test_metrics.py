@@ -16,7 +16,10 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from metrics import (  # noqa: E402
+    JUDGE_BLOCK_CAP_CHARS,
+    JUDGE_CONTEXT_BUDGET_CHARS,
     METRIC_NAMES,
+    PROMPT_VERSION,
     item_recall,
     aggregate,
     answer_relevancy_ru,
@@ -25,6 +28,9 @@ from metrics import (  # noqa: E402
     coverage,
     faithfulness_ru,
     format_context,
+    parse_citations,
+    split_cited_statements,
+    _pack_blocks,
     _verdict_fraction,
     split_sentences_ru,
     split_statements,
@@ -217,11 +223,42 @@ def test_answer_relevancy_maps_1_to_5_scale():
     ).score == 0.0
 
 
-def test_answer_relevancy_noncommittal_is_zero():
+def test_answer_relevancy_hedged_answer_keeps_its_score():
+    """«Прямого ответа не нашлось, но…» — и дальше эталон: это не отказ.
+
+    В `baseline-2` такие ответы (x02, x09, fb23) уходили в 0.0 при оценке
+    судьи 1–3: оговорка обнуляла содержательную часть. Теперь оговорка — метка.
+    """
+    answer = (
+        "В доступных документах прямого ответа не нашлось.\n\n"
+        "Из источников известно: YAFCA считает витрины на базе Feature Store."
+    )
     result = asyncio.run(
-        answer_relevancy_ru(StubJudge({"score": 4, "noncommittal": True}), "в?", "о")
+        answer_relevancy_ru(StubJudge({"score": 4, "noncommittal": True}), "в?", answer)
+    )
+    assert result.score == 0.75
+    assert result.hedged is True
+    assert result.raw["noncommittal"] is True
+    assert result.to_dict()["hedged"] is True
+
+
+def test_answer_relevancy_pure_refusal_still_scores_zero():
+    """Одна фраза отказа и ничего больше: судья ставит 1 → 0.0, hedged true."""
+    refusal = "В доступных мне документах ответа на этот вопрос не нашлось."
+    result = asyncio.run(
+        answer_relevancy_ru(StubJudge({"score": 1, "noncommittal": True}), "в?", refusal)
     )
     assert result.score == 0.0
+    assert result.hedged is True
+
+
+def test_answer_relevancy_plain_answer_is_not_hedged():
+    result = asyncio.run(
+        answer_relevancy_ru(StubJudge({"score": 5, "noncommittal": False}), "в?", "ответ")
+    )
+    assert result.score == 1.0
+    assert result.hedged is False
+    assert asyncio.run(answer_relevancy_ru(StubJudge(), "в?", "")).hedged is False
 
 
 def test_context_precision_fraction_of_relevant_chunks():
@@ -245,6 +282,262 @@ def test_context_recall_uses_ground_truth_sentences():
 def test_context_recall_without_context_is_zero():
     result = asyncio.run(context_recall(StubJudge(), "в?", "Эталон.", []))
     assert result.score == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Citations: [Источник N] → which block a statement claims
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Факт [Источник 1].", [1]),
+        ("[Источники 1, 3]", [1, 3]),
+        ("[Источник 1][Источник 2]", [1, 2]),
+        ("[Источники 1 и 3]", [1, 3]),
+        ("[Источники 2–4]", [2, 3, 4]),
+        ("[Источники 2-4]", [2, 3, 4]),
+        ("[Источник №2]", [2]),
+        ("[источник 5]", [5]),
+        ("раз [Источник 2], два [Источник 2; 4]", [2, 4]),
+        ("[Источник 1, стр. 3]", []),
+        ("[Источник N]", []),
+        ("[Источник 0]", []),
+        ("без ссылок", []),
+        ("", []),
+    ],
+)
+def test_parse_citations_tolerates_the_forms_the_model_produces(text, expected):
+    assert parse_citations(text) == expected
+
+
+def test_parse_citations_does_not_explode_a_typo_range():
+    """`[Источники 1–999]` — опечатка, не девятьсот блоков."""
+    assert parse_citations("[Источники 1–999]") == [1, 999]
+
+
+def test_trailing_citation_line_covers_the_block_above_it():
+    """x18 в `baseline-2`: таблица, под ней строка `[Источник 1]` — и ноль.
+
+    Строка из одних ссылок — не утверждение (судить её как утверждение — ноль
+    «контекст не содержит информации»), а ссылка на весь переписанный блок.
+    """
+    answer = (
+        "В таблице следующие колонки:\n\n"
+        "| Колонка | Тип |\n| --- | --- |\n| id | bigint |\n| feed_type | text |\n\n"
+        "[Источник 1]\n\n"
+        "Отдельный факт без ссылки. Факт со ссылкой [Источник 2]."
+    )
+    items = split_cited_statements(answer)
+    texts = [item.text for item in items]
+    assert "[Источник 1]" not in texts
+    assert texts[0] == "В таблице следующие колонки:"
+    assert texts[-2:] == ["Отдельный факт без ссылки.", "Факт со ссылкой [Источник 2]."]
+    assert [item.citations for item in items[:5]] == [[1]] * 5
+    assert items[-2].citations == []
+    assert items[-1].citations == [2]
+    # Та же сегментация видна и через split_statements.
+    assert split_statements(answer) == texts
+
+
+def test_citation_walkback_stops_at_a_cited_statement():
+    answer = "Первый [Источник 3]. Второй. Третий.\n\n[Источник 1]"
+    items = split_cited_statements(answer)
+    assert [item.citations for item in items] == [[3], [1], [1]]
+
+
+# --------------------------------------------------------------------------- #
+# The judge sees blocks in full (multi-call paths)
+# --------------------------------------------------------------------------- #
+
+#: Блок длиннее старого капа в 4000, с маркером в хвосте — там, где старый
+#: судья уже ничего не видел.
+DEEP_MARKER = "МАРКЕР_В_ГЛУБИНЕ_БЛОКА"
+BIG_BLOCK = "слово " * 1500 + DEEP_MARKER + " хвост"  # ~9000 chars
+
+
+def _block(size: int, tag: str) -> str:
+    return (f"{tag} " * (size // (len(tag) + 1) + 1))[:size].strip()
+
+
+def test_faithfulness_judges_a_cited_statement_against_its_block_in_full():
+    judge = StubJudge({"verdicts": [{"id": 1, "verdict": 1, "reason": "есть"}]})
+    answer = f"Таблица содержит {DEEP_MARKER} [Источник 1]."
+    result = asyncio.run(faithfulness_ru(judge, answer, [BIG_BLOCK, "другой блок"]))
+
+    assert result.score == 1.0
+    assert result.raw["calls"] == 1
+    assert len(judge.prompts) == 1
+    prompt = judge.prompts[0]
+    assert len(BIG_BLOCK) > 4000
+    assert BIG_BLOCK in prompt  # блок целиком, не первые 4000 символов
+    assert "[2] другой блок" not in prompt  # чужой блок в этот вызов не едет
+    assert result.raw["context_clipped_by_judge"] is False
+    assert result.raw["citations"] == [[1]]
+    assert result.raw["verdicts"] == [
+        {"id": 1, "blocks": [1], "verdict": 1, "reason": "есть"}
+    ]
+    assert result.raw["statements"] == [answer]
+
+
+def test_faithfulness_falls_back_to_all_blocks_when_the_cited_one_rejects():
+    """Модель сослалась не туда — это не повод для нуля: остаток судится по всем."""
+    judge = StubJudge(
+        {"verdicts": [{"id": 1, "verdict": 0, "reason": "не здесь"}]},  # блок 1
+        {"verdicts": [{"id": 1, "verdict": 1, "reason": "во втором"}]},  # пакет [1, 2]
+    )
+    answer = "Факт из второго блока [Источник 1]."
+    result = asyncio.run(faithfulness_ru(judge, answer, ["первый", "второй: факт"]))
+
+    assert result.score == 1.0
+    assert result.raw["calls"] == 2
+    assert "[1] первый" in judge.prompts[1] and "[2] второй: факт" in judge.prompts[1]
+    verdict = result.raw["verdicts"][0]
+    assert verdict["verdict"] == 1
+    assert verdict["blocks"] == [1, 2]
+    assert verdict["reason"] == "во втором"
+
+
+def test_faithfulness_groups_statements_per_cited_block_then_the_rest():
+    judge = StubJudge(
+        {"verdicts": [{"id": 1, "verdict": 1}]},  # блок 1: утверждение 1
+        {"verdicts": [{"id": 1, "verdict": 1}]},  # блок 2: утверждение 3
+        {"verdicts": [{"id": 1, "verdict": 0}]},  # все блоки: утверждение 2
+    )
+    answer = "Первое [Источник 1]. Второе без ссылки. Третье [Источник 2]."
+    result = asyncio.run(faithfulness_ru(judge, answer, ["a", "b"]))
+
+    assert result.score == pytest.approx(2 / 3)
+    assert result.raw["calls"] == 3
+    assert "1. Первое [Источник 1]." in judge.prompts[0]
+    assert "1. Третье [Источник 2]." in judge.prompts[1]
+    assert "1. Второе без ссылки." in judge.prompts[2]
+    assert [v["verdict"] for v in result.raw["verdicts"]] == [1, 0, 1]
+
+
+def test_faithfulness_uncited_answer_fitting_the_budget_is_one_uncut_call():
+    judge = StubJudge({"verdicts": [{"id": 1, "verdict": 1}]})
+    result = asyncio.run(faithfulness_ru(judge, "Факт.", [BIG_BLOCK, "второй"]))
+    assert result.raw["calls"] == 1
+    assert BIG_BLOCK in judge.prompts[0] and "[2] второй" in judge.prompts[0]
+    assert "…" not in judge.prompts[0]
+    assert result.raw["context_clipped_by_judge"] is False
+
+
+def test_faithfulness_citation_beyond_the_context_is_ignored():
+    """`[Источник 7]` при пяти блоках — ссылка в никуда, судим как без ссылки."""
+    judge = StubJudge({"verdicts": [{"id": 1, "verdict": 1}]})
+    result = asyncio.run(faithfulness_ru(judge, "Факт [Источник 7].", ["a", "b"]))
+    assert result.raw["calls"] == 1
+    assert result.raw["citations"] == [[]]
+    assert result.score == 1.0
+
+
+def test_faithfulness_failure_in_a_later_call_fails_the_metric():
+    judge = StubJudge({"verdicts": [{"id": 1, "verdict": 0}]}, RuntimeError("упал"))
+    result = asyncio.run(faithfulness_ru(judge, "Факт [Источник 1].", ["a", "b"]))
+    assert result.score is None
+    assert result.failed is True
+    assert result.raw["calls"] == 1
+
+
+def test_context_recall_unions_attribution_across_packs():
+    """Три блока по 12000 не влезают в бюджет — по вызову на пакет, «или»."""
+    assert 3 * 12000 > JUDGE_CONTEXT_BUDGET_CHARS
+    blocks = [_block(12000, "первый"), _block(12000, "второй"), _block(12000, "третий")]
+    judge = StubJudge(
+        {"verdicts": [{"id": 1, "attributed": 1}, {"id": 2, "attributed": 0}]},
+        # Во втором вызове остаётся одно предложение, и оно снова под номером 1.
+        {"verdicts": [{"id": 1, "attributed": 1}]},
+    )
+    result = asyncio.run(
+        context_recall(judge, "в?", "Первое предложение. Второе предложение.", blocks)
+    )
+    assert result.score == 1.0
+    assert result.raw["calls"] == 2  # третий пакет не понадобился
+    assert result.raw["packs"] == [[1], [2], [3]]
+    assert blocks[0] in judge.prompts[0] and blocks[1] in judge.prompts[1]
+    assert "1. Второе предложение." in judge.prompts[1]
+    assert "Первое предложение." not in judge.prompts[1]
+    assert [v["attributed"] for v in result.raw["verdicts"]] == [1, 1]
+    assert result.raw["verdicts"][1]["blocks"] == [1, 2]
+    assert result.raw["context_clipped_by_judge"] is False
+
+
+def test_context_recall_within_budget_is_one_call_with_full_blocks():
+    judge = StubJudge({"verdicts": [{"id": 1, "attributed": 1}]})
+    result = asyncio.run(context_recall(judge, "в?", "Эталон.", [BIG_BLOCK, "b"]))
+    assert result.raw["calls"] == 1
+    assert BIG_BLOCK in judge.prompts[0]
+    assert "…" not in judge.prompts[0]
+
+
+def test_context_precision_judges_each_block_on_its_full_text():
+    blocks = [_block(15000, "альфа"), _block(15000, "бета")]
+    judge = StubJudge(
+        {"verdicts": [{"id": 1, "relevant": 1}]},
+        {"verdicts": [{"id": 2, "relevant": 0}]},
+    )
+    result = asyncio.run(context_precision(judge, "в?", blocks))
+    assert result.score == 0.5
+    assert result.raw["calls"] == 2
+    assert blocks[0] in judge.prompts[0] and blocks[1] in judge.prompts[1]
+    assert "[2] " in judge.prompts[1] and "[1] " not in judge.prompts[1]
+    assert [v["relevant"] for v in result.raw["verdicts"]] == [1, 0]
+
+
+def test_context_precision_reads_a_judge_that_renumbers_from_one():
+    """Показали `[2] …`, судья ответил `id: 1` — вердикт всё равно к блоку 2."""
+    blocks = [_block(15000, "альфа"), _block(15000, "бета")]
+    judge = StubJudge(
+        {"verdicts": [{"id": 1, "relevant": 0}]},
+        {"verdicts": [{"id": 1, "relevant": 1}]},
+    )
+    result = asyncio.run(context_precision(judge, "в?", blocks))
+    assert [v["relevant"] for v in result.raw["verdicts"]] == [0, 1]
+
+
+def test_context_precision_within_budget_is_one_call():
+    judge = StubJudge({"verdicts": [{"id": 1, "relevant": 1}, {"id": 2, "relevant": 1}]})
+    result = asyncio.run(context_precision(judge, "в?", ["a", "b"]))
+    assert result.score == 1.0
+    assert result.raw["calls"] == 1
+
+
+def test_pack_blocks_fills_a_budget_with_consecutive_blocks():
+    assert _pack_blocks(["a" * 100, "b" * 100]) == [[1, 2]]
+    assert _pack_blocks(
+        ["a" * 12000, "b" * 6000, "c" * 6000, "d" * 25000, "e" * 100]
+    ) == [[1, 2], [3], [4], [5]]
+    assert _pack_blocks(["a", "b", "c"], budget=1) == [[1], [2], [3]]
+
+
+def test_context_clipped_by_judge_flags_a_block_over_the_cap():
+    huge = "x" * (JUDGE_BLOCK_CAP_CHARS + 1)
+    verdict = {"verdicts": [{"id": 1, "verdict": 1, "relevant": 1, "attributed": 1}]}
+    assert asyncio.run(faithfulness_ru(StubJudge(verdict), "Факт.", [huge])).raw[
+        "context_clipped_by_judge"
+    ] is True
+    assert asyncio.run(context_precision(StubJudge(verdict), "в?", [huge])).raw[
+        "context_clipped_by_judge"
+    ] is True
+    assert asyncio.run(context_recall(StubJudge(verdict), "в?", "Эталон.", [huge])).raw[
+        "context_clipped_by_judge"
+    ] is True
+    assert asyncio.run(faithfulness_ru(StubJudge(verdict), "Факт.", [BIG_BLOCK])).raw[
+        "context_clipped_by_judge"
+    ] is False
+
+
+def test_format_context_does_not_cut_by_default():
+    assert format_context([BIG_BLOCK]) == f"[1] {BIG_BLOCK}"
+
+
+def test_prompt_version_bumped_for_the_full_context_judge():
+    """Промпты изменились — оценки v1 и v2 несравнимы, run.py печатает версию."""
+    assert PROMPT_VERSION != "v1"
+    assert PROMPT_VERSION == "v2"
 
 
 # --------------------------------------------------------------------------- #
