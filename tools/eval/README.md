@@ -338,7 +338,8 @@ python3 tools/eval/run.py --label after-w5 --rag-log ./rag_log.jsonl
   "prompt_version": "v1",
   "approximate": false,
   "context_origin": {"rag_log": 80},
-  "counts": {"total": 80, "failed": 2, "evaluated": 78},
+  "counts": {"total": 80, "failed": 2, "generation_failed": 1, "evaluated": 77,
+             "context_clipped": 0, "judge_context_clipped": 0},
   "buckets": {"answerable": 66, "refusal": 12},
   "aggregate": {
     "faithfulness_ru": 0.71,
@@ -347,7 +348,8 @@ python3 tools/eval/run.py --label after-w5 --rag-log ./rag_log.jsonl
     "context_recall": 0.64,
     "retrieval_hit": 0.79,
     "refusal_ok": 0.80,
-    "false_refusal_rate": 0.06
+    "false_refusal_rate": 0.06,
+    "hedge_rate": 0.09
   },
   "aggregate_refusal": {"faithfulness_ru": 0.40, "answer_relevancy_ru": 0.0, "...": 0},
   "dispersion": {"faithfulness_ru": {"mean": 0.71, "sd": 0.24, "n": 66, "stderr": 0.029}},
@@ -362,8 +364,11 @@ python3 tools/eval/run.py --label after-w5 --rag-log ./rag_log.jsonl
   "run_params": {
     "judge_model": "GigaChat-3-Ultra-preview", "judge_temperature": 0.0,
     "judge_prompt_version": "v1", "golden_prompt_version": "v2",
+    "answer_provider": "kitai", "answer_model": "glm-5.1", "answer_model_note": null,
+    "judge_calls_by_metric": {"faithfulness_ru": 120, "answer_relevancy_ru": 66, "context_precision": 66, "context_recall": 80, "total": 332},
     "ui_settings": {"rag": {"rerank_candidates": 40, "grader_threshold": 4, "...": null},
-                    "gigachat": {"model": "…", "temperature": 0.2, "max_tokens": 4096},
+                    "gigachat": {"model": "…", "provider": "kitai", "kitai_model": "glm-5.1", "...": null},
+                    "model_effective": {"provider": "kitai", "model": "glm-5.1"},
                     "prompts": {"system": null, "context_reminder": null}}
   },
   "samples": [
@@ -378,11 +383,27 @@ python3 tools/eval/run.py --label after-w5 --rag-log ./rag_log.jsonl
       "metrics": {"faithfulness_ru": {"name": "…", "score": 0.75, "raw": {...}, "error": "", "failed": false}},
       "error": "", "failed": false, "latency_ms": 5231,
       "run_settings": {...}, "timings_ms": {"condense": 410, "search": 180, "grade": 900, "stream": 3600},
-      "event_order": ["meta", "sources", "token", "done"]
+      "event_order": ["meta", "sources", "token", "done"],
+      "hidden_calls": {"condense": null, "grader": {"status": "ok", "batches": [{"n": 1, "status": "ok", "...": null}]}},
+      "empty_answer": false, "generation_failed": false, "metrics_note": "",
+      "path_checked": true, "path_drift": null, "path_ambiguous": [], "path_missing": false
     }
   ],
   "judge_failures": {"expected": 188, "failed": 0, "samples_affected": 0, "by_error": {}},
   "grader_health": {"enabled": true, "applicable": 44, "graded": 44, "ungraded": 0, "partial": 0},
+  "hidden_call_health": {
+    "recorded": 46, "not_recorded": 0,
+    "grader": {"calls": 46, "by_status": {"ok": 44, "failed": 2},
+               "batches_total": 180, "batches_ok": 172, "batches_failed": 8, "batches_truncated": 0, "batches_partial": 0,
+               "by_error": {"KitaiQueryFailed: 404 \"No such model\"": 8}, "by_error_model": {"…": ["glm-5.1"]},
+               "by_finish_reason": {"stop": 172, "none": 8}, "by_model": {"glm-5.1": 180},
+               "examples": {"KitaiQueryFailed: 404 \"No such model\"": ["<detail>", "…"]},
+               "ms_median": 1180.0, "ms_max": 9020.0},
+    "condense": {"calls": 0, "by_status": {}, "by_error": {}, "examples": {}, "ms_median": null, "ms_max": null}
+  },
+  "generation_failures": [{"id": "x12", "finish_reason": "length", "stream_ms": 30500.0, "model": "kitai / glm-5.1"}],
+  "path_drift": {"checked": 44, "drifted": [{"id": "x03", "golden": "old/a.md", "live": "new/a.md"}],
+                 "ambiguous": [], "missing": []},
   "stage_timings": {"grade": {"n": 46, "median_ms": 4200.0, "max_ms": 9100.0,
                               "deadline_ms": 90000.0, "at_deadline": 0}},
   "extra": {"concurrency": 1, "context_chars": 4000, "context_fetch": true, "judge_calls": 320}
@@ -391,10 +412,17 @@ python3 tools/eval/run.py --label after-w5 --rag-log ./rag_log.jsonl
 
 `report-<label>.md` — та же информация человекочитаемо: дисклеймер про
 абсолютные значения, предупреждение о приближённом прогоне (если он такой),
-секция «Параметры прогона», секция «Скрытые вызовы», таблица средних **с
-разбросом по сэмплам**, отдельная таблица по парам-ловушкам, разрез **по
-категориям**, правило диагностики, таблица по парам (с колонками «категория»,
-«чанк найден», «зря отказ») и список упавших пар.
+секция «Параметры прогона», секция «Скрытые вызовы» (с таблицами «грейдер:
+батчи по исходу» и «грейдер: причины сбоев»), секция «Дрейф путей golden»,
+таблица средних **с разбросом по сэмплам**, отдельная таблица по
+парам-ловушкам, разрез **по категориям**, правило диагностики, таблица по парам
+(с колонками «категория», «чанк найден», «зря отказ», «грейдер»), секция
+«Сбои генерации» и список упавших пар.
+
+Заголовок отчёта получает суффикс **«(РЕРАНКЕР НЕ РАБОТАЛ)»**, если грейдер
+включён, а оценки вернулись меньше чем на 90 % применимых пар
+(`grader_health.graded / applicable < 0.9`): это другая система, а не другая
+настройка, и `--compare` с таким отчётом отказывается без `--allow-degraded`.
 
 > **Сначала читайте «Скрытые вызовы», потом метрики.** Метрики описывают ответ;
 > эта секция описывает пайплайн, который его собрал, — и если он собран не тем
@@ -413,6 +441,18 @@ python3 tools/eval/run.py --label after-w5 --rag-log ./rag_log.jsonl
 > чате, поэтому при выключенном `condense_first_turn` переписывание вопроса не
 > запускается ни разу, и из двух скрытых вызовов на ход меряется один. Строка
 > «condense включён» это оговаривает.
+>
+> * `hidden_call_health` — ПОЧЕМУ грейдер (и condense) не отработал. UI пишет
+>   в запись хода `hidden_calls`: исход каждого батча грейдера (`ok` / `failed`
+>   / `truncated` / `partial`) с `error`, `detail`, `finish_reason`, `usage`,
+>   моделью и временем. Отчёт сводит это в счётчики по исходу, по типу ошибки
+>   (тип исключения + первые 120 символов сообщения, до трёх примеров `detail`
+>   на тип), по `finish_reason` и по модели, — и первоэкранное предупреждение
+>   «Грейдер молча не отработал» называет доминирующую причину: «Причина по
+>   батчам: KitaiQueryFailed: 404 "No such model" (glm-5.1) — 160 батч(ей)».
+>   Записи старого UI без `hidden_calls` ничего не додумывают: печатается
+>   «Причина не записана: UI старее сбора скрытых вызовов», а в таблице по
+>   парам колонка «грейдер» показывает `—` (иначе `ok`, `2/4 ✗`, `trunc`).
 
 > **Судейские средние покрывают только отвечаемые пары.** Четыре метрики судьи
 > в `aggregate` считаются по парам БЕЗ `expected_refusal`; ловушки вынесены в
@@ -447,9 +487,9 @@ python3 tools/eval/run.py --label after-w5 --rag-log ./rag_log.jsonl
   строки печатаются как `—`, а сверху появляется пометка, что его судейские
   средние посчитаны ВМЕСТЕ с парами-ловушками и потому не сопоставимы напрямую.
 
-**Знак означает качество, а не направление числа.** У `false_refusal_rate`
-меньше — лучше, поэтому ▲ у него стоит при ПАДЕНИИ доли; в остальных строках
-это одно и то же.
+**Знак означает качество, а не направление числа.** У `false_refusal_rate` и
+`hedge_rate` меньше — лучше, поэтому ▲ у них стоит при ПАДЕНИИ доли; в
+остальных строках это одно и то же.
 
 Обе секции «Параметры прогонов» печатаются целиком: модель и температура
 отвечающей системы, ширина ретрива, порог грейдера, флаги, отпечатки промптов,
@@ -468,6 +508,7 @@ python3 tools/eval/run.py --label after-w5 --rag-log ./rag_log.jsonl
 | `refusal_ok` | считается локально, без судьи | доля пар `expected_refusal`, где ассистент отказался вместо выдумки |
 | `false_refusal_rate` | считается локально, без судьи. **Меньше — лучше** | доля ОТВЕЧАЕМЫХ пар, где ассистент отказался зря |
 | `meta_answered_rate` | считается локально, без судьи. **Больше — лучше** | доля МЕТАПАР (`expected_outcome: "meta"`), на которые ассистент ответил, а не отказался |
+| `hedge_rate` | считается локально по флагу судьи `answer_relevancy_ru.hedged`. **Меньше — лучше** | доля ОТВЕЧАЕМЫХ пар, где ответ по существу есть, но открывается оговоркой «прямого ответа не нашлось» (промпты v2 не обнуляют такой ответ — оценивают содержательную часть и поднимают флаг). В отчёте прежних промптов поля нет — `null`, не 0 |
 
 Четыре судейские метрики считаются **только по отвечаемым парам**. Раньше пары
 `expected_refusal` мерились теми же четырьмя метриками против эталона отказа, а
@@ -497,6 +538,34 @@ python3 tools/eval/run.py --label after-w5 --rag-log ./rag_log.jsonl
 
 Считается только по **успешным** парам: у упавшего сэмпла «не попали» означает
 «прогон сломался», а не «ретрив промахнулся».
+
+### Промпты судьи v2 — baseline v1 несопоставим
+
+`metrics.PROMPT_VERSION = "v2"`: `answer_relevancy_ru` больше не ставит 0
+ответу с оговоркой (флаг `hedged` → `hedge_rate`), у каждой метрики в `raw`
+появились `calls` (сколько вызовов судьи ушло), `context_clipped_by_judge`
+(судья видел контекст, урезанный СВОИМ капом) и `replies` (сырые ответы судьи
+по вызовам). **Отчёты, снятые промптами v1, с v2 не сравниваются** — `--compare`
+печатает блок «СУДИЛИ РАЗНЫЕ ВЕРСИИ ПРОМПТОВ» первым и завершается с кодом 2;
+`--allow-model-mismatch` снимает и этот запрет (флаг один на оба случая, что
+модели, что промпты), но правильный ход — перегнать старый baseline.
+
+Что ещё из этого видно в отчёте:
+
+* **кап судьи** — `counts.judge_context_clipped` и пер-сэмпловый
+  `judge_context_clipped`: судья резал контекст сам (`metrics.format_context`),
+  это ДРУГОЙ дефект, чем `context_clipped` (обрезка `context_text` в логе,
+  `rag_log.MAX_TEXT_CHARS`). В шапке — строка «кап судьи: нет», иначе
+  первоэкранное предупреждение со списком id.
+* **счётчик вызовов** — `run_params.judge_calls_by_metric` (сумма `raw.calls` по
+  метрикам и всего) и строка шапки «судейских вызовов: N (faithfulness a,
+  relevancy b, precision c, recall d)». На «различаются параметры прогонов» этот
+  счётчик не влияет.
+* **`raw.replies` не сохраняется в отчёт**: перед записью `report-<label>.json`
+  ключ выбрасывается из `raw` каждой метрики (`run.slim_report`,
+  `REPORT_DROPPED_RAW_KEYS`) — это самое тяжёлое поле, десятки КБ на пару.
+  Всё остальное (`score`, `raw.calls`, вердикты, `context_clipped_by_judge`,
+  `hedged`) остаётся.
 
 ### Контекст: лог — норма, восстановление — аварийный режим
 
@@ -532,6 +601,47 @@ A/B двух фолбэк-прогонов достоверен только п�
 отдельной строкой отчёта и списком «Упавшие пары». Раньше ошибка бэкенда давала
 судье пустой контекст, нули уезжали в среднее и читались как регрессия
 качества.
+
+### Сбои генерации — отдельный исход, а не оценка
+
+Пара с `empty_answer: true` в записи лога (или, у старых записей, с пустым
+текстом при `finish_reason: "length"`) попадает в корзину `generation_failed`:
+ответа не было вовсе, и это не отказ и не плохой ответ. Судья на неё **не
+вызывается** (`metrics: null`, пометка в `metrics_note`), она не входит ни в
+судейские средние, ни в `refusal_ok` / `false_refusal_rate` /
+`meta_answered_rate`, ни в парную дельту `--compare`; `retrieval_hit` по ней
+считается — ретрив состоялся. Число лежит в `counts.generation_failed` и в
+строке корзин шапки («сбоев генерации: G»), список — в секции «Сбои генерации»
+(id, `finish_reason`, время стрима, модель). Пустой поток при
+`finish_reason: "no_context"` сюда НЕ попадает: это штатный отказ «грейдер ничего
+не оставил», его меряет `refusal_ok`.
+
+### Модель и провайдер — по факту
+
+С появлением KitAI ключ `gigachat.model` в снимке настроек перестал быть
+правдой: при `provider: kitai` отвечает `kitai_model`. Отчёт берёт
+`settings.model_effective` (пишет UI), за неимением — `gigachat.provider` +
+подходящий ключ модели, и только совсем старый снимок показывает `gigachat.model`
+с пометкой «(ключ провайдера не записан)». Значения лежат в
+`run_params.answer_provider` / `answer_model` / `answer_model_note`, печатаются
+в шапке и в «Параметрах прогона». `--compare` при разных провайдерах или
+моделях печатает громкий блок ПЕРВЫМ и отказывается (код выхода 2) без
+`--allow-model-mismatch`; отчёт без записанной модели считается «не
+проверяемым» — предупреждение есть, отказа нет.
+
+### Дрейф путей golden
+
+На старте прогона (если бэкенд доступен и не задан `--no-context-fetch`)
+харнесс читает `GET /api/vault/catalog` целиком (постранично по
+`limit`/`offset` до `total`) и сверяет с ним `source_path` и `alt_source_paths`
+каждой golden-пары: точное совпадение — ок; нет совпадения, но ровно один живой
+путь с тем же именем файла — он добавляется в эффективные `alt_source_paths`
+пары на время прогона (`path_drift: {golden, live}`), и `retrieval_hit`
+считается по ним; несколько кандидатов — `path_ambiguous: [...]`, ничего не
+подставляется; ни одного — `path_missing: true`. Сводка — `path_drift` в JSON,
+секция «Дрейф путей golden» и первоэкранное предупреждение в markdown; сама
+разметка `golden.jsonl` не переписывается — поправьте её руками. Каталог
+недоступен или пуст — одно предупреждение в лог, поведение как раньше.
 
 ## Переменные окружения
 
@@ -599,7 +709,14 @@ run.py --golden PATH --label NAME --ui-url URL --token TOKEN --limit N
        [--include-rejected] [--backend-url URL] [--backend-token TOKEN]
        [--no-context-fetch] [--context-chars N] [--config PATH]
 run.py --compare A.json B.json [--out-dir DIR]
+       [--allow-model-mismatch] [--allow-degraded]
 ```
+
+`--compare` завершается с кодом 2 и не пишет диф, если в прогонах отвечали разные
+модели/провайдеры или судили разные версии промптов (`--allow-model-mismatch`
+снимает оба запрета) или если хотя бы в
+одном из них реранкер не работал — грейдер оценил меньше 90 % применимых пар
+(`--allow-degraded`).
 
 ## Тесты
 
@@ -617,7 +734,14 @@ diff-таблицы, markdown-сплиттер и форма строк golden.j
 по паре `(path, chunk_index)` с деградацией до раздела/файла, парная дельта с
 разбросом и числом пар, ветка отказа, разрез по `category` (включая пары без
 неё), вынос пар-ловушек из судейских средних, `false_refusal_rate` и его
-направление в дифе, а также чтение отчёта СТАРОГО формата без падения.
+направление в дифе, чтение отчёта СТАРОГО формата без падения, сводка
+`hidden_call_health` (исходы батчей, группировка ошибок, кап примеров), корзина
+`generation_failed` (судья не вызывается, средние не трогаются), модель по
+`model_effective` и отказ `--compare` при её несовпадении, дрейф путей golden
+(точное / по имени файла / неоднозначно / отсутствует, пагинация каталога), и
+записи старого UI без новых полей — с формулировкой «не записано», `hedge_rate`
+и его знак в дифе, кап судьи отдельно от обрезки лога, счётчик вызовов судьи,
+`slim_report` (без `raw.replies`) и отказ `--compare` при разных версиях промптов.
 
 ## Что менять осторожно
 

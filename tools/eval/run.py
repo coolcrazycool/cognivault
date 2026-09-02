@@ -163,11 +163,93 @@ JUDGE_FAILURE_WARNING = (
 )
 
 FALSE_REFUSAL_NOTE = (
-    "`false_refusal_rate` — **меньше лучше**, это единственное такое число в "
-    "отчёте. Оно ловит обратную ошибку: у вопроса ответ есть, а ассистент "
-    "ответил «в источниках ничего нет». Обычно вырастает от закручивания "
-    "порога грейдера — того самого движения, которым «улучшают» `refusal_ok`."
+    "`false_refusal_rate` — **меньше лучше**. Оно ловит обратную ошибку: у "
+    "вопроса ответ есть, а ассистент ответил «в источниках ничего нет». Обычно "
+    "вырастает от закручивания порога грейдера — того самого движения, которым "
+    "«улучшают» `refusal_ok`. Второе такое число — `hedge_rate`: ответ по "
+    "существу ЕСТЬ, но открывается оговоркой «прямого ответа не нашлось»; "
+    "оговорка не отказ (оценка релевантности ставится содержательной части), "
+    "но пользователь читает её как отказ, поэтому её доля меряется отдельно."
 )
+
+JUDGE_CLIP_WARNING = (
+    "**Кап судьи: на {clipped} парах судья видел контекст, урезанный ЕГО "
+    "СОБСТВЕННЫМ капом** (`metrics.format_context`, не `rag_log.MAX_TEXT_CHARS`): "
+    "пары {ids}. Провалы `faithfulness`/`context_precision`/`context_recall` "
+    "на них говорят про текст, которого судье не дали, а не про ответ. Это "
+    "отдельный дефект от `context_clipped` (обрезка в логе) — тот считается и "
+    "печатается своей строкой."
+)
+
+JUDGE_PROMPT_MISMATCH_WARNING = (
+    "**ВНИМАНИЕ: СУДИЛИ РАЗНЫЕ ВЕРСИИ ПРОМПТОВ.** `{label_a}`: `{version_a}`; "
+    "`{label_b}`: `{version_b}`. Оценки разных версий судьи несопоставимы по "
+    "построению — дельта ниже измеряет смену судьи, а не системы. Перегоните "
+    "старый прогон текущей версией; `--compare` продолжает только с "
+    "`--allow-model-mismatch`."
+)
+
+#: Ключи `raw` метрики, которые не сохраняются в JSON-отчёт (см. `slim_report`).
+REPORT_DROPPED_RAW_KEYS = ("replies",)
+
+#: Хвост первоэкранного предупреждения о грейдере, когда причина сбоя ИЗВЕСТНА
+#: по записям `hidden_calls`. Без причины предупреждение называло симптом
+#: («молча не отработал») и ничего про диагноз.
+GRADER_CAUSE_PREFIX = "Причина по батчам: "
+#: …и когда записи о скрытых вызовах в логе нет вовсе.
+GRADER_CAUSE_NOT_RECORDED = "Причина не записана: UI старее сбора скрытых вызовов"
+
+#: Значение любого поля, которого в записи лога ещё не было. Печатается вместо
+#: догадки: старый UI не писал `hidden_calls` / `model_effective` /
+#: `empty_answer`, и отчёт обязан это сказать, а не додумать.
+NOT_RECORDED = "не записано"
+
+#: Суффикс заголовка отчёта, когда реранкер оценил меньше 90 % применимых пар.
+DEGRADED_TITLE_SUFFIX = "(РЕРАНКЕР НЕ РАБОТАЛ)"
+#: Ниже этой доли `graded / applicable` прогон измерял систему без реранкера.
+GRADER_DEGRADED_THRESHOLD = 0.9
+
+MODEL_MISMATCH_WARNING = (
+    "**ВНИМАНИЕ: ОТВЕЧАЛИ РАЗНЫЕ МОДЕЛИ.** `{label_a}`: {model_a}; "
+    "`{label_b}`: {model_b}. Дельта ниже — сравнение двух МОДЕЛЕЙ, а не двух "
+    "настроек одной системы, и ни одна строка таблицы этого не покажет. "
+    "`--compare` продолжает только с `--allow-model-mismatch`."
+)
+
+MODEL_UNKNOWN_WARNING = (
+    "**Провайдер/модель ответа не записаны в отчёте `{label}`** (сделан до "
+    "того, как UI стал писать `model_effective`) — совпадение моделей проверить "
+    "нельзя; сверьте вручную."
+)
+
+DEGRADED_COMPARE_WARNING = (
+    "**ВНИМАНИЕ: в прогоне `{label}` реранкер не работал** (грейдер оценил "
+    "{graded} из {applicable} применимых пар, меньше {threshold:.0%}). Это "
+    "другая система, а не другая настройка; дельта с ним недостоверна. "
+    "`--compare` продолжает только с `--allow-degraded`."
+)
+
+GENERATION_FAILED_NOTE = (
+    "**Сбои генерации: {count} пар(ы) не получили ответа вовсе** (пустой текст "
+    "при `finish_reason`, обычно `length`). Это не отказ и не плохой ответ — это "
+    "отсутствие ответа, и судье тут оценивать нечего: такие пары вынесены в "
+    "корзину `generation_failed`, не входят ни в одно среднее и перечислены в "
+    "секции «Сбои генерации». `retrieval_hit` по ним посчитан — ретрив состоялся."
+)
+
+PATH_DRIFT_WARNING = (
+    "**Дрейф путей golden-set: {drifted} пар(ы) сопоставлены по имени файла, "
+    "{ambiguous} неоднозначны, {missing} не найдены в живом каталоге.** "
+    "Golden-пара ссылается на `source_path`, которого в индексе нет под этим "
+    "путём (страницу перенесли или переименовали папку). Сопоставленные по "
+    "имени файла пути добавлены в `alt_source_paths` пары на время прогона, и "
+    "`retrieval_hit` по ним честный; неоднозначные и отсутствующие остались "
+    "как есть — их промах может быть промахом РАЗМЕТКИ, а не ретрива. Список — "
+    "в секции «Дрейф путей golden»; поправьте `golden.jsonl`."
+)
+
+#: Пер-сэмпловый флаг корзины «генерация не дала ответа».
+GENERATION_FAILED_KEY = "generation_failed"
 
 RETRIEVAL_KEY = "retrieval_hit"
 REFUSAL_KEY = "refusal_ok"
@@ -181,6 +263,11 @@ FALSE_REFUSAL_RATE_KEY = "false_refusal_rate"
 META_KEY = "meta_answered"
 #: Его доля в агрегатах.
 META_RATE_KEY = "meta_answered_rate"
+#: Доля отвечаемых пар, где ответ есть, но открыт оговоркой об отсутствии
+#: ответа (`metrics.answer_relevancy_ru.hedged`). МЕНЬШЕ — ЛУЧШЕ.
+HEDGE_RATE_KEY = "hedge_rate"
+#: Пер-сэмпловый флаг: судья видел контекст, урезанный СВОИМ капом.
+JUDGE_CLIP_KEY = "judge_context_clipped"
 
 #: Поле golden-пары с ТРЕХЗНАЧНЫМ вердиктом и его значения.
 OUTCOME_KEY = "expected_outcome"
@@ -726,7 +813,19 @@ async def rebuild_contexts(
 # --------------------------------------------------------------------------- #
 
 
+# Куда уходит прогресс вместо stderr. UI-раннер (`app/eval_runner.py`) ставит
+# сюда свой приёмник на время прогона и снимает после: перехватывать stderr
+# всего процесса он больше не может — туда же пишет логгер приложения, и на
+# время прогона предупреждения грейдера пропадали из лога пода. Тип — `Any`,
+# а не `Callable`, чтобы не трогать строку импортов: `Callable[[str], None] | None`.
+LOG_SINK: Any = None
+
+
 def _log(message: str) -> None:
+    sink = LOG_SINK
+    if sink is not None:
+        sink(message)
+        return
     print(message, file=sys.stderr, flush=True)
 
 
@@ -741,6 +840,165 @@ def alt_source_paths(row: dict[str, Any]) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [p.strip() for p in raw if isinstance(p, str) and p.strip()]
+
+
+# --------------------------------------------------------------------------- #
+# Дрейф путей golden-набора относительно живого каталога
+# --------------------------------------------------------------------------- #
+
+
+def _basename(path: str) -> str:
+    return path.rstrip("/").rsplit("/", 1)[-1]
+
+
+def resolve_golden_paths(
+    row: dict[str, Any], live_paths: Sequence[str] | set[str] | None
+) -> dict[str, Any]:
+    """Сверить `source_path` и `alt_source_paths` пары с живым каталогом.
+
+    Страницу переносят, папку переименовывают — и golden-пара начинает
+    ссылаться на путь, которого в индексе нет. Раньше это читалось как промах
+    ретрива: `retrieval_hit == false` при том, что нужный документ лежал в
+    контексте под новым путём. Правило:
+
+    * путь есть в каталоге — ничего не меняется;
+    * пути нет, но ровно ОДИН живой путь с тем же именем файла — он добавляется
+      в эффективные `alt_source_paths` и записывается как `path_drift`;
+    * кандидатов несколько — `path_ambiguous`, ничего не подставляется:
+      угадывать между реестрами-близнецами хуже честного промаха;
+    * кандидатов нет — `path_missing`.
+
+    ``live_paths is None`` — каталог недоступен, проверка не проводилась и
+    пара остаётся ровно такой, какой была.
+    """
+    alts = alt_source_paths(row)
+    out: dict[str, Any] = {
+        "checked": live_paths is not None,
+        "effective_alt_source_paths": list(alts),
+        "path_drift": None,
+        "path_ambiguous": [],
+        "path_missing": False,
+        "alt_path_drift": [],
+        "alt_path_ambiguous": [],
+        "alt_path_missing": [],
+    }
+    if live_paths is None:
+        return out
+    live = set(live_paths)
+    by_name: dict[str, list[str]] = {}
+    for path in live:
+        by_name.setdefault(_basename(path), []).append(path)
+
+    def lookup(path: str) -> tuple[str, list[str]]:
+        if path in live:
+            return "ok", []
+        candidates = sorted(by_name.get(_basename(path), []))
+        if len(candidates) == 1:
+            return "drift", candidates
+        if candidates:
+            return "ambiguous", candidates
+        return "missing", []
+
+    primary = str(row.get("source_path", "") or "").strip()
+    if primary:
+        state, candidates = lookup(primary)
+        if state == "drift":
+            out["path_drift"] = {"golden": primary, "live": candidates[0]}
+            if candidates[0] not in out["effective_alt_source_paths"]:
+                out["effective_alt_source_paths"].append(candidates[0])
+        elif state == "ambiguous":
+            out["path_ambiguous"] = candidates
+        elif state == "missing":
+            out["path_missing"] = True
+    for alt in alts:
+        state, candidates = lookup(alt)
+        if state == "drift":
+            out["alt_path_drift"].append({"golden": alt, "live": candidates[0]})
+            if candidates[0] not in out["effective_alt_source_paths"]:
+                out["effective_alt_source_paths"].append(candidates[0])
+        elif state == "ambiguous":
+            out["alt_path_ambiguous"].append({"golden": alt, "candidates": candidates})
+        elif state == "missing":
+            out["alt_path_missing"].append(alt)
+    return out
+
+
+def effective_row(row: dict[str, Any], drift: dict[str, Any]) -> dict[str, Any]:
+    """Копия golden-пары с эффективными `alt_source_paths` (после дрейфа)."""
+    out = dict(row)
+    out["alt_source_paths"] = list(drift.get("effective_alt_source_paths") or [])
+    return out
+
+
+async def fetch_live_paths(backend: BackendClient | None) -> set[str] | None:
+    """Множество путей живого каталога; ``None`` — проверка дрейфа пропущена.
+
+    Любая ошибка каталога — одно предупреждение и поведение «как раньше»:
+    проверка путей — удобство, а не условие прогона. Пустой каталог тоже
+    пропускается: иначе КАЖДАЯ пара стала бы «отсутствующей», и это уже не
+    дрейф разметки, а пустой индекс, о котором скажет `retrieval_hit`.
+    """
+    if backend is None:
+        return None
+    try:
+        paths = await backend.catalog_paths()
+    except (BackendError, httpx.HTTPError, ValueError) as exc:
+        _log(f"ВНИМАНИЕ: каталог недоступен ({exc}) — дрейф путей golden не проверяется")
+        return None
+    if not paths:
+        _log("ВНИМАНИЕ: каталог пуст — дрейф путей golden не проверяется")
+        return None
+    _log(f"каталог: {len(paths)} документов — пути golden сверяются с ним")
+    return set(paths)
+
+
+# --------------------------------------------------------------------------- #
+# Модель и провайдер ответа — по факту, а не по ключу настроек
+# --------------------------------------------------------------------------- #
+
+
+def effective_model(settings: Any) -> dict[str, Any]:
+    """``{provider, model, note}`` — что на самом деле отвечало в этом ходе.
+
+    Снимок настроек носит `gigachat.model` с первого дня, но с появлением
+    KitAI этот ключ перестал быть правдой: при `provider: kitai` отвечает
+    `kitai_model`, а `gigachat.model` — просто неиспользуемая настройка. UI
+    теперь пишет `model_effective`; отчёт берёт его, и только за неимением —
+    восстанавливает по `provider` + подходящему ключу, а совсем старый снимок
+    показывает со ссылкой на то, что провайдер не записан.
+    """
+    if not isinstance(settings, dict):
+        return {"provider": None, "model": None, "note": NOT_RECORDED}
+    eff = settings.get("model_effective")
+    if isinstance(eff, dict) and (eff.get("model") or eff.get("provider")):
+        return {
+            "provider": eff.get("provider") or None,
+            "model": eff.get("model") or None,
+            "note": None,
+        }
+    giga = settings.get("gigachat")
+    if not isinstance(giga, dict):
+        return {"provider": None, "model": None, "note": NOT_RECORDED}
+    provider = giga.get("provider")
+    if provider:
+        key = "kitai_model" if str(provider) == "kitai" else "model"
+        return {"provider": str(provider), "model": giga.get(key) or None, "note": None}
+    if giga.get("model"):
+        return {
+            "provider": None,
+            "model": giga.get("model"),
+            "note": "(ключ провайдера не записан)",
+        }
+    return {"provider": None, "model": None, "note": NOT_RECORDED}
+
+
+def _model_label(entry: dict[str, Any]) -> str:
+    """«kitai / glm-5.1», «GigaChat-2-Max (ключ провайдера не записан)», «не записано»."""
+    provider, model, note = entry.get("provider"), entry.get("model"), entry.get("note")
+    if not provider and not model:
+        return str(note or NOT_RECORDED)
+    head = " / ".join(str(x) for x in (provider, model) if x)
+    return f"{head} {note}" if note else head
 
 
 def retrieval_hit(
@@ -826,6 +1084,7 @@ async def run_sample(
     cache: dict[str, str],
     context_cap: int,
     rag_log: RagLogIndex | None = None,
+    live_paths: set[str] | None = None,
 ) -> dict[str, Any]:
     """Ask one golden question, judge the answer, return a report row.
 
@@ -833,11 +1092,16 @@ async def run_sample(
     context) carries ``failed: True`` and empty ``metrics`` — :func:`build_report`
     keeps such rows out of every average instead of letting their zeros read as
     a regression.
+
+    ``live_paths`` — пути живого каталога (см. :func:`resolve_golden_paths`);
+    ``None`` — дрейф путей не проверяется, пара берётся как размечена.
     """
     question = str(row.get("question", "") or "")
     ground_truth = str(row.get("ground_truth", "") or "")
     outcome_expected = expected_outcome(row)
     expects_refusal = outcome_expected == OUTCOME_REFUSAL
+    drift = resolve_golden_paths(row, live_paths)
+    row = effective_row(row, drift)
     started = time.perf_counter()
     sample: dict[str, Any] = {
         "id": row.get("id"),
@@ -853,6 +1117,14 @@ async def run_sample(
         "expected_refusal": expects_refusal,
         OUTCOME_KEY: outcome_expected,
         "accepted": row.get("accepted"),
+        # Дрейф путей golden относительно живого каталога (см. resolve_golden_paths).
+        "path_checked": drift["checked"],
+        "path_drift": drift["path_drift"],
+        "path_ambiguous": drift["path_ambiguous"],
+        "path_missing": drift["path_missing"],
+        "alt_path_drift": drift["alt_path_drift"],
+        "alt_path_ambiguous": drift["alt_path_ambiguous"],
+        "alt_path_missing": drift["alt_path_missing"],
         "answer": "",
         "sources": [],
         "context_count": 0,
@@ -862,7 +1134,14 @@ async def run_sample(
         REFUSAL_KEY: None,
         FALSE_REFUSAL_KEY: None,
         META_KEY: None,
+        # Скрытые вызовы хода и факт пустого ответа — из записи лога; `None`
+        # означает «UI их не записал», а не «их не было».
+        "hidden_calls": None,
+        "empty_answer": None,
+        GENERATION_FAILED_KEY: False,
         "metrics": {},
+        "metrics_note": "",
+        JUDGE_CLIP_KEY: False,
         "error": "",
         "failed": False,
         "latency_ms": 0,
@@ -904,6 +1183,12 @@ async def run_sample(
         # до контекста, или его не было в выдаче?» — по отчёту неотвечаем, а
         # именно на нём стоят правки глубины, стемминга и аббревиатур.
         sample["candidates"] = record.get("candidates")
+        # Исход каждого скрытого вызова (condense, батчи грейдера) и признак
+        # пустого ответа. Старый UI этих ключей не пишет — остаётся `None`.
+        hidden = record.get("hidden_calls")
+        sample["hidden_calls"] = hidden if isinstance(hidden, dict) else None
+        if "empty_answer" in record:
+            sample["empty_answer"] = bool(record.get("empty_answer"))
 
     # Метаданные источников: из лога они богаче (`chunk_index`), из SSE — беднее.
     sample["sources"] = resolved.sources or outcome.sources
@@ -918,6 +1203,27 @@ async def run_sample(
         if resolved.origin == "rag_log"
         else False
     )
+    hit, granularity = retrieval_hit(row, sample["sources"])
+    sample[RETRIEVAL_KEY] = hit
+    sample["retrieval_granularity"] = granularity
+
+    # Пустой ответ — отдельный исход, а не оценка качества. Ретрив состоялся
+    # (hit посчитан выше), но ни отказа, ни ответа не было: флаги ветвей
+    # остаются `None`, судья не вызывается, метрики — `null` с пометкой.
+    if generation_failed(
+        answer=outcome.answer,
+        finish_reason=outcome.finish_reason,
+        empty_answer=sample["empty_answer"],
+    ):
+        sample[GENERATION_FAILED_KEY] = True
+        sample["metrics"] = None
+        sample["metrics_note"] = (
+            "генерация не дала ответа — судья не вызывался, пара вне средних"
+        )
+        if resolved.error:
+            return fail(resolved.error)
+        return sample
+
     refused = is_refusal(outcome.answer, finish_reason=outcome.finish_reason)
     sample[REFUSAL_KEY] = refused
     # Ложный отказ меряется ТОЛЬКО на отвечаемых парах: на паре-ловушке отказ —
@@ -928,9 +1234,6 @@ async def run_sample(
     # `is_refusal` (включая `finish_reason == "no_context"`, то есть «грейдер не
     # оставил ни одного фрагмента»), но засчитывается с обратным знаком.
     sample[META_KEY] = (not refused) if outcome_expected == OUTCOME_META else None
-    hit, granularity = retrieval_hit(row, sample["sources"])
-    sample[RETRIEVAL_KEY] = hit
-    sample["retrieval_granularity"] = granularity
 
     if resolved.error:
         return fail(resolved.error)
@@ -946,6 +1249,7 @@ async def run_sample(
         expected_items=row.get("expected_items") or (),
     )
     sample["metrics"] = {name: result.to_dict() for name, result in results.items()}
+    sample[JUDGE_CLIP_KEY] = judge_context_clipped(sample["metrics"])
     return sample
 
 
@@ -958,6 +1262,7 @@ async def run_all(
     concurrency: int,
     context_cap: int,
     rag_log: RagLogIndex | None = None,
+    live_paths: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Run every golden pair with bounded concurrency (GigaChat is fragile).
 
@@ -983,10 +1288,13 @@ async def run_all(
                 cache=cache,
                 context_cap=context_cap,
                 rag_log=rag_log,
+                live_paths=live_paths,
             )
             out[index] = sample
             done += 1
             mark = "!" if sample.get("failed") else "·"
+            if sample.get(GENERATION_FAILED_KEY):
+                mark = "∅"
             _log(f"  [{done}/{len(rows)}] {mark} {sample.get('id')}")
 
     await asyncio.gather(*(worker(i, row) for i, row in enumerate(rows)))
@@ -1007,7 +1315,43 @@ def is_failed(sample: dict[str, Any]) -> bool:
     return bool(sample.get("failed") or sample.get("error"))
 
 
+def generation_failed(
+    *, answer: str, finish_reason: str | None, empty_answer: bool | None
+) -> bool:
+    """Ответа НЕ БЫЛО: пустой текст от модели — это не отказ и не плохой ответ.
+
+    Источник правды — `empty_answer` из записи лога (UI видит поток целиком).
+    Старая запись без этого ключа: пустой текст при ``finish_reason == "length"``
+    — модель упёрлась в лимит, не выдав ни токена. ``no_context`` исключён в
+    обе стороны: там пустой поток — ШТАТНЫЙ отказ «грейдер ничего не оставил»,
+    и его меряет `refusal_ok`, а не эта корзина.
+    """
+    if finish_reason == "no_context":
+        return False
+    if empty_answer is not None:
+        return bool(empty_answer)
+    return not (answer or "").strip() and finish_reason == "length"
+
+
+def is_generation_failed(sample: dict[str, Any]) -> bool:
+    """Сэмпл из корзины «генерация не дала ответа» (см. :func:`generation_failed`).
+
+    Упавший сэмпл (`failed`) — приоритетнее: там не было и ретрива.
+    """
+    return bool(sample.get(GENERATION_FAILED_KEY)) and not is_failed(sample)
+
+
 def successful(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Пары, чьи ЧИСЛА идут в средние: не упали и получили ответ."""
+    return [s for s in samples if not is_failed(s) and not is_generation_failed(s)]
+
+
+def retrieved(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Пары, где ретрив состоялся — знаменатель `retrieval_hit`.
+
+    Шире `successful`: сбой генерации случается ПОСЛЕ ретрива, и попадание
+    нужного фрагмента в контекст у такой пары измерено честно.
+    """
     return [s for s in samples if not is_failed(s)]
 
 
@@ -1044,10 +1388,10 @@ def meta_rows(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def retrieval_hit_rate(samples: Sequence[dict[str, Any]]) -> float | None:
-    """Доля успешных пар, где нужный фрагмент попал в контекст."""
+    """Доля пар с состоявшимся ретривом, где нужный фрагмент попал в контекст."""
     hits = [
         s.get(RETRIEVAL_KEY)
-        for s in successful(samples)
+        for s in retrieved(samples)
         if isinstance(s.get(RETRIEVAL_KEY), bool)
     ]
     if not hits:
@@ -1107,6 +1451,118 @@ def meta_answered_rate(samples: Sequence[dict[str, Any]]) -> float | None:
     return round(sum(1 for v in values if v) / len(values), 4)
 
 
+def hedge_rate(samples: Sequence[dict[str, Any]]) -> float | None:
+    """Доля ОТВЕЧАЕМЫХ пар, где ответ открывается оговоркой «ответа не нашлось».
+
+    Судья `answer_relevancy_ru` (промпты v2) не обнуляет такой ответ — оценивает
+    содержательную часть и поднимает флаг `hedged`. Флаг считается здесь
+    отдельно: пользователь читает оговорку как отказ, и рост её доли — та же
+    регрессия, что и `false_refusal_rate`, только тише. Знаменатель — пары, у
+    которых у метрики ЕСТЬ поле `hedged` (отчёт прежних промптов его не знает и
+    честно даёт `None`, а не 0). **Меньше — лучше.**
+    """
+    values: list[bool] = []
+    for sample in successful(answerable(samples)):
+        entry = (sample.get("metrics") or {}).get("answer_relevancy_ru")
+        if isinstance(entry, dict) and isinstance(entry.get("hedged"), bool):
+            values.append(entry["hedged"])
+    if not values:
+        return None
+    return round(sum(1 for v in values if v) / len(values), 4)
+
+
+def judge_context_clipped(metrics: Any) -> bool:
+    """Судья видел контекст, урезанный СВОИМ капом (`raw.context_clipped_by_judge`).
+
+    Отличается от `context_clipped`: тот — обрезка `context_text` в логе
+    (`rag_log.MAX_TEXT_CHARS`), этот — обрезка уже внутри `metrics.format_context`.
+    Причины и лечение разные, поэтому и счётчики разные.
+    """
+    if not isinstance(metrics, dict):
+        return False
+    for name in metrics_mod.JUDGE_METRIC_NAMES:
+        entry = metrics.get(name)
+        raw = entry.get("raw") if isinstance(entry, dict) else None
+        if isinstance(raw, dict) and raw.get("context_clipped_by_judge"):
+            return True
+    return False
+
+
+def is_judge_clipped(sample: dict[str, Any]) -> bool:
+    """Флаг сэмпла, восстановленный из метрик, если сам ключ не записан."""
+    value = sample.get(JUDGE_CLIP_KEY)
+    if isinstance(value, bool):
+        return value
+    return judge_context_clipped(sample.get("metrics"))
+
+
+def judge_calls_by_metric(samples: Sequence[dict[str, Any]]) -> dict[str, int]:
+    """Сколько вызовов судьи ушло на каждую метрику (`raw.calls`) и всего.
+
+    Стоимость прогона по факту, а не «~4 на пару»: `faithfulness` и `recall`
+    режут длинный ответ на несколько вызовов, и без этой строки счётчик
+    `judge_calls` клиента не раскладывается по метрикам.
+    """
+    out: dict[str, int] = {name: 0 for name in metrics_mod.JUDGE_METRIC_NAMES}
+    for sample in samples:
+        metrics = sample.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        for name in metrics_mod.JUDGE_METRIC_NAMES:
+            entry = metrics.get(name)
+            raw = entry.get("raw") if isinstance(entry, dict) else None
+            calls = raw.get("calls") if isinstance(raw, dict) else None
+            if isinstance(calls, int) and not isinstance(calls, bool):
+                out[name] += calls
+    out["total"] = sum(out.values())
+    return out
+
+
+def _judge_calls_line(calls: dict[str, Any] | None) -> str:
+    """«судейских вызовов: N (faithfulness a, relevancy b, precision c, recall d)»."""
+    if not isinstance(calls, dict):
+        return f"судейских вызовов: {NOT_RECORDED}"
+    short = (
+        ("faithfulness_ru", "faithfulness"),
+        ("answer_relevancy_ru", "relevancy"),
+        ("context_precision", "precision"),
+        ("context_recall", "recall"),
+    )
+    parts = ", ".join(f"{title} {int(calls.get(key, 0) or 0)}" for key, title in short)
+    return f"судейских вызовов: {int(calls.get('total', 0) or 0)} ({parts})"
+
+
+def slim_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Копия отчёта для записи на диск: без `raw.replies` у каждой метрики.
+
+    Сырые ответы судьи по вызовам — самое тяжёлое поле отчёта (десятки КБ на
+    пару) и нужны только при отладке промптов; всё остальное (`score`, `raw.calls`,
+    вердикты, `context_clipped_by_judge`) сохраняется. Что именно выброшено —
+    :data:`REPORT_DROPPED_RAW_KEYS`.
+    """
+    out = dict(report)
+    samples: list[dict[str, Any]] = []
+    for sample in report.get("samples", []) or []:
+        if not isinstance(sample, dict):
+            samples.append(sample)
+            continue
+        copy = dict(sample)
+        metrics = sample.get("metrics")
+        if isinstance(metrics, dict):
+            slimmed: dict[str, Any] = {}
+            for name, entry in metrics.items():
+                if isinstance(entry, dict) and isinstance(entry.get("raw"), dict):
+                    entry = dict(entry)
+                    entry["raw"] = {
+                        k: v for k, v in entry["raw"].items() if k not in REPORT_DROPPED_RAW_KEYS
+                    }
+                slimmed[name] = entry
+            copy["metrics"] = slimmed
+        samples.append(copy)
+    out["samples"] = samples
+    return out
+
+
 def grader_health(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Отработал ли грейдер — по его собственным оценкам, а не по таймингам.
 
@@ -1148,6 +1604,304 @@ def grader_health(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "ungraded": applicable - graded,
         "partial": partial,
     }
+
+
+def grader_degraded(health: dict[str, Any] | None) -> bool:
+    """Реранкер оценил меньше :data:`GRADER_DEGRADED_THRESHOLD` применимых пар.
+
+    Порог, а не «хоть одна пара без оценок»: единичный упавший батч — шум
+    контура, а не другая система. Ниже 90 % — уже другая система.
+    """
+    health = health or {}
+    if not health.get("enabled"):
+        return False
+    applicable = int(health.get("applicable", 0) or 0)
+    if not applicable:
+        return False
+    return int(health.get("graded", 0) or 0) / applicable < GRADER_DEGRADED_THRESHOLD
+
+
+def normalise_error(error: Any) -> str:
+    """``«Type: сообщение»`` → тип исключения + первые 120 символов сообщения.
+
+    Ключ для группировки: один и тот же сбой с разными хвостами (id запроса,
+    время) должен схлопываться в одну строку, иначе «160 батчей» превращаются
+    в 160 строк по одному.
+    """
+    text = " ".join(str(error or "").split())
+    if not text:
+        return "неизвестная ошибка"
+    kind, sep, message = text.partition(":")
+    if not sep or " " in kind.strip():
+        return text[:120]
+    return f"{kind.strip()}: {message.strip()[:120]}".rstrip(": ")
+
+
+def _ms_stats(values: list[float]) -> tuple[float | None, float | None]:
+    if not values:
+        return None, None
+    return round(statistics.median(values), 1), round(max(values), 1)
+
+
+def _count(bucket: dict[str, int], key: Any) -> None:
+    name = "none" if key is None else str(key)
+    bucket[name] = bucket.get(name, 0) + 1
+
+
+def _sorted_counter(bucket: dict[str, int]) -> dict[str, int]:
+    return dict(sorted(bucket.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def _collect_call(
+    call: dict[str, Any],
+    *,
+    by_error: dict[str, int],
+    by_finish: dict[str, int],
+    by_model: dict[str, int],
+    error_models: dict[str, set[str]],
+    examples: dict[str, list[str]],
+    ms: list[float],
+    failure_statuses: tuple[str, ...],
+) -> None:
+    """Учесть один скрытый вызов (condense или батч грейдера) в счётчиках."""
+    status = str(call.get("status") or "none")
+    _count(by_finish, call.get("finish_reason"))
+    _count(by_model, call.get("model"))
+    value = call.get("ms")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        ms.append(float(value))
+    if status not in failure_statuses and not call.get("error"):
+        return
+    key = normalise_error(call.get("error")) if call.get("error") else f"status: {status}"
+    by_error[key] = by_error.get(key, 0) + 1
+    if call.get("model"):
+        error_models.setdefault(key, set()).add(str(call["model"]))
+    detail = str(call.get("detail") or "").strip()
+    bucket = examples.setdefault(key, [])
+    if detail and detail not in bucket and len(bucket) < 3:
+        bucket.append(detail)
+
+
+def hidden_call_health(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Почему скрытые вызовы не отработали — по записям `hidden_calls`.
+
+    `grader_health` говорит, СКОЛЬКО пар остались без оценок; эта сводка говорит,
+    ПОЧЕМУ: исход каждого батча грейдера и каждого вызова condense, ошибки по
+    типам (с примерами `detail`), `finish_reason`, модель, время. Запись без
+    `hidden_calls` (старый UI) считается в `not_recorded`, и отчёт печатает
+    «не записано», а не додумывает причину.
+    """
+    recorded = 0
+    not_recorded = 0
+    grader: dict[str, Any] = {
+        "calls": 0,
+        "by_status": {},
+        "batches_total": 0,
+        "batches_ok": 0,
+        "batches_failed": 0,
+        "batches_truncated": 0,
+        "batches_partial": 0,
+        "graded": 0,
+        "omitted": 0,
+        "by_error": {},
+        "by_error_model": {},
+        "by_finish_reason": {},
+        "by_model": {},
+        "examples": {},
+        "ms_median": None,
+        "ms_max": None,
+    }
+    condense: dict[str, Any] = {
+        "calls": 0,
+        "by_status": {},
+        "by_error": {},
+        "by_error_model": {},
+        "by_finish_reason": {},
+        "by_model": {},
+        "examples": {},
+        "ms_median": None,
+        "ms_max": None,
+    }
+    grader_ms: list[float] = []
+    condense_ms: list[float] = []
+    grader_error_models: dict[str, set[str]] = {}
+    condense_error_models: dict[str, set[str]] = {}
+    for sample in samples:
+        hidden = sample.get("hidden_calls")
+        if not isinstance(hidden, dict):
+            not_recorded += 1
+            continue
+        recorded += 1
+        call = hidden.get("condense")
+        if isinstance(call, dict):
+            condense["calls"] += 1
+            _count(condense["by_status"], call.get("status"))
+            _collect_call(
+                call,
+                by_error=condense["by_error"],
+                by_finish=condense["by_finish_reason"],
+                by_model=condense["by_model"],
+                error_models=condense_error_models,
+                examples=condense["examples"],
+                ms=condense_ms,
+                failure_statuses=("failed", "truncated"),
+            )
+        entry = hidden.get("grader")
+        if isinstance(entry, dict):
+            grader["calls"] += 1
+            _count(grader["by_status"], entry.get("status"))
+            for batch in entry.get("batches") or []:
+                if not isinstance(batch, dict):
+                    continue
+                grader["batches_total"] += 1
+                status = str(batch.get("status") or "none")
+                if status == "ok":
+                    grader["batches_ok"] += 1
+                elif status == "failed":
+                    grader["batches_failed"] += 1
+                elif status == "truncated":
+                    grader["batches_truncated"] += 1
+                elif status == "partial":
+                    grader["batches_partial"] += 1
+                for key in ("graded", "omitted"):
+                    value = batch.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        grader[key] += value
+                _collect_call(
+                    batch,
+                    by_error=grader["by_error"],
+                    by_finish=grader["by_finish_reason"],
+                    by_model=grader["by_model"],
+                    error_models=grader_error_models,
+                    examples=grader["examples"],
+                    ms=grader_ms,
+                    failure_statuses=("failed", "truncated", "partial"),
+                )
+    for entry, ms, models in (
+        (grader, grader_ms, grader_error_models),
+        (condense, condense_ms, condense_error_models),
+    ):
+        entry["ms_median"], entry["ms_max"] = _ms_stats(ms)
+        entry["by_error"] = _sorted_counter(entry["by_error"])
+        entry["by_status"] = _sorted_counter(entry["by_status"])
+        entry["by_finish_reason"] = _sorted_counter(entry["by_finish_reason"])
+        entry["by_model"] = _sorted_counter(entry["by_model"])
+        entry["by_error_model"] = {k: sorted(v) for k, v in models.items()}
+    return {
+        "recorded": recorded,
+        "not_recorded": not_recorded,
+        "grader": grader,
+        "condense": condense,
+    }
+
+
+def grader_cause_clause(report: dict[str, Any]) -> str:
+    """Доминирующая причина сбоев грейдера — фраза для первоэкранного предупреждения.
+
+    «KitaiQueryFailed: 404 "No such model" (glm-5.1) — 160 батчей, …» по
+    `hidden_call_health.grader.by_error`; без записей — честное «причина не
+    записана». Пустая строка — записи есть, но ни одного сбоя в них нет (тогда
+    предупреждение по оценкам противоречит записям, и это само по себе факт).
+    """
+    health = report.get("hidden_call_health") or {}
+    if not health.get("recorded"):
+        return GRADER_CAUSE_NOT_RECORDED
+    grader = health.get("grader") or {}
+    by_error = grader.get("by_error") or {}
+    if not by_error:
+        return ""
+    models = grader.get("by_error_model") or {}
+    parts: list[str] = []
+    for key, count in list(by_error.items())[:3]:
+        tail = f" ({', '.join(models[key])})" if models.get(key) else ""
+        parts.append(f"{key}{tail} — {count} батч(ей)")
+    rest = len(by_error) - 3
+    if rest > 0:
+        parts.append(f"ещё {rest} тип(а) ошибок — см. «Скрытые вызовы»")
+    return GRADER_CAUSE_PREFIX + ", ".join(parts)
+
+
+def grader_cell(sample: dict[str, Any]) -> str:
+    """Колонка «грейдер» в таблице по парам: `ok` / `2/4 ✗` / `trunc` / `—`."""
+    hidden = sample.get("hidden_calls")
+    entry = hidden.get("grader") if isinstance(hidden, dict) else None
+    if not isinstance(entry, dict):
+        return "—"
+    batches = [b for b in (entry.get("batches") or []) if isinstance(b, dict)]
+    total = len(batches)
+    if not total:
+        return "skip" if entry.get("status") == "skipped" else "—"
+    failed = sum(1 for b in batches if b.get("status") == "failed")
+    truncated = sum(1 for b in batches if b.get("status") == "truncated")
+    partial = sum(1 for b in batches if b.get("status") == "partial")
+    if failed:
+        return f"{failed}/{total} ✗"
+    if truncated:
+        return "trunc" if total == 1 else f"{truncated}/{total} trunc"
+    if partial:
+        return f"{partial}/{total} part"
+    return "ok"
+
+
+def path_drift_summary(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Сводка дрейфа путей golden по всем парам (для JSON и секции отчёта)."""
+    checked = 0
+    drifted: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    for sample in samples:
+        if not sample.get("path_checked"):
+            continue
+        checked += 1
+        ident = sample.get("id")
+        drift = sample.get("path_drift")
+        if isinstance(drift, dict):
+            drifted.append({"id": ident, "golden": drift.get("golden"), "live": drift.get("live")})
+        for alt in sample.get("alt_path_drift") or []:
+            if isinstance(alt, dict):
+                drifted.append({"id": ident, "golden": alt.get("golden"), "live": alt.get("live")})
+        if sample.get("path_ambiguous"):
+            ambiguous.append(
+                {
+                    "id": ident,
+                    "golden": sample.get("source_path"),
+                    "candidates": list(sample.get("path_ambiguous") or []),
+                }
+            )
+        for alt in sample.get("alt_path_ambiguous") or []:
+            if isinstance(alt, dict):
+                ambiguous.append(
+                    {"id": ident, "golden": alt.get("golden"), "candidates": alt.get("candidates")}
+                )
+        if sample.get("path_missing"):
+            missing.append({"id": ident, "golden": sample.get("source_path")})
+        for alt in sample.get("alt_path_missing") or []:
+            missing.append({"id": ident, "golden": alt})
+    return {
+        "checked": checked,
+        "drifted": drifted,
+        "ambiguous": ambiguous,
+        "missing": missing,
+    }
+
+
+def generation_failures(samples: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Строки секции «Сбои генерации»: id, finish_reason, время стрима, модель."""
+    out: list[dict[str, Any]] = []
+    for sample in samples:
+        if not is_generation_failed(sample):
+            continue
+        timings = sample.get("timings_ms") or {}
+        stream = timings.get("stream") if isinstance(timings, dict) else None
+        out.append(
+            {
+                "id": sample.get("id"),
+                "finish_reason": sample.get("finish_reason"),
+                "stream_ms": stream,
+                "model": _model_label(effective_model(sample.get("run_settings"))),
+            }
+        )
+    return out
 
 
 def stage_timings(samples: Sequence[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -1275,6 +2029,7 @@ def rate_metrics(samples: Sequence[dict[str, Any]]) -> dict[str, float | None]:
         REFUSAL_KEY: refusal_rate(samples),
         FALSE_REFUSAL_RATE_KEY: false_refusal_rate(samples),
         META_RATE_KEY: meta_answered_rate(samples),
+        HEDGE_RATE_KEY: hedge_rate(samples),
     }
 
 
@@ -1298,7 +2053,11 @@ def group_by_category(
     for name in sorted(groups):
         rows = groups[name]
         ok = successful(rows)
-        entry: dict[str, Any] = {"n": len(rows), "n_failed": len(rows) - len(ok)}
+        entry: dict[str, Any] = {
+            "n": len(rows),
+            "n_failed": sum(1 for s in rows if is_failed(s)),
+            "n_generation_failed": sum(1 for s in rows if is_generation_failed(s)),
+        }
         entry.update(aggregate(answerable(ok)))
         entry.update(rate_metrics(rows))
         out[name] = entry
@@ -1308,7 +2067,7 @@ def group_by_category(
 def granularity_counts(samples: Sequence[dict[str, Any]]) -> dict[str, int]:
     """Чем именно мерился ``retrieval_hit`` — чанком, разделом или файлом."""
     out: dict[str, int] = {}
-    for sample in successful(samples):
+    for sample in retrieved(samples):
         key = str(sample.get("retrieval_granularity", "none") or "none")
         out[key] = out.get(key, 0) + 1
     return out
@@ -1351,6 +2110,7 @@ def run_parameters(
     """
     seen: list[str] = []
     settings: Any = None
+    models: list[dict[str, Any]] = []
     for sample in samples:
         snapshot = sample.get("run_settings")
         if not isinstance(snapshot, dict):
@@ -1359,15 +2119,73 @@ def run_parameters(
         if key not in seen:
             seen.append(key)
             settings = snapshot
+            models.append(effective_model(snapshot))
+    # Модель ответа — отдельными ключами: «смешанные» настройки чаще всего
+    # различаются чем-то безобидным (порогом), а модель при этом одна, и её
+    # надо видеть; если разная и она — это «(смешанные)» уже по делу.
+    distinct = {json.dumps(m, ensure_ascii=False, sort_keys=True) for m in models}
+    if len(distinct) == 1:
+        answer = models[0]
+    elif distinct:
+        answer = {"provider": "(смешанные)", "model": "(смешанные)", "note": None}
+    else:
+        answer = effective_model(None)
     params: dict[str, Any] = {
         "judge_model": judge_model,
         "judge_temperature": judge_temperature,
         "judge_prompt_version": metrics_mod.PROMPT_VERSION,
         "golden_prompt_version": getattr(gen_golden_mod, "PROMPT_VERSION", None),
         "ui_settings": "(смешанные)" if len(seen) > 1 else settings,
+        "answer_provider": answer["provider"],
+        "answer_model": answer["model"],
+        "answer_model_note": answer["note"],
+        "judge_calls_by_metric": judge_calls_by_metric(samples),
     }
     params.update(extra or {})
     return params
+
+
+def answer_model(report: dict[str, Any]) -> dict[str, Any]:
+    """``{provider, model, note}`` ответа из отчёта — и из старого тоже.
+
+    Новый отчёт несёт `run_params.answer_*`; старый — только `ui_settings`, по
+    которым модель восстанавливается тем же :func:`effective_model`.
+    """
+    params = report.get("run_params") or {}
+    if "answer_model" in params or "answer_provider" in params:
+        return {
+            "provider": params.get("answer_provider"),
+            "model": params.get("answer_model"),
+            "note": params.get("answer_model_note"),
+        }
+    return effective_model(params.get("ui_settings"))
+
+
+def judge_prompt_version(report: dict[str, Any]) -> str | None:
+    """Версия судейских промптов прогона: `run_params.judge_prompt_version`,
+    за неимением — верхнеуровневый `prompt_version` (то же число)."""
+    params = report.get("run_params") or {}
+    value = params.get("judge_prompt_version") or report.get("prompt_version")
+    return str(value) if value else None
+
+
+def judge_prompt_mismatch(report_a: dict[str, Any], report_b: dict[str, Any]) -> bool:
+    """Судили разные версии промптов — оценки несопоставимы по построению."""
+    a, b = judge_prompt_version(report_a), judge_prompt_version(report_b)
+    return bool(a and b and a != b)
+
+
+def model_mismatch(report_a: dict[str, Any], report_b: dict[str, Any]) -> bool:
+    """Отвечали ли в двух прогонах РАЗНЫЕ модели (или провайдеры).
+
+    Считается только по ИЗВЕСТНЫМ значениям: отчёт без записи модели не
+    «отличается», он «не проверяем» — про него диф предупреждает отдельно.
+    """
+    a, b = answer_model(report_a), answer_model(report_b)
+    for key in ("provider", "model"):
+        if a.get(key) and b.get(key) and str(a[key]) != str(b[key]):
+            return True
+    return False
 
 
 def build_report(
@@ -1382,6 +2200,7 @@ def build_report(
 ) -> dict[str, Any]:
     """Assemble the JSON report (the same dict is rendered to markdown)."""
     failed = [s for s in samples if is_failed(s)]
+    gen_failed = [s for s in samples if is_generation_failed(s)]
     ok = successful(samples)
     # Средние — ТОЛЬКО по успешным: у упавшего сэмпла нули означают «прогон
     # сломался», и в среднем они читались бы как регрессия качества.
@@ -1412,10 +2231,15 @@ def build_report(
         "counts": {
             "total": len(samples),
             "failed": len(failed),
+            # Ответа не было вовсе (пустой поток): не сбой прогона и не оценка
+            # качества — своя корзина, вне всех средних, судья не вызывался.
+            GENERATION_FAILED_KEY: len(gen_failed),
             "evaluated": len(ok),
             # Пары, где судье достался урезанный контекст: сэмпл цел, метрики
             # посчитаны, но посчитаны не по тому, что видела модель.
             "context_clipped": sum(1 for s in samples if s.get("context_clipped")),
+            # …и отдельно — урезанный уже капом САМОГО судьи (другая причина).
+            JUDGE_CLIP_KEY: sum(1 for s in ok if is_judge_clipped(s)),
         },
         # Состав оценённых пар: судейские средние покрывают только `answerable`,
         # и без этих двух чисел прогон на 39 вопросах молча сравнится с
@@ -1443,6 +2267,10 @@ def build_report(
         # грейдер меняет смысл ВСЕХ чисел отчёта (контекст собран сырым
         # порядком поиска), а по метрикам качества это неотличимо.
         "grader_health": grader_health(samples),
+        # …и ПОЧЕМУ он не отработал: исходы батчей, ошибки по типам, модель.
+        "hidden_call_health": hidden_call_health(samples),
+        "generation_failures": generation_failures(samples),
+        "path_drift": path_drift_summary(samples),
         "stage_timings": stage_timings(samples),
         "retrieval_granularity": granularity_counts(samples),
         "retrieval_degradation": granularity_degradation(samples),
@@ -1519,9 +2347,17 @@ def _render_run_params(report: dict[str, Any]) -> list[str]:
         giga = ui.get("gigachat") or {}
         rag_cfg = ui.get("rag") or {}
         prompts = ui.get("prompts") or {}
+        # Провайдер и модель — ПО ФАКТУ (`model_effective`), не по ключу
+        # `gigachat.model`, который при провайдере KitAI просто не используется.
+        model = answer_model(report)
+        note = f" {model['note']}" if model.get("note") and model.get("model") else ""
         rows.extend(
             [
-                ("ответ: модель", giga.get("model")),
+                ("ответ: провайдер", model.get("provider") or NOT_RECORDED),
+                (
+                    "ответ: модель",
+                    f"{model['model']}{note}" if model.get("model") else NOT_RECORDED,
+                ),
                 ("ответ: температура", giga.get("temperature")),
                 ("ответ: max_tokens", giga.get("max_tokens")),
                 ("ретрив: ширина (rerank_candidates)", rag_cfg.get("rerank_candidates")),
@@ -1578,6 +2414,16 @@ def _false_refusal_denominator(report: dict[str, Any]) -> int:
     ok = successful([s for s in report.get("samples", []) or [] if isinstance(s, dict)])
     return sum(
         1 for s in answerable(ok) if isinstance(s.get(FALSE_REFUSAL_KEY), bool)
+    )
+
+
+def _hedge_denominator(report: dict[str, Any]) -> int:
+    """Сколько отвечаемых пар реально стоит за `hedge_rate` (есть поле `hedged`)."""
+    ok = successful([s for s in report.get("samples", []) or [] if isinstance(s, dict)])
+    return sum(
+        1
+        for s in answerable(ok)
+        if isinstance(((s.get("metrics") or {}).get("answer_relevancy_ru") or {}).get("hedged"), bool)
     )
 
 
@@ -1644,6 +2490,7 @@ _CATEGORY_COLUMNS: tuple[tuple[str, str], ...] = (
     (RETRIEVAL_KEY, "hit"),
     (REFUSAL_KEY, "refusal_ok"),
     (FALSE_REFUSAL_RATE_KEY, "false_ref ↓"),
+    (HEDGE_RATE_KEY, "hedge ↓"),
     (META_RATE_KEY, "meta_ans"),
 )
 
@@ -1660,7 +2507,8 @@ def _render_categories(report: dict[str, Any]) -> list[str]:
         "Общее среднее по разнородному набору прячет ровно то, ради чего "
         "категории и заводились: одна группа проседает, вторая растёт, сумма "
         "стоит на месте. Судейские колонки, как и выше, считаются без "
-        f"пар-ловушек; `{FALSE_REFUSAL_RATE_KEY}` — **меньше лучше**."
+        f"пар-ловушек; `{FALSE_REFUSAL_RATE_KEY}` и `{HEDGE_RATE_KEY}` — "
+        "**меньше лучше**."
     )
     lines.append("")
     header = " | ".join(title for _key, title in _CATEGORY_COLUMNS)
@@ -1686,7 +2534,8 @@ def _render_stages(report: dict[str, Any]) -> list[str]:
     """
     stages = report.get("stage_timings") or {}
     grader = report.get("grader_health") or {}
-    if not stages and not grader.get("applicable"):
+    hidden = report.get("hidden_call_health") or {}
+    if not stages and not grader.get("applicable") and not hidden.get("recorded"):
         return []
     lines = ["## Скрытые вызовы", ""]
     if grader.get("enabled"):
@@ -1702,6 +2551,7 @@ def _render_stages(report: dict[str, Any]) -> list[str]:
                 f"  - на остальных {grader['ungraded']} контекст собран сырым "
                 "порядком поиска: порог и `keep_top` к ним не применялись"
             )
+    lines.extend(_render_hidden_calls(report))
     if stages:
         lines.append("")
         lines.append("| стадия | медиана, мс | максимум, мс | поводок, мс | упёрлось в поводок |")
@@ -1722,6 +2572,190 @@ def _render_stages(report: dict[str, Any]) -> list[str]:
             "«успела ровно за столько», её на этом месте оборвали."
         )
     lines.append("")
+    return lines
+
+
+def _md_cell(text: Any, *, cap: int = 160) -> str:
+    """Текст в ячейку таблицы: без переводов строк и вертикальных черт, с капом."""
+    value = " ".join(str(text if text is not None else "").split()).replace("|", "\\|")
+    return value[:cap] + "…" if len(value) > cap else value
+
+
+def _render_hidden_calls(report: dict[str, Any]) -> list[str]:
+    """Исходы скрытых вызовов по записям `hidden_calls` — или честное «не записано».
+
+    Две таблицы про грейдер: «батчи по исходу» (сколько батчей отработало,
+    упало, обрезано) и «причины сбоев» (тип ошибки → число батчей → пример
+    `detail`). Строка про condense — тем же образом, но короче: у него один
+    вызов на ход.
+    """
+    hidden = report.get("hidden_call_health")
+    if not isinstance(hidden, dict):
+        return [f"- скрытые вызовы: {NOT_RECORDED} (отчёт прежней версии харнесса)"]
+    recorded = int(hidden.get("recorded", 0) or 0)
+    not_recorded = int(hidden.get("not_recorded", 0) or 0)
+    if not recorded:
+        return [
+            f"- скрытые вызовы: {NOT_RECORDED} — UI старее сбора `hidden_calls`, "
+            "причины сбоев грейдера и condense по этому прогону неизвестны"
+        ]
+    lines: list[str] = []
+    if not_recorded:
+        lines.append(
+            f"- скрытые вызовы записаны на {recorded} парах из "
+            f"{recorded + not_recorded}; у остальных — {NOT_RECORDED}"
+        )
+    grader = hidden.get("grader") or {}
+    total = int(grader.get("batches_total", 0) or 0)
+    if grader.get("calls"):
+        lines.append("")
+        lines.append("**грейдер: батчи по исходу**")
+        lines.append("")
+        lines.append("| исход | батчей |")
+        lines.append("|---|---:|")
+        for key, title in (
+            ("batches_ok", "ok"),
+            ("batches_failed", "failed"),
+            ("batches_truncated", "truncated"),
+            ("batches_partial", "partial"),
+        ):
+            lines.append(f"| {title} | {int(grader.get(key, 0) or 0)} |")
+        lines.append(f"| всего | {total} |")
+        lines.append("")
+        tail = []
+        if grader.get("ms_median") is not None:
+            tail.append(
+                f"время батча: медиана {grader['ms_median']} мс, максимум {grader['ms_max']} мс"
+            )
+        if grader.get("by_model"):
+            tail.append(
+                "модель: " + ", ".join(f"`{m}` × {n}" for m, n in grader["by_model"].items())
+            )
+        if grader.get("by_finish_reason"):
+            tail.append(
+                "finish_reason: "
+                + ", ".join(f"`{r}` × {n}" for r, n in grader["by_finish_reason"].items())
+            )
+        if grader.get("graded") or grader.get("omitted"):
+            tail.append(
+                f"оценено кандидатов: {grader.get('graded', 0)}, "
+                f"пропущено грейдером: {grader.get('omitted', 0)}"
+            )
+        if tail:
+            lines.append("; ".join(tail) + ".")
+        by_error = grader.get("by_error") or {}
+        if by_error:
+            examples = grader.get("examples") or {}
+            models = grader.get("by_error_model") or {}
+            lines.append("")
+            lines.append("**грейдер: причины сбоев**")
+            lines.append("")
+            lines.append("| тип ошибки | модель | батчей | пример detail |")
+            lines.append("|---|---|---:|---|")
+            for key, count in by_error.items():
+                sample_detail = (examples.get(key) or [""])[0]
+                model_cell = ", ".join(models.get(key) or []) or "—"
+                lines.append(
+                    f"| {_md_cell(key)} | {_md_cell(model_cell)} | {count} "
+                    f"| {_md_cell(sample_detail) or '—'} |"
+                )
+        elif total and not grader.get("batches_ok") == total:
+            lines.append("")
+            lines.append(
+                "Не все батчи `ok`, но ни одной записанной ошибки — смотрите "
+                "`finish_reason` и `by_status` в JSON."
+            )
+    else:
+        lines.append("- грейдер: ни одного вызова в записях (`grader: null` на всех парах)")
+    if lines and lines[-1] != "" and not lines[-1].startswith("- "):
+        lines.append("")  # иначе список ниже прилипает к таблице
+    condense = hidden.get("condense") or {}
+    if condense.get("calls"):
+        statuses = ", ".join(f"`{s}` × {n}" for s, n in (condense.get("by_status") or {}).items())
+        line = f"- condense: вызовов {condense['calls']} — {statuses}"
+        if condense.get("ms_median") is not None:
+            line += f"; медиана {condense['ms_median']} мс, максимум {condense['ms_max']} мс"
+        lines.append(line)
+        examples = condense.get("examples") or {}
+        for key, count in (condense.get("by_error") or {}).items():
+            sample_detail = (examples.get(key) or [""])[0]
+            suffix = f" — например: {_md_cell(sample_detail)}" if sample_detail else ""
+            lines.append(f"  - {count} × `{_md_cell(key)}`{suffix}")
+    else:
+        lines.append("- condense: ни одного вызова в записях (`condense: null` на всех парах)")
+    return lines
+
+
+def _render_generation_failures(report: dict[str, Any]) -> list[str]:
+    """Секция «Сбои генерации» — пары, где ответа не было вовсе."""
+    rows = report.get("generation_failures")
+    if not isinstance(rows, list):
+        rows = generation_failures(
+            [s for s in report.get("samples", []) or [] if isinstance(s, dict)]
+        )
+    if not rows:
+        return []
+    lines = [f"## Сбои генерации ({len(rows)}) — исключены из средних", ""]
+    lines.append(
+        "Пустой ответ при живом ретриве: судья не вызывался, `metrics: null`, "
+        "флаги отказа не выставлены. `retrieval_hit` у этих пар посчитан."
+    )
+    lines.append("")
+    lines.append("| id | finish_reason | stream, мс | модель |")
+    lines.append("|---|---|---:|---|")
+    for row in rows:
+        lines.append(
+            f"| {row.get('id')} | {_fmt(row.get('finish_reason'))} "
+            f"| {_fmt(row.get('stream_ms'))} | {_md_cell(row.get('model'))} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _render_path_drift(report: dict[str, Any]) -> list[str]:
+    """Секция «Дрейф путей golden» — расхождения разметки с живым каталогом."""
+    drift = report.get("path_drift")
+    if not isinstance(drift, dict):
+        return []
+    drifted = drift.get("drifted") or []
+    ambiguous = drift.get("ambiguous") or []
+    missing = drift.get("missing") or []
+    if not (drifted or ambiguous or missing):
+        return []
+    lines = ["## Дрейф путей golden", ""]
+    lines.append(
+        f"Пути golden-набора сверены с живым каталогом (`GET /api/vault/catalog`) "
+        f"у {drift.get('checked', 0)} пар. Сопоставленные по имени файла пути "
+        "на время прогона добавлены в `alt_source_paths` пары; неоднозначные и "
+        "отсутствующие оставлены как есть. Поправьте `golden.jsonl`."
+    )
+    lines.append("")
+    if drifted:
+        lines.append("**сопоставлены по имени файла**")
+        lines.append("")
+        lines.append("| id | в golden | в каталоге |")
+        lines.append("|---|---|---|")
+        for row in drifted:
+            lines.append(
+                f"| {row.get('id')} | `{_md_cell(row.get('golden'))}` "
+                f"| `{_md_cell(row.get('live'))}` |"
+            )
+        lines.append("")
+    if ambiguous:
+        lines.append("**неоднозначны (несколько файлов с таким именем)**")
+        lines.append("")
+        lines.append("| id | в golden | кандидаты |")
+        lines.append("|---|---|---|")
+        for row in ambiguous:
+            candidates = ", ".join(f"`{_md_cell(c)}`" for c in (row.get("candidates") or []))
+            lines.append(f"| {row.get('id')} | `{_md_cell(row.get('golden'))}` | {candidates} |")
+        lines.append("")
+    if missing:
+        lines.append("**не найдены в каталоге**")
+        lines.append("")
+        for row in missing:
+            lines.append(f"- `{row.get('id')}`: `{_md_cell(row.get('golden'))}`")
+        lines.append("")
     return lines
 
 
@@ -1753,12 +2787,30 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
     cover = report.get("coverage", {})
     spread = report.get("dispersion", {}) or {}
     lines: list[str] = []
-    lines.append(f"# RAG eval — прогон `{report.get('label')}`")
+    title = f"# RAG eval — прогон `{report.get('label')}`"
+    if grader_degraded(report.get("grader_health")):
+        title += f" {DEGRADED_TITLE_SUFFIX}"
+    lines.append(title)
     lines.append("")
     lines.append(f"> {REPORT_DISCLAIMER}")
     lines.append("")
     if report.get("approximate"):
         lines.append(f"> {APPROXIMATE_WARNING}")
+        lines.append("")
+    drift = report.get("path_drift") or {}
+    if any(drift.get(key) for key in ("drifted", "ambiguous", "missing")):
+        lines.append(
+            "> "
+            + PATH_DRIFT_WARNING.format(
+                drifted=len(drift.get("drifted") or []),
+                ambiguous=len(drift.get("ambiguous") or []),
+                missing=len(drift.get("missing") or []),
+            )
+        )
+        lines.append("")
+    gen_failed = int(counts.get(GENERATION_FAILED_KEY, 0) or 0)
+    if gen_failed:
+        lines.append("> " + GENERATION_FAILED_NOTE.format(count=gen_failed))
         lines.append("")
     degradation = report.get("retrieval_degradation") or {}
     if degradation.get("degraded"):
@@ -1779,15 +2831,29 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
             )
         )
         lines.append("")
+    judge_clipped_ids = [
+        str(s.get("id"))
+        for s in report.get("samples", []) or []
+        if isinstance(s, dict) and not is_failed(s) and is_judge_clipped(s)
+    ]
+    if judge_clipped_ids:
+        shown = ", ".join(f"`{i}`" for i in judge_clipped_ids[:30])
+        if len(judge_clipped_ids) > 30:
+            shown += f" и ещё {len(judge_clipped_ids) - 30}"
+        lines.append(
+            "> " + JUDGE_CLIP_WARNING.format(clipped=len(judge_clipped_ids), ids=shown)
+        )
+        lines.append("")
     grader = report.get("grader_health") or {}
     if grader.get("enabled") and grader.get("ungraded"):
-        lines.append(
-            "> "
-            + GRADER_SILENT_WARNING.format(
-                graded=grader.get("graded", 0),
-                applicable=grader.get("applicable", 0),
-            )
+        warning = GRADER_SILENT_WARNING.format(
+            graded=grader.get("graded", 0),
+            applicable=grader.get("applicable", 0),
         )
+        cause = grader_cause_clause(report)
+        if cause:
+            warning += f" {cause}."
+        lines.append("> " + warning)
         lines.append("")
     judge_health = report.get("judge_failures") or {}
     if judge_health.get("failed"):
@@ -1807,15 +2873,28 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
         f"- судья: `{report.get('judge_model')}`, "
         f"промпты: `{report.get('prompt_version')}`"
     )
+    model = answer_model(report)
+    lines.append(
+        f"- ответ: провайдер `{model.get('provider') or NOT_RECORDED}`, "
+        f"модель `{model.get('model') or NOT_RECORDED}`"
+        + (f" {model['note']}" if model.get("note") and model.get("model") else "")
+    )
     lines.append(
         f"- пар: {counts.get('total', 0)} "
-        f"(оценено {counts.get('evaluated', 0)}, ошибок {counts.get('failed', 0)})"
+        f"(оценено {counts.get('evaluated', 0)}, ошибок {counts.get('failed', 0)}, "
+        f"сбоев генерации {counts.get(GENERATION_FAILED_KEY, 0) or 0})"
     )
     lines.append(
         f"- **упало и исключено из средних: {counts.get('failed', 0)}** "
         "(сбой чата или недоступный текст контекста — не качество)"
     )
     lines.extend(_render_judge_health(report))
+    lines.append(f"- {_judge_calls_line((report.get('run_params') or {}).get('judge_calls_by_metric'))}")
+    lines.append(
+        "- кап судьи: нет"
+        if not judge_clipped_ids
+        else f"- кап судьи: **{len(judge_clipped_ids)}** пар(ы) — см. предупреждение выше"
+    )
     lines.append(f"- источник контекста: `{report.get('context_origin', {})}`")
     lines.append(
         f"- гранулярность `retrieval_hit`: `{report.get('retrieval_granularity', {})}`"
@@ -1823,11 +2902,13 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
     lines.append(
         f"- отвечаемых пар: {buckets.get('answerable', 0)}, "
         f"пар-ловушек `expected_refusal`: {buckets.get('refusal', 0)}, "
-        f"метапар `expected_outcome: meta`: {buckets.get('meta', 0)}"
+        f"метапар `expected_outcome: meta`: {buckets.get('meta', 0)}, "
+        f"сбоев генерации: {counts.get(GENERATION_FAILED_KEY, 0) or 0}"
     )
     lines.append("")
     lines.extend(_render_run_params(report))
     lines.extend(_render_stages(report))
+    lines.extend(_render_path_drift(report))
     lines.append("## Средние значения")
     lines.append("")
     lines.append(BUCKET_NOTE.format(**_bucket_numbers(report)))
@@ -1856,6 +2937,12 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
         f"{_false_refusal_denominator(report)} |"
     )
     lines.append(
+        f"| {HEDGE_RATE_KEY} ↓ (доля ОТВЕЧАЕМЫХ пар: ответ есть, но открывается "
+        "оговоркой об отсутствии ответа; **меньше — лучше**) "
+        f"| {_fmt(aggregates.get(HEDGE_RATE_KEY))} | — | "
+        f"{_hedge_denominator(report)} |"
+    )
+    lines.append(
         f"| {META_RATE_KEY} (доля МЕТАПАР, на которые ассистент ответил, а не "
         "отказался; **больше — лучше**) "
         f"| {_fmt(aggregates.get(META_RATE_KEY))} | — | "
@@ -1872,10 +2959,10 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
     lines.append("## По парам")
     lines.append("")
     lines.append(
-        "| id | тип | категория | чанк найден | зря отказ | faith | ans_rel "
+        "| id | тип | категория | чанк найден | зря отказ | грейдер | faith | ans_rel "
         "| ctx_prec | ctx_rec | вопрос |"
     )
-    lines.append("|---|---|---|---|---|---:|---:|---:|---:|---|")
+    lines.append("|---|---|---|---|---|---|---:|---:|---:|---:|---|")
     samples = list(report.get("samples", []))
     for sample in samples[:max_rows]:
         metrics = sample.get("metrics") or {}
@@ -1892,6 +2979,7 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
             f"| {category_of(sample)} "
             f"| {_fmt(sample.get(RETRIEVAL_KEY))} "
             f"| {_fmt(sample.get(FALSE_REFUSAL_KEY))} "
+            f"| {grader_cell(sample)} "
             f"| {score('faithfulness_ru')} | {score('answer_relevancy_ru')} "
             f"| {score('context_precision')} | {score('context_recall')} "
             f"| {question} |"
@@ -1900,9 +2988,10 @@ def render_report_md(report: dict[str, Any], *, max_rows: int = 200) -> str:
         lines.append("")
         lines.append(f"_…ещё {len(samples) - max_rows} пар — см. JSON-отчёт._")
 
+    lines.append("")
+    lines.extend(_render_generation_failures(report))
     failed = [s for s in samples if is_failed(s)]
     if failed:
-        lines.append("")
         lines.append(f"## Упавшие пары ({len(failed)}) — исключены из средних")
         lines.append("")
         for sample in failed[:50]:
@@ -1920,7 +3009,7 @@ def sample_scores(report: dict[str, Any], name: str) -> dict[str, float]:
     """``{sample_id: score}`` по успешным сэмплам — основа парного сравнения."""
     out: dict[str, float] = {}
     for sample in report.get("samples", []) or []:
-        if not isinstance(sample, dict) or is_failed(sample):
+        if not isinstance(sample, dict) or is_failed(sample) or is_generation_failed(sample):
             continue
         ident = sample.get("id")
         entry = (sample.get("metrics") or {}).get(name) or {}
@@ -1978,7 +3067,7 @@ def delta_sign(delta: float | None, stderr: float | None, noise: float) -> str:
 
 #: Метрики, где РОСТ — это ухудшение. Знак ▲/▼ в дифе показывает качество,
 #: поэтому для них он инвертируется относительно знака самой дельты.
-LOWER_IS_BETTER = (FALSE_REFUSAL_RATE_KEY,)
+LOWER_IS_BETTER = (FALSE_REFUSAL_RATE_KEY, HEDGE_RATE_KEY)
 
 
 def quality_sign(
@@ -2146,6 +3235,9 @@ def render_compare_md(
     lines: list[str] = []
     lines.append(f"# Сравнение прогонов: `{label_a}` → `{label_b}`")
     lines.append("")
+    # Самое громкое — первым: разные модели или мёртвый реранкер обесценивают
+    # всю таблицу ниже, и читать её дальше первого экрана уже незачем.
+    lines.extend(_render_compare_guards(report_a, report_b))
     lines.append(f"> {REPORT_DISCLAIMER}")
     lines.append("")
     if report_a.get("approximate") or report_b.get("approximate"):
@@ -2208,7 +3300,13 @@ def render_compare_md(
             f"| {pair['n']} | {delta_sign(delta, pair['stderr'], noise)} |"
         )
     # Доли (hit/refusal) парного разложения не имеют — только среднее по прогону.
-    for name in (RETRIEVAL_KEY, REFUSAL_KEY, FALSE_REFUSAL_RATE_KEY, META_RATE_KEY):
+    for name in (
+        RETRIEVAL_KEY,
+        REFUSAL_KEY,
+        FALSE_REFUSAL_RATE_KEY,
+        HEDGE_RATE_KEY,
+        META_RATE_KEY,
+    ):
         value_a, value_b = agg_a.get(name), agg_b.get(name)
         if isinstance(value_a, (int, float)) and isinstance(value_b, (int, float)):
             delta = round(float(value_b) - float(value_a), 4)
@@ -2231,8 +3329,9 @@ def render_compare_md(
     lines.append("")
     lines.append(
         f"Знак означает КАЧЕСТВО, а не направление числа: у `{FALSE_REFUSAL_RATE_KEY}` "
-        "(доля отвечаемых вопросов, на которых ассистент зря отказался) меньше — "
-        "лучше, поэтому ▲ у него стоит при ПАДЕНИИ доли. Четыре судейские "
+        "(доля отвечаемых вопросов, на которых ассистент зря отказался) и у "
+        f"`{HEDGE_RATE_KEY}` (ответ есть, но открыт оговоркой об отсутствии ответа) "
+        "меньше — лучше, поэтому ▲ у них стоит при ПАДЕНИИ доли. Четыре судейские "
         "метрики выше посчитаны без пар-ловушек `expected_refusal` — правильный "
         "отказ больше не тянет средние вниз."
     )
@@ -2242,7 +3341,9 @@ def render_compare_md(
     lines.append(
         f"Пар: {counts_a.get('total', 0)} → {counts_b.get('total', 0)}; "
         f"упало (исключено из средних): {counts_a.get('failed', 0)} → "
-        f"{counts_b.get('failed', 0)}."
+        f"{counts_b.get('failed', 0)}; сбоев генерации (тоже вне средних и вне "
+        f"парной дельты): {counts_a.get(GENERATION_FAILED_KEY, 0) or 0} → "
+        f"{counts_b.get(GENERATION_FAILED_KEY, 0) or 0}."
     )
     lines.append("")
     lines.extend(_render_category_compare(report_a, report_b, noise=noise))
@@ -2259,10 +3360,105 @@ def render_compare_md(
     return "\n".join(lines)
 
 
+def _render_compare_guards(report_a: dict[str, Any], report_b: dict[str, Any]) -> list[str]:
+    """Громкие блоки в самом верху дифа: разные модели, мёртвый реранкер."""
+    lines: list[str] = []
+    label_a = str(report_a.get("label", "A"))
+    label_b = str(report_b.get("label", "B"))
+    if model_mismatch(report_a, report_b):
+        lines.append(
+            "> "
+            + MODEL_MISMATCH_WARNING.format(
+                label_a=label_a,
+                label_b=label_b,
+                model_a=_model_label(answer_model(report_a)),
+                model_b=_model_label(answer_model(report_b)),
+            )
+        )
+        lines.append("")
+    if judge_prompt_mismatch(report_a, report_b):
+        lines.append(
+            "> "
+            + JUDGE_PROMPT_MISMATCH_WARNING.format(
+                label_a=label_a,
+                label_b=label_b,
+                version_a=judge_prompt_version(report_a),
+                version_b=judge_prompt_version(report_b),
+            )
+        )
+        lines.append("")
+    for report in (report_a, report_b):
+        model = answer_model(report)
+        if not model.get("model") and not model.get("provider"):
+            lines.append(
+                "> " + MODEL_UNKNOWN_WARNING.format(label=str(report.get("label", "?")))
+            )
+            lines.append("")
+    for report in (report_a, report_b):
+        health = report.get("grader_health") or {}
+        if grader_degraded(health):
+            lines.append(
+                "> "
+                + DEGRADED_COMPARE_WARNING.format(
+                    label=str(report.get("label", "?")),
+                    graded=health.get("graded", 0),
+                    applicable=health.get("applicable", 0),
+                    threshold=GRADER_DEGRADED_THRESHOLD,
+                )
+            )
+            lines.append("")
+    return lines
+
+
+def compare_blockers(
+    report_a: dict[str, Any],
+    report_b: dict[str, Any],
+    *,
+    allow_model_mismatch: bool = False,
+    allow_degraded: bool = False,
+) -> list[str]:
+    """Почему `--compare` отказывается (пусто — можно сравнивать).
+
+    Разные модели ответа и реранкер, не работавший хотя бы в одном прогоне, —
+    это сравнение двух СИСТЕМ, а не двух настроек. Диф печатается только с
+    явным флагом, и флаг остаётся в имени файла-дифа на совести того, кто его
+    поставил.
+    """
+    out: list[str] = []
+    if model_mismatch(report_a, report_b) and not allow_model_mismatch:
+        out.append(
+            "отвечали разные модели: "
+            f"`{report_a.get('label')}` — {_model_label(answer_model(report_a))}, "
+            f"`{report_b.get('label')}` — {_model_label(answer_model(report_b))} "
+            "(продолжить: --allow-model-mismatch)"
+        )
+    if judge_prompt_mismatch(report_a, report_b) and not allow_model_mismatch:
+        out.append(
+            "судили разные версии промптов: "
+            f"`{report_a.get('label')}` — {judge_prompt_version(report_a)}, "
+            f"`{report_b.get('label')}` — {judge_prompt_version(report_b)} "
+            "(перегоните старый прогон; продолжить: --allow-model-mismatch)"
+        )
+    if not allow_degraded:
+        for report in (report_a, report_b):
+            health = report.get("grader_health") or {}
+            if grader_degraded(health):
+                out.append(
+                    f"в прогоне `{report.get('label')}` реранкер не работал: грейдер "
+                    f"оценил {health.get('graded', 0)} из {health.get('applicable', 0)} "
+                    "пар (продолжить: --allow-degraded)"
+                )
+    return out
+
+
 def _params_differ(report_a: dict[str, Any], report_b: dict[str, Any]) -> bool:
     """Отличаются ли параметры, влияющие на воспроизводимость."""
     def key(report: dict[str, Any]) -> str:
         params = dict(report.get("run_params") or {})
+        # Счётчики вызовов — стоимость прогона, а не его параметр: они разные
+        # у любых двух прогонов и предупреждению о параметрах не повод.
+        for name in [k for k in params if str(k).startswith("judge_calls")]:
+            params.pop(name)
         return json.dumps(params, ensure_ascii=False, sort_keys=True, default=str)
 
     return bool(report_a.get("run_params")) and key(report_a) != key(report_b)
@@ -2358,6 +3554,24 @@ def build_parser() -> argparse.ArgumentParser:
         metavar=("A.json", "B.json"),
         help="только сравнить два готовых JSON-отчёта и выйти",
     )
+    parser.add_argument(
+        "--allow-model-mismatch",
+        action="store_true",
+        help=(
+            "--compare: сравнивать, даже если в прогонах отвечали разные "
+            "модели/провайдеры или судили разные версии промптов (иначе код "
+            "выхода 2)"
+        ),
+    )
+    parser.add_argument(
+        "--allow-degraded",
+        action="store_true",
+        help=(
+            "--compare: сравнивать, даже если в одном из прогонов реранкер не "
+            f"работал (грейдер оценил меньше {GRADER_DEGRADED_THRESHOLD} доли "
+            "применимых пар; иначе код выхода 2)"
+        ),
+    )
     return parser
 
 
@@ -2397,6 +3611,17 @@ def do_compare(args: argparse.Namespace) -> int:
         report_a = json.load(fh)
     with open(path_b, "r", encoding="utf-8") as fh:
         report_b = json.load(fh)
+    blockers = compare_blockers(
+        report_a,
+        report_b,
+        allow_model_mismatch=bool(getattr(args, "allow_model_mismatch", False)),
+        allow_degraded=bool(getattr(args, "allow_degraded", False)),
+    )
+    if blockers:
+        _log("ОТКАЗ: прогоны нельзя сравнивать как две настройки одной системы:")
+        for reason in blockers:
+            _log(f"  - {reason}")
+        return 2
     text = render_compare_md(report_a, report_b)
     print(text)
     os.makedirs(args.out_dir, exist_ok=True)
@@ -2446,6 +3671,9 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
     backend = None if args.no_context_fetch else BackendClient(backend_url, backend_token)
     chat = ChatClient(ui_url, ui_token)
     try:
+        # Живой каталог — чтобы переехавшая страница читалась как дрейф
+        # разметки, а не как промах ретрива. Недоступен — прогон как раньше.
+        live_paths = await fetch_live_paths(backend)
         samples = await run_all(
             rows,
             chat=chat,
@@ -2454,6 +3682,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
             concurrency=args.concurrency,
             context_cap=args.context_chars,
             rag_log=rag_log_index,
+            live_paths=live_paths,
         )
     finally:
         await chat.aclose()
@@ -2481,7 +3710,8 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
     json_path = os.path.join(args.out_dir, f"report-{args.label}.json")
     md_path = os.path.join(args.out_dir, f"report-{args.label}.md")
     with open(json_path, "w", encoding="utf-8") as fh:
-        json.dump(report, fh, ensure_ascii=False, indent=2)
+        # Без `raw.replies`: сырые ответы судьи — самое тяжёлое поле отчёта.
+        json.dump(slim_report(report), fh, ensure_ascii=False, indent=2)
     with open(md_path, "w", encoding="utf-8") as fh:
         fh.write(render_report_md(report))
 
@@ -2493,9 +3723,30 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
     )
     for name, value in report["aggregate"].items():
         _log(f"  {name}: {_fmt(value)}")
+    _log("  " + _judge_calls_line(report["run_params"].get("judge_calls_by_metric")))
+    clipped_by_judge = report["counts"].get(JUDGE_CLIP_KEY, 0)
+    if clipped_by_judge:
+        _log(f"ВНИМАНИЕ: кап судьи урезал контекст на {clipped_by_judge} парах")
     failed = report["counts"]["failed"]
     if failed:
         _log(f"  упало и исключено из средних: {failed}")
+    gen_failed = report["counts"].get(GENERATION_FAILED_KEY, 0)
+    if gen_failed:
+        _log(f"  сбоев генерации (пустой ответ, вне средних): {gen_failed}")
+    if grader_degraded(report.get("grader_health")):
+        health = report["grader_health"]
+        _log(
+            f"ВНИМАНИЕ: РЕРАНКЕР НЕ РАБОТАЛ — грейдер оценил {health.get('graded', 0)} "
+            f"из {health.get('applicable', 0)} пар; {grader_cause_clause(report) or 'причин в записях нет'}"
+        )
+    drift = report.get("path_drift") or {}
+    if any(drift.get(key) for key in ("drifted", "ambiguous", "missing")):
+        _log(
+            "ВНИМАНИЕ: дрейф путей golden — сопоставлено по имени файла: "
+            f"{len(drift.get('drifted') or [])}, неоднозначных: "
+            f"{len(drift.get('ambiguous') or [])}, отсутствующих: "
+            f"{len(drift.get('missing') or [])} (см. секцию отчёта)"
+        )
     if report.get("approximate"):
         _log("ВНИМАНИЕ: прогон ПРИБЛИЖЁННЫЙ — контекст восстановлен из метаданных")
     degradation = report.get("retrieval_degradation") or {}

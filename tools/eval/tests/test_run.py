@@ -648,8 +648,10 @@ def test_build_report_counts_failures():
     assert report["counts"] == {
         "total": 2,
         "failed": 1,
+        "generation_failed": 0,
         "evaluated": 1,
         "context_clipped": 0,
+        "judge_context_clipped": 0,
     }
 
 
@@ -823,8 +825,10 @@ def test_failed_samples_stay_out_of_every_average():
     assert report["counts"] == {
         "total": 2,
         "failed": 1,
+        "generation_failed": 0,
         "evaluated": 1,
         "context_clipped": 0,
+        "judge_context_clipped": 0,
     }
     assert report["aggregate"]["faithfulness_ru"] == 0.9  # не 0.45
     assert report["coverage"]["faithfulness_ru"] == 1
@@ -974,7 +978,8 @@ def test_compare_table_marks_regression():
 def test_compare_warns_on_prompt_version_mismatch():
     report_a = _report("a", 0.5, 1.0)
     report_b = _report("b", 0.5, 1.0)
-    report_b["prompt_version"] = "v2"
+    # Не литерал: версия промптов растёт, и «v2» однажды совпало с текущей.
+    report_b["prompt_version"] = f"{report_a['prompt_version']}-other"
     assert "разными версиями судейских промптов" in render_compare_md(report_a, report_b)
 
 
@@ -1101,6 +1106,7 @@ def test_group_by_category_splits_metrics_and_counts_failures():
     assert groups["регламенты"] == {
         "n": 1,
         "n_failed": 1,
+        "n_generation_failed": 0,
         "faithfulness_ru": None,
         "answer_relevancy_ru": None,
         "context_precision": None,
@@ -1110,6 +1116,7 @@ def test_group_by_category_splits_metrics_and_counts_failures():
         REFUSAL_KEY: None,
         FALSE_REFUSAL_RATE_KEY: None,
         META_RATE_KEY: None,
+        "hedge_rate": None,
     }
     assert groups[UNCATEGORIZED]["faithfulness_ru"] == 0.6
 
@@ -1396,3 +1403,817 @@ def test_compare_table_carries_the_meta_branch():
     line = [l for l in text.splitlines() if l.startswith(f"| {META_RATE_KEY}")][0]
     assert "+1.000" in line
     assert "▲" in line
+
+
+# --------------------------------------------------------------------------- #
+# Скрытые вызовы: ПОЧЕМУ грейдер не отработал (hidden_calls из rag_log)
+# --------------------------------------------------------------------------- #
+
+from run import (  # noqa: E402
+    DEGRADED_TITLE_SUFFIX,
+    GENERATION_FAILED_KEY,
+    GRADER_CAUSE_NOT_RECORDED,
+    NOT_RECORDED,
+    compare_blockers,
+    do_compare,
+    effective_model,
+    fetch_live_paths,
+    generation_failed,
+    grader_cell,
+    grader_degraded,
+    hidden_call_health,
+    model_mismatch,
+    normalise_error,
+    resolve_golden_paths,
+)
+from gen_golden import BackendClient  # noqa: E402
+
+
+def _batch(status, *, error=None, detail=None, model="glm-5.1", ms=1200.0, **extra):
+    batch = {
+        "n": 1,
+        "size": 10,
+        "status": status,
+        "error": error,
+        "detail": detail,
+        "finish_reason": "stop" if status == "ok" else ("length" if status == "truncated" else None),
+        "usage": None,
+        "model": model,
+        "ms": ms,
+        "graded": 10 if status == "ok" else 0,
+        "omitted": 0 if status == "ok" else 10,
+    }
+    batch.update(extra)
+    return batch
+
+
+def _hidden(batches, *, condense=None, grader_status="degraded"):
+    return {
+        "condense": condense,
+        "grader": {"status": grader_status, "batches": batches},
+    }
+
+
+def test_hidden_call_health_counts_batches_by_outcome_and_error_type():
+    """Смешанный прогон: часть батчей ок, часть 404 от KitAI, часть обрезана."""
+    kitai = 'KitaiQueryFailed: 404 "No such model" (request-id 7f3a)'
+    rows = [
+        _sample(
+            "a",
+            0.8,
+            hidden_calls=_hidden(
+                [
+                    _batch("ok"),
+                    _batch("failed", error=kitai, detail="HTTP 404 body: no such model glm-5.1"),
+                    _batch("failed", error=kitai, detail="HTTP 404 body: второй пример"),
+                ]
+            ),
+        ),
+        _sample(
+            "b",
+            0.8,
+            hidden_calls=_hidden(
+                [
+                    _batch("failed", error=kitai, detail="HTTP 404 body: третий пример"),
+                    _batch("failed", error=kitai, detail="HTTP 404 body: четвёртый — в примеры не попадёт"),
+                    _batch("truncated", detail="ответ обрезан на 4096 токенах", ms=9000.0),
+                    _batch("failed", error="GigaChatBadJSON: пустой ответ", model="GigaChat-2-Max"),
+                ],
+                condense={
+                    "status": "failed",
+                    "error": "KitaiQueryFailed: 404 \"No such model\"",
+                    "detail": "condense 404",
+                    "finish_reason": None,
+                    "usage": None,
+                    "model": "glm-5.1",
+                    "ms": 300.0,
+                },
+            ),
+        ),
+        _sample("old", 0.8),  # запись без hidden_calls — не додумывается
+    ]
+    health = hidden_call_health(rows)
+
+    assert health["recorded"] == 2 and health["not_recorded"] == 1
+    grader = health["grader"]
+    assert grader["calls"] == 2
+    assert grader["batches_total"] == 7
+    assert grader["batches_ok"] == 1
+    assert grader["batches_failed"] == 5
+    assert grader["batches_truncated"] == 1
+    assert grader["batches_partial"] == 0
+    key = 'KitaiQueryFailed: 404 "No such model" (request-id 7f3a)'
+    assert grader["by_error"][key] == 4
+    assert grader["by_error"]["GigaChatBadJSON: пустой ответ"] == 1
+    assert grader["by_error"]["status: truncated"] == 1
+    # Порядок — по убыванию, примеры — не больше трёх на тип.
+    assert list(grader["by_error"])[0] == key
+    assert len(grader["examples"][key]) == 3
+    assert "четвёртый" not in " ".join(grader["examples"][key])
+    assert grader["by_error_model"][key] == ["glm-5.1"]
+    assert grader["by_model"] == {"glm-5.1": 6, "GigaChat-2-Max": 1}
+    assert grader["by_finish_reason"]["stop"] == 1
+    assert grader["ms_max"] == 9000.0 and grader["ms_median"] == 1200.0
+    assert grader["graded"] == 10 and grader["omitted"] == 60
+
+    condense = health["condense"]
+    assert condense["calls"] == 1
+    assert condense["by_status"] == {"failed": 1}
+    assert condense["by_error"] == {'KitaiQueryFailed: 404 "No such model"': 1}
+    assert condense["examples"]['KitaiQueryFailed: 404 "No such model"'] == ["condense 404"]
+
+
+def test_normalise_error_keeps_type_and_caps_message():
+    assert normalise_error("KitaiQueryFailed: 404 " + "x" * 200).startswith("KitaiQueryFailed: 404 ")
+    assert len(normalise_error("KitaiQueryFailed: " + "x" * 200)) == len("KitaiQueryFailed: ") + 120
+    assert normalise_error("  просто   текст  без типа ") == "просто текст без типа"
+    assert normalise_error(None) == "неизвестная ошибка"
+
+
+def test_grader_warning_names_the_dominant_cause_when_recorded():
+    """Первый экран говорит не «молча не отработал», а ЧТО именно сломалось."""
+    kitai = 'KitaiQueryFailed: 404 "No such model"'
+    rows = [
+        _turn("d1", grades=[None, None], grade_ms=800.0),
+        _turn("d2", grades=[None], grade_ms=800.0),
+        _turn("ok", grades=[5, 4], grade_ms=800.0),
+    ]
+    for row in rows[:2]:
+        row["hidden_calls"] = _hidden(
+            [_batch("failed", error=kitai, detail="HTTP 404")] * 2
+        )
+    rows[2]["hidden_calls"] = _hidden([_batch("ok")], grader_status="ok")
+    report = _report("x", 0.8, samples=rows)
+    text = render_report_md(report)
+
+    assert "Грейдер молча не отработал" in text
+    assert 'Причина по батчам: KitaiQueryFailed: 404 "No such model" (glm-5.1) — 4 батч(ей)' in text
+    assert GRADER_CAUSE_NOT_RECORDED not in text
+    # …и подробные таблицы в «Скрытых вызовах».
+    assert "**грейдер: батчи по исходу**" in text
+    assert "| failed | 4 |" in text
+    assert "**грейдер: причины сбоев**" in text
+    assert "| HTTP 404 |" in text
+
+
+def test_grader_warning_admits_the_cause_is_not_recorded_on_old_logs():
+    report = _report(
+        "x",
+        0.8,
+        samples=[_turn("dead", grades=[None], grade_ms=20017.5), _turn("ok", grades=[5], grade_ms=100.0)],
+    )
+    text = render_report_md(report)
+    assert "Грейдер молча не отработал" in text
+    assert GRADER_CAUSE_NOT_RECORDED in text
+    assert f"скрытые вызовы: {NOT_RECORDED}" in text
+
+
+def test_grader_cell_in_the_per_sample_table():
+    assert grader_cell(_sample("a", 0.8)) == "—"
+    assert grader_cell(_sample("a", 0.8, hidden_calls={"condense": None, "grader": None})) == "—"
+    assert grader_cell(_sample("a", 0.8, hidden_calls=_hidden([_batch("ok")] * 4))) == "ok"
+    assert (
+        grader_cell(_sample("a", 0.8, hidden_calls=_hidden([_batch("failed")] * 4)))
+        == "4/4 ✗"
+    )
+    assert (
+        grader_cell(
+            _sample("a", 0.8, hidden_calls=_hidden([_batch("failed")] * 2 + [_batch("ok")] * 2))
+        )
+        == "2/4 ✗"
+    )
+    assert grader_cell(_sample("a", 0.8, hidden_calls=_hidden([_batch("truncated")]))) == "trunc"
+    assert (
+        grader_cell(_sample("a", 0.8, hidden_calls=_hidden([], grader_status="skipped")))
+        == "skip"
+    )
+    text = render_report_md(
+        _report("x", 0.8, samples=[_sample("s1", 0.8, hidden_calls=_hidden([_batch("failed")] * 3))])
+    )
+    assert "| грейдер |" in text
+    assert "| 3/3 ✗ |" in text
+
+
+# --------------------------------------------------------------------------- #
+# Сбои генерации: пустой ответ — отдельная корзина, а не оценка качества
+# --------------------------------------------------------------------------- #
+
+EMPTY_SSE = (
+    'event: meta\ndata: {"chat_id": "20260731-1"}\n\n'
+    'event: sources\ndata: {"sources": [{"n": 1, "path": "docs/a.md", '
+    '"depth": "section"}]}\n\n'
+    'event: done\ndata: {"finish_reason": "length"}\n\n'
+)
+
+
+class _ForbiddenJudge:
+    """Судья, который не должен быть вызван вовсе."""
+
+    async def complete_json(self, prompt, *, system=None, temperature=None):
+        raise AssertionError("судья вызван на паре со сбоем генерации")
+
+
+def test_generation_failed_predicate():
+    assert generation_failed(answer="", finish_reason="length", empty_answer=True)
+    assert generation_failed(answer="", finish_reason="stop", empty_answer=True)
+    assert not generation_failed(answer="текст", finish_reason="stop", empty_answer=False)
+    # Старая запись без ключа: пустой текст при обрыве по длине — сбой.
+    assert generation_failed(answer="  \n", finish_reason="length", empty_answer=None)
+    assert not generation_failed(answer="", finish_reason="stop", empty_answer=None)
+    # Пустой поток при no_context — штатный отказ, не сбой генерации.
+    assert not generation_failed(answer="", finish_reason="no_context", empty_answer=True)
+
+
+def test_run_sample_skips_the_judge_on_an_empty_answer_and_keeps_retrieval_hit():
+    record = _log_record(context_text="### Источник 1: Док — docs/a.md\nтекст\n", empty_answer=True)
+    record["timings_ms"] = {"search": 120.0, "stream": 30500.0}
+    record["settings"] = {
+        "rag": {"grader_enabled": True},
+        "model_effective": {"provider": "kitai", "model": "glm-5.1"},
+    }
+    index = RagLogIndex.from_text(json.dumps(record, ensure_ascii=False))
+    row = {"id": "g1", "question": "вопрос?", "ground_truth": "эталон.", "source_path": "docs/a.md", "source_chunk_index": 3}
+
+    async def go():
+        chat = _chat_client(EMPTY_SSE)
+        try:
+            return await run_sample(
+                row, chat=chat, judge=_ForbiddenJudge(), backend=None, cache={}, context_cap=4000, rag_log=index
+            )
+        finally:
+            await chat.aclose()
+
+    from run import run_sample
+
+    sample = asyncio.run(go())
+    assert sample[GENERATION_FAILED_KEY] is True
+    assert sample["failed"] is False
+    assert sample["metrics"] is None
+    assert "судья не вызывался" in sample["metrics_note"]
+    assert sample[RETRIEVAL_KEY] is True  # ретрив состоялся и измерен
+    assert sample[REFUSAL_KEY] is None and sample[FALSE_REFUSAL_KEY] is None
+    assert sample["empty_answer"] is True
+
+    report = build_report([sample], label="x", golden_path="g", ui_url="u", judge_model="m")
+    assert report["counts"][GENERATION_FAILED_KEY] == 1
+    assert report["generation_failures"] == [
+        {"id": "g1", "finish_reason": "length", "stream_ms": 30500.0, "model": "kitai / glm-5.1"}
+    ]
+    text = render_report_md(report)
+    assert "## Сбои генерации (1)" in text
+    assert "| g1 | length | 30500.000 | kitai / glm-5.1 |" in text
+    assert "сбоев генерации: 1" in text
+
+
+def test_run_sample_infers_generation_failure_from_old_records_by_finish_reason():
+    """Запись без `empty_answer`: пустой текст + `length` — тоже сбой."""
+    from run import run_sample
+
+    row = {"id": "g2", "question": "вопрос?", "ground_truth": "эталон."}
+
+    async def go():
+        chat = _chat_client(EMPTY_SSE)
+        try:
+            return await run_sample(
+                row, chat=chat, judge=_ForbiddenJudge(), backend=None, cache={}, context_cap=4000, rag_log=None
+            )
+        finally:
+            await chat.aclose()
+
+    sample = asyncio.run(go())
+    assert sample[GENERATION_FAILED_KEY] is True
+    assert sample["empty_answer"] is None  # не записано — и не выдумано
+
+
+def test_generation_failed_rows_stay_out_of_every_average_but_count_in_retrieval():
+    good = _sample("ok", 0.9, **{FALSE_REFUSAL_KEY: False})
+    empty = _sample(
+        "empty",
+        0.0,
+        metrics=None,
+        finish_reason="length",
+        **{GENERATION_FAILED_KEY: True, RETRIEVAL_KEY: False, REFUSAL_KEY: None, FALSE_REFUSAL_KEY: None},
+    )
+    trap = _sample(
+        "trap",
+        0.0,
+        expected_refusal=True,
+        metrics=None,
+        **{GENERATION_FAILED_KEY: True, REFUSAL_KEY: None, RETRIEVAL_KEY: None},
+    )
+    report = _report("x", 0.0, samples=[good, empty, trap])
+
+    assert report["counts"] == {
+        "total": 3,
+        "failed": 0,
+        "generation_failed": 2,
+        "evaluated": 1,
+        "context_clipped": 0,
+        "judge_context_clipped": 0,
+    }
+    assert report["buckets"] == {"answerable": 1, "refusal": 0, "meta": 0}
+    assert report["aggregate"]["faithfulness_ru"] == 0.9
+    assert report["coverage"]["faithfulness_ru"] == 1
+    assert report["aggregate"][FALSE_REFUSAL_RATE_KEY] == 0.0
+    assert report["aggregate"][REFUSAL_KEY] is None  # ловушка без ответа не «не отказалась»
+    assert report["aggregate"][RETRIEVAL_KEY] == 0.5  # ретрив у empty учтён
+    assert report["by_category"][UNCATEGORIZED]["n_generation_failed"] == 2
+    assert report["judge_failures"]["expected"] == 4  # метрик у сбоев нет — и не «упали»
+
+    # В парной дельте такие пары ведут себя как упавшие: их просто нет.
+    other = _report("y", 0.0, samples=[_sample("ok", 0.5), _sample("empty", 0.7)])
+    pair = paired_delta(report, other, "faithfulness_ru")
+    assert pair["n"] == 1
+    assert "сбоев генерации (тоже вне средних и вне парной дельты): 2 → 0" in render_compare_md(report, other)
+
+
+# --------------------------------------------------------------------------- #
+# Модель и провайдер — по факту (model_effective), не по ключу настроек
+# --------------------------------------------------------------------------- #
+
+
+def test_effective_model_prefers_model_effective_then_provider_then_legacy_key():
+    assert effective_model(
+        {"gigachat": {"model": "GigaChat-2-Max", "provider": "kitai", "kitai_model": "glm-5.1"},
+         "model_effective": {"provider": "kitai", "model": "glm-5.1"}}
+    ) == {"provider": "kitai", "model": "glm-5.1", "note": None}
+    assert effective_model(
+        {"gigachat": {"model": "GigaChat-2-Max", "provider": "kitai", "kitai_model": "glm-5.1"}}
+    ) == {"provider": "kitai", "model": "glm-5.1", "note": None}
+    assert effective_model(
+        {"gigachat": {"model": "GigaChat-2-Max", "provider": "gigachat", "kitai_model": "glm-5.1"}}
+    ) == {"provider": "gigachat", "model": "GigaChat-2-Max", "note": None}
+    assert effective_model({"gigachat": {"model": "GigaChat-2-Max"}}) == {
+        "provider": None,
+        "model": "GigaChat-2-Max",
+        "note": "(ключ провайдера не записан)",
+    }
+    assert effective_model(None)["note"] == NOT_RECORDED
+    assert effective_model({"rag": {}})["model"] is None
+
+
+def test_run_params_and_report_show_the_model_that_actually_answered():
+    settings = {
+        "rag": {"grader_enabled": True},
+        "gigachat": {"model": "GigaChat-2-Max", "provider": "kitai", "kitai_model": "glm-5.1", "temperature": 0.2},
+        "model_effective": {"provider": "kitai", "model": "glm-5.1"},
+    }
+    report = _report("x", 0.8, samples=[_sample("s1", 0.8, run_settings=settings)])
+    params = report["run_params"]
+    assert params["answer_provider"] == "kitai"
+    assert params["answer_model"] == "glm-5.1"
+    assert params["answer_model_note"] is None
+    text = render_report_md(report)
+    assert "| ответ: провайдер | `kitai` |" in text
+    assert "| ответ: модель | `glm-5.1` |" in text
+    assert "- ответ: провайдер `kitai`, модель `glm-5.1`" in text
+
+    legacy = _report("old", 0.8, samples=[_sample("s1", 0.8, run_settings={"gigachat": {"model": "GigaChat-2-Max"}})])
+    text = render_report_md(legacy)
+    assert "GigaChat-2-Max (ключ провайдера не записан)" in text
+    assert f"| ответ: провайдер | {NOT_RECORDED} |" in text
+
+
+def test_run_params_keep_the_model_when_only_a_threshold_differs():
+    settings = {"rag": {"grader_threshold": 4}, "model_effective": {"provider": "gigachat", "model": "GigaChat-2-Max"}}
+    other = {"rag": {"grader_threshold": 3}, "model_effective": {"provider": "gigachat", "model": "GigaChat-2-Max"}}
+    report = _report("x", 0.8, samples=[_sample("a", 0.8, run_settings=settings), _sample("b", 0.8, run_settings=other)])
+    assert report["run_params"]["ui_settings"] == "(смешанные)"
+    assert report["run_params"]["answer_model"] == "GigaChat-2-Max"
+    mixed = _report("y", 0.8, samples=[
+        _sample("a", 0.8, run_settings={"model_effective": {"provider": "kitai", "model": "glm-5.1"}}),
+        _sample("b", 0.8, run_settings=settings),
+    ])
+    assert mixed["run_params"]["answer_model"] == "(смешанные)"
+
+
+def _model_report(label, provider, model, ident="s1"):
+    return _report(
+        label, 0.8, samples=[_sample(ident, 0.8, run_settings={"model_effective": {"provider": provider, "model": model}})]
+    )
+
+
+def test_compare_refuses_a_model_mismatch_unless_allowed(tmp_path):
+    a = _model_report("a", "gigachat", "GigaChat-2-Max")
+    b = _model_report("b", "kitai", "glm-5.1")
+    assert model_mismatch(a, b)
+    assert not model_mismatch(a, a)
+    assert compare_blockers(a, b) and not compare_blockers(a, b, allow_model_mismatch=True)
+
+    text = render_compare_md(a, b)
+    assert "ОТВЕЧАЛИ РАЗНЫЕ МОДЕЛИ" in text
+    assert "gigachat / GigaChat-2-Max" in text and "kitai / glm-5.1" in text
+    # Блок стоит ВЫШЕ дисклеймера — первым, что видит читатель.
+    assert text.index("ОТВЕЧАЛИ РАЗНЫЕ МОДЕЛИ") < text.index("Абсолютным значениям")
+
+    path_a, path_b = tmp_path / "a.json", tmp_path / "b.json"
+    path_a.write_text(json.dumps(a, ensure_ascii=False), encoding="utf-8")
+    path_b.write_text(json.dumps(b, ensure_ascii=False), encoding="utf-8")
+    out_dir = tmp_path / "out"
+    args = build_parser().parse_args(["--compare", str(path_a), str(path_b), "--out-dir", str(out_dir)])
+    assert do_compare(args) == 2
+    assert not out_dir.exists()
+    args = build_parser().parse_args(
+        ["--compare", str(path_a), str(path_b), "--out-dir", str(out_dir), "--allow-model-mismatch"]
+    )
+    assert do_compare(args) == 0
+    assert (out_dir / "compare-a-vs-b.md").exists()
+
+
+def test_compare_only_warns_when_a_side_has_no_model_recorded():
+    """Старый отчёт без модели — «не проверяемо», а не «отличается»."""
+    new = _model_report("new", "kitai", "glm-5.1")
+    old = _report("old", 0.8, samples=[_sample("s1", 0.8)])
+    assert not model_mismatch(old, new)
+    assert compare_blockers(old, new) == []
+    text = render_compare_md(old, new)
+    assert "не записаны в отчёте `old`" in text
+
+
+# --------------------------------------------------------------------------- #
+# Ограждения: реранкер не работал → заголовок и отказ --compare
+# --------------------------------------------------------------------------- #
+
+
+def test_degraded_grader_marks_the_title_and_blocks_compare():
+    dead = _report(
+        "dead", 0.8, samples=[_turn("a", grades=[None], grade_ms=1.0)] * 9 + [_turn("b", grades=[5], grade_ms=1.0)]
+    )
+    alive = _report("alive", 0.8, samples=[_turn("b", grades=[5], grade_ms=1.0)])
+    assert grader_degraded(dead["grader_health"])
+    assert not grader_degraded(alive["grader_health"])
+    assert not grader_degraded(None)
+    assert render_report_md(dead).splitlines()[0].endswith(DEGRADED_TITLE_SUFFIX)
+    assert DEGRADED_TITLE_SUFFIX not in render_report_md(alive).splitlines()[0]
+
+    blockers = compare_blockers(alive, dead)
+    assert len(blockers) == 1 and "реранкер не работал" in blockers[0]
+    assert compare_blockers(alive, dead, allow_degraded=True) == []
+    assert "реранкер не работал" in render_compare_md(alive, dead)
+
+
+def test_a_single_lost_batch_is_not_a_degraded_run():
+    """Порог 90 %: один упавший батч — шум контура, а не другая система."""
+    rows = [_turn(f"ok{i}", grades=[5], grade_ms=1.0) for i in range(19)]
+    rows.append(_turn("lost", grades=[None], grade_ms=1.0))
+    report = _report("x", 0.8, samples=rows)
+    assert report["grader_health"]["graded"] == 19
+    assert not grader_degraded(report["grader_health"])
+    assert DEGRADED_TITLE_SUFFIX not in render_report_md(report)
+
+
+# --------------------------------------------------------------------------- #
+# Дрейф путей golden относительно живого каталога
+# --------------------------------------------------------------------------- #
+
+LIVE = {
+    "docs/new/a.md",
+    "docs/reg/b.md",
+    "docs/archive/reg/b.md",
+    "docs/c.md",
+}
+
+
+def test_resolve_golden_paths_exact_unique_ambiguous_missing():
+    exact = resolve_golden_paths({"source_path": "docs/c.md"}, LIVE)
+    assert exact["checked"] and exact["path_drift"] is None
+    assert not exact["path_missing"] and exact["path_ambiguous"] == []
+    assert exact["effective_alt_source_paths"] == []
+
+    moved = resolve_golden_paths({"source_path": "docs/old/a.md"}, LIVE)
+    assert moved["path_drift"] == {"golden": "docs/old/a.md", "live": "docs/new/a.md"}
+    assert moved["effective_alt_source_paths"] == ["docs/new/a.md"]
+
+    twins = resolve_golden_paths({"source_path": "docs/old/b.md"}, LIVE)
+    assert twins["path_drift"] is None
+    assert twins["path_ambiguous"] == ["docs/archive/reg/b.md", "docs/reg/b.md"]
+    assert twins["effective_alt_source_paths"] == []  # между близнецами не угадываем
+
+    gone = resolve_golden_paths({"source_path": "docs/z.md"}, LIVE)
+    assert gone["path_missing"] is True and gone["path_drift"] is None
+
+    # Альтернативы проверяются тем же правилом и дописываются в эффективный список.
+    alts = resolve_golden_paths(
+        {"source_path": "docs/c.md", "alt_source_paths": ["old/a.md", "old/b.md", "old/z.md"]}, LIVE
+    )
+    assert alts["alt_path_drift"] == [{"golden": "old/a.md", "live": "docs/new/a.md"}]
+    assert alts["alt_path_ambiguous"][0]["golden"] == "old/b.md"
+    assert alts["alt_path_missing"] == ["old/z.md"]
+    assert alts["effective_alt_source_paths"] == ["old/a.md", "old/b.md", "old/z.md", "docs/new/a.md"]
+
+    # Каталога нет — ничего не проверяется и ничего не меняется.
+    off = resolve_golden_paths({"source_path": "docs/old/a.md"}, None)
+    assert off["checked"] is False and off["path_drift"] is None
+    # Ловушка без source_path — проверять нечего.
+    assert resolve_golden_paths({"source_path": None}, LIVE)["path_missing"] is False
+
+
+def test_run_sample_counts_a_drifted_path_as_a_hit_and_reports_it():
+    body = SSE_BODY.replace('"path": "docs/a.md"', '"path": "docs/new/a.md"')
+    row = {"id": "d1", "question": "вопрос?", "ground_truth": "эталон.", "source_path": "docs/old/a.md"}
+
+    async def go(live):
+        from run import run_sample
+
+        chat = _chat_client(body)
+        try:
+            return await run_sample(
+                row, chat=chat, judge=_StubJudge(), backend=None, cache={}, context_cap=4000, rag_log=None, live_paths=live
+            )
+        finally:
+            await chat.aclose()
+
+    sample = asyncio.run(go(LIVE))
+    assert sample[RETRIEVAL_KEY] is True
+    assert sample["path_drift"] == {"golden": "docs/old/a.md", "live": "docs/new/a.md"}
+    assert sample["alt_source_paths"] == ["docs/new/a.md"]
+    assert sample["source_path"] == "docs/old/a.md"  # разметка не переписана
+
+    # Без каталога — прежнее поведение: промах.
+    plain = asyncio.run(go(None))
+    assert plain[RETRIEVAL_KEY] is False and plain["path_checked"] is False
+
+    report = build_report([sample], label="x", golden_path="g", ui_url="u", judge_model="m")
+    assert report["path_drift"]["drifted"] == [{"id": "d1", "golden": "docs/old/a.md", "live": "docs/new/a.md"}]
+    text = render_report_md(report)
+    assert "Дрейф путей golden-set: 1 пар(ы) сопоставлены по имени файла" in text
+    assert "## Дрейф путей golden" in text
+    assert "| d1 | `docs/old/a.md` | `docs/new/a.md` |" in text
+
+
+def test_path_drift_section_lists_ambiguous_and_missing_rows():
+    rows = [
+        _sample("amb", 0.8, path_checked=True, source_path="old/b.md", path_ambiguous=["docs/archive/reg/b.md", "docs/reg/b.md"]),
+        _sample("gone", 0.8, path_checked=True, source_path="docs/z.md", path_missing=True),
+        _sample("fine", 0.8, path_checked=True, source_path="docs/c.md"),
+    ]
+    report = _report("x", 0.8, samples=rows)
+    assert report["path_drift"]["checked"] == 3
+    assert [r["id"] for r in report["path_drift"]["ambiguous"]] == ["amb"]
+    assert [r["id"] for r in report["path_drift"]["missing"]] == ["gone"]
+    text = render_report_md(report)
+    assert "1 неоднозначны, 1 не найдены" in text
+    assert "`docs/archive/reg/b.md`, `docs/reg/b.md`" in text
+    assert "- `gone`: `docs/z.md`" in text
+
+    quiet = render_report_md(_report("y", 0.8, samples=[rows[2]]))
+    assert "Дрейф путей" not in quiet
+
+
+def test_catalog_paths_paginate_until_total_and_fetch_live_paths_degrades_to_none():
+    calls: list[dict] = []
+    docs = [{"path": f"docs/{i}.md", "title": str(i), "summary": None, "size": 1} for i in range(5)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/vault/catalog"
+        limit = int(request.url.params["limit"])
+        offset = int(request.url.params["offset"])
+        calls.append({"limit": limit, "offset": offset})
+        return httpx.Response(
+            200,
+            json={"status": "ok", "documents": docs[offset : offset + limit], "total": len(docs), "offset": offset},
+        )
+
+    async def go():
+        async with BackendClient("http://backend", "t", transport=httpx.MockTransport(handler)) as client:
+            paths = await client.catalog_paths(page_size=2)
+            live = await fetch_live_paths(client)
+            return paths, live
+
+    paths, live = asyncio.run(go())
+    assert paths == [f"docs/{i}.md" for i in range(5)]
+    assert [c["offset"] for c in calls[:3]] == [0, 2, 4]
+    assert live == set(paths)
+
+    def broken(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    async def go_broken():
+        async with BackendClient("http://backend", transport=httpx.MockTransport(broken)) as client:
+            return await fetch_live_paths(client)
+
+    assert asyncio.run(go_broken()) is None  # предупреждение и прежнее поведение
+
+    def empty(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "empty_vault", "documents": [], "total": 0, "offset": 0})
+
+    async def go_empty():
+        async with BackendClient("http://backend", transport=httpx.MockTransport(empty)) as client:
+            return await fetch_live_paths(client)
+
+    assert asyncio.run(go_empty()) is None
+    assert asyncio.run(fetch_live_paths(None)) is None
+
+
+# --------------------------------------------------------------------------- #
+# Старые записи и отчёты без новых полей рендерятся и говорят «не записано»
+# --------------------------------------------------------------------------- #
+
+
+def test_old_records_without_new_fields_still_render_and_say_not_recorded():
+    row = {"id": "s1", "question": "вопрос?", "ground_truth": "эталон.", "source_path": "docs/a.md", "source_chunk_index": 3}
+    index = RagLogIndex.from_text(json.dumps(_log_record(), ensure_ascii=False))
+    sample, judge = _run_one(row, rag_log=index)
+    assert sample["hidden_calls"] is None
+    assert sample["empty_answer"] is None
+    assert sample[GENERATION_FAILED_KEY] is False
+    assert judge.prompts  # судья работал как раньше
+
+    report = build_report([sample], label="old-ui", golden_path="g", ui_url="u", judge_model="m")
+    assert report["hidden_call_health"]["recorded"] == 0
+    assert report["run_params"]["answer_model"] is None
+    text = render_report_md(report)
+    assert f"- ответ: провайдер `{NOT_RECORDED}`, модель `{NOT_RECORDED}`" in text
+    assert f"| ответ: модель | {NOT_RECORDED} |" in text
+    assert "| — |" in text  # колонка «грейдер»
+    assert "KeyError" not in text
+
+
+def test_reports_from_the_previous_harness_version_render_and_compare():
+    """JSON без hidden_call_health/path_drift/generation_failures/answer_*."""
+    old = _report("old", 0.5, samples=[_sample("s1", 0.5), _sample("s2", 0.5)])
+    for key in ("hidden_call_health", "path_drift", "generation_failures"):
+        old.pop(key)
+    old["counts"].pop("generation_failed")
+    for key in ("answer_provider", "answer_model", "answer_model_note"):
+        old["run_params"].pop(key)
+    for sample in old["samples"]:
+        for key in ("hidden_calls", "empty_answer", GENERATION_FAILED_KEY, "path_checked", "path_drift"):
+            sample.pop(key, None)
+    new = _model_report("new", "kitai", "glm-5.1")
+
+    text = render_report_md(old)
+    assert "# RAG eval — прогон `old`" in text
+    assert "сбоев генерации: 0" in text
+    diff = render_compare_md(old, new)
+    assert "`old` → `new`" in diff
+    assert "не записаны в отчёте `old`" in diff
+    assert compare_blockers(old, new) == []
+
+
+# --------------------------------------------------------------------------- #
+# Промпты судьи v2: hedge_rate, кап судьи, счётчик вызовов, размер отчёта
+# --------------------------------------------------------------------------- #
+
+from run import (  # noqa: E402
+    HEDGE_RATE_KEY,
+    JUDGE_CLIP_KEY,
+    LOWER_IS_BETTER,
+    REPORT_DROPPED_RAW_KEYS,
+    hedge_rate,
+    judge_calls_by_metric,
+    judge_context_clipped,
+    judge_prompt_mismatch,
+    slim_report,
+)
+
+
+def _v2_sample(ident, *, hedged=False, clipped=False, calls=(2, 1, 1, 3), **extra):
+    """Сэмпл с метриками формата промптов v2: `hedged`, `raw.calls`, `raw.replies`."""
+    names = ("faithfulness_ru", "answer_relevancy_ru", "context_precision", "context_recall")
+    metrics = {
+        name: {
+            "score": 0.5,
+            "raw": {
+                "calls": n,
+                "context_clipped_by_judge": clipped and name == "context_recall",
+                "replies": [{"verdicts": [1] * 40}] * n,
+            },
+            "error": "",
+            "failed": False,
+            "hedged": hedged and name == "answer_relevancy_ru",
+        }
+        for name, n in zip(names, calls)
+    }
+    extra.setdefault("metrics", metrics)  # явный metrics=None (сбой генерации) важнее
+    return _sample(ident, 0.5, **extra)
+
+
+def test_hedge_rate_counts_hedged_answers_on_answerable_rows_only():
+    rows = [
+        _v2_sample("h1", hedged=True),
+        _v2_sample("h2", hedged=False),
+        _v2_sample("t1", hedged=True, expected_refusal=True),  # ловушка — не в знаменателе
+        _v2_sample("b1", hedged=True, failed=True, error="HTTP 500"),  # упала
+        _v2_sample("g1", hedged=True, metrics=None, **{GENERATION_FAILED_KEY: True}),
+        _sample("old", 0.5),  # метрика без поля hedged — не в знаменателе
+    ]
+    assert hedge_rate(rows) == 0.5
+    assert hedge_rate([_sample("old", 0.5)]) is None  # прежние промпты — не ноль, а «неизвестно»
+
+    report = _report("x", 0.5, samples=rows)
+    assert report["aggregate"][HEDGE_RATE_KEY] == 0.5
+    assert report["by_category"][UNCATEGORIZED][HEDGE_RATE_KEY] == 0.5
+    text = render_report_md(report)
+    assert f"| {HEDGE_RATE_KEY} ↓ (доля ОТВЕЧАЕМЫХ пар: ответ есть, но открывается оговоркой" in text
+    assert "| 0.500 | — | 2 |" in text  # знаменатель — две пары с полем hedged
+    assert HEDGE_RATE_KEY in LOWER_IS_BETTER
+
+
+def test_hedge_rate_in_the_category_table_and_compare_sign():
+    rows_a = [_v2_sample(f"s{i}", hedged=False, category="проц") for i in range(4)]
+    rows_b = [_v2_sample(f"s{i}", hedged=True, category="проц") for i in range(4)]
+    a, b = _report("a", 0.5, samples=rows_a), _report("b", 0.5, samples=rows_b)
+    assert "| hedge ↓ |" in render_report_md(a)
+    text = render_compare_md(a, b)
+    row = [l for l in text.splitlines() if l.startswith(f"| {HEDGE_RATE_KEY}")][0]
+    assert "+1.000" in row and row.endswith("▼ |")  # рост доли оговорок — регрессия
+    cat = [l for l in text.splitlines() if l.startswith("| проц |")][0]
+    assert "+1.000 ▼" in cat
+
+
+def test_judge_context_clip_is_counted_separately_from_log_clip():
+    rows = [
+        _v2_sample("c1", clipped=True),
+        _v2_sample("c2", clipped=True, context_clipped=True),  # и то и другое
+        _v2_sample("ok", clipped=False),
+        _v2_sample("dead", clipped=True, failed=True, error="HTTP 500"),  # упавшая не считается
+    ]
+    assert judge_context_clipped(rows[0]["metrics"]) is True
+    assert judge_context_clipped(rows[2]["metrics"]) is False
+    assert judge_context_clipped(None) is False
+    report = _report("x", 0.5, samples=rows)
+    assert report["counts"][JUDGE_CLIP_KEY] == 2
+    assert report["counts"]["context_clipped"] == 1
+    text = render_report_md(report)
+    assert "Кап судьи: на 2 парах" in text
+    assert "`c1`, `c2`" in text
+    assert "- кап судьи: **2** пар(ы)" in text
+    assert "Судья видел меньше контекста, чем модель, на 1 парах" in text  # старое — отдельно
+
+    quiet = render_report_md(_report("y", 0.5, samples=[rows[2]]))
+    assert "- кап судьи: нет" in quiet
+    assert "Кап судьи:" not in quiet
+
+
+def test_run_sample_sets_the_judge_clip_flag():
+    row = {"id": "s1", "question": "вопрос?", "ground_truth": "эталон."}
+    sample, _judge = _run_one(row, rag_log=None)
+    assert sample[JUDGE_CLIP_KEY] is False  # стаб-судья ничего не режет
+
+
+def test_judge_calls_are_summed_per_metric_and_printed():
+    rows = [
+        _v2_sample("a", calls=(2, 1, 1, 3)),
+        _v2_sample("b", calls=(4, 1, 1, 1)),
+        _v2_sample("g", metrics=None, **{GENERATION_FAILED_KEY: True}),
+        _sample("old", 0.5),  # без raw.calls — не считается
+    ]
+    assert judge_calls_by_metric(rows) == {
+        "faithfulness_ru": 6,
+        "answer_relevancy_ru": 2,
+        "context_precision": 2,
+        "context_recall": 4,
+        "total": 14,
+    }
+    report = _report("x", 0.5, samples=rows)
+    assert report["run_params"]["judge_calls_by_metric"]["total"] == 14
+    text = render_report_md(report)
+    assert "- судейских вызовов: 14 (faithfulness 6, relevancy 2, precision 2, recall 4)" in text
+    # Разные счётчики вызовов — не «разные параметры прогона».
+    other = _report("y", 0.5, samples=[_v2_sample("a", calls=(9, 9, 9, 9))])
+    assert "различаются параметры прогонов" not in render_compare_md(report, other)
+
+
+def test_slim_report_drops_raw_replies_and_keeps_everything_else():
+    report = _report("x", 0.5, samples=[_v2_sample("a"), _sample("plain", 0.5), {"id": "broken", "error": "x", "metrics": {}}])
+    slim = slim_report(report)
+    raw = slim["samples"][0]["metrics"]["faithfulness_ru"]["raw"]
+    assert "replies" not in raw
+    assert raw["calls"] == 2 and "context_clipped_by_judge" in raw
+    assert slim["samples"][0]["metrics"]["answer_relevancy_ru"]["hedged"] is False
+    assert slim["aggregate"] == report["aggregate"]
+    assert slim["samples"][1] == report["samples"][1]
+    # Оригинал не тронут — markdown рендерится из полного отчёта.
+    assert "replies" in report["samples"][0]["metrics"]["faithfulness_ru"]["raw"]
+    assert REPORT_DROPPED_RAW_KEYS == ("replies",)
+    json.dumps(slim, ensure_ascii=False)  # сериализуемо
+
+
+def test_compare_refuses_different_judge_prompt_versions_unless_allowed(tmp_path):
+    a = _report("a", 0.5, samples=[_sample("s1", 0.5)])
+    b = _report("b", 0.5, samples=[_sample("s1", 0.5)])
+    b["prompt_version"] = f"{a['prompt_version']}-old"
+    b["run_params"]["judge_prompt_version"] = b["prompt_version"]
+    assert judge_prompt_mismatch(a, b) and not judge_prompt_mismatch(a, a)
+    blockers = compare_blockers(a, b)
+    assert len(blockers) == 1 and "разные версии промптов" in blockers[0]
+    assert compare_blockers(a, b, allow_model_mismatch=True) == []
+    text = render_compare_md(a, b)
+    assert "СУДИЛИ РАЗНЫЕ ВЕРСИИ ПРОМПТОВ" in text
+    assert text.index("СУДИЛИ РАЗНЫЕ ВЕРСИИ") < text.index("Абсолютным значениям")
+
+    path_a, path_b = tmp_path / "a.json", tmp_path / "b.json"
+    path_a.write_text(json.dumps(a, ensure_ascii=False), encoding="utf-8")
+    path_b.write_text(json.dumps(b, ensure_ascii=False), encoding="utf-8")
+    args = build_parser().parse_args(["--compare", str(path_a), str(path_b), "--out-dir", str(tmp_path / "o")])
+    assert do_compare(args) == 2
+    args = build_parser().parse_args(
+        ["--compare", str(path_a), str(path_b), "--out-dir", str(tmp_path / "o"), "--allow-model-mismatch"]
+    )
+    assert do_compare(args) == 0
+
+    # Старый отчёт без версии — предупреждение прежнего вида, отказа нет.
+    legacy = _report("old", 0.5, samples=[_sample("s1", 0.5)])
+    legacy.pop("prompt_version"); legacy["run_params"].pop("judge_prompt_version")
+    assert not judge_prompt_mismatch(legacy, a) and compare_blockers(legacy, a) == []

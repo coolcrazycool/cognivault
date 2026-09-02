@@ -216,6 +216,45 @@ class BackendClient:
         data = resp.json()
         return str(data.get("content", "") or "")
 
+    async def catalog_paths(self, *, page_size: int = 500) -> list[str]:
+        """Пути ВСЕХ проиндексированных документов из ``GET /api/vault/catalog``.
+
+        Каталог отдаёт страницами (``limit``/``offset``) и всегда несёт ``total``,
+        поэтому обрезка обнаружима: читаем, пока ``offset + len(documents)`` не
+        достигнет ``total``. Пустая страница до достижения ``total`` — конец,
+        а не бесконечный цикл. В отличие от ``/api/vault/files`` здесь ровно
+        то, что поиск способен вернуть, — по этому списку проверяется дрейф
+        ``source_path`` golden-набора.
+        """
+        out: list[str] = []
+        offset = 0
+        while True:
+            resp = await self._client.get(
+                f"{self._base}/api/vault/catalog",
+                params={"limit": page_size, "offset": offset},
+            )
+            if resp.status_code != 200:
+                raise BackendError(
+                    f"catalog failed ({resp.status_code})",
+                    resp.status_code,
+                    resp.text[:500],
+                )
+            data = resp.json()
+            documents = data.get("documents") if isinstance(data, dict) else None
+            if not isinstance(documents, list):
+                raise BackendError("catalog: нет поля documents", resp.status_code, "")
+            page = [
+                str(d.get("path"))
+                for d in documents
+                if isinstance(d, dict) and d.get("path")
+            ]
+            out.extend(page)
+            total = data.get("total")
+            offset += len(documents)
+            if not documents or not isinstance(total, int) or offset >= total:
+                break
+        return out
+
 
 def extract_paths(data: Any) -> list[str]:
     """Normalise ``/api/vault/files`` payloads to a flat list of file paths."""
