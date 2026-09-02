@@ -309,3 +309,102 @@ def test_stream_chat_read_timeout_unchanged(monkeypatch):
     assert isinstance(timeout, httpx.Timeout)
     assert timeout.read is None
     assert timeout.connect == 10.0
+
+
+# --------------------------------------------------------------------------- #
+# Trace stamps: what the call left behind, on the config object
+# --------------------------------------------------------------------------- #
+
+
+def _traced(text: str, *, finish_reason: str | None = "stop", usage=None):
+    body = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": finish_reason,
+            }
+        ]
+    }
+    if usage is not None:
+        body["usage"] = usage
+    return lambda request: httpx.Response(200, json=body)
+
+
+def test_complete_json_stamps_the_trace_on_the_config():
+    """`finish_reason`/`usage` used to be parsed and dropped; the record needs them."""
+    cfg = _cfg()
+    usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+
+    parsed = asyncio.run(
+        complete_json(
+            [{"role": "user", "content": "?"}],
+            cfg,
+            transport=httpx.MockTransport(_traced('{"ok": true}', usage=usage)),
+        )
+    )
+
+    assert parsed == {"ok": True}
+    assert cfg.last_finish_reason == "stop"
+    assert cfg.last_usage == usage
+    assert cfg.last_content_head == '{"ok": true}'
+    assert cfg.last_model == "GigaChat-Test"
+
+
+def test_truncated_empty_answer_still_leaves_a_trace():
+    """Модель потратила весь `max_tokens` на рассуждения и не выдала ни символа.
+
+    Снаружи это «GigaChat вернул пустой ответ»; по штампам видно, что ответ
+    ОБРЕЗАН (`length`), а не пуст по воле модели.
+    """
+    cfg = _cfg()
+    usage = {"prompt_tokens": 900, "completion_tokens": 512, "total_tokens": 1412}
+
+    with pytest.raises(GigaChatError) as exc:
+        asyncio.run(
+            complete_json(
+                [{"role": "user", "content": "?"}],
+                cfg,
+                transport=httpx.MockTransport(
+                    _traced("", finish_reason="length", usage=usage)
+                ),
+            )
+        )
+
+    assert exc.value.code == "GIGACHAT_BAD_JSON"
+    assert cfg.last_finish_reason == "length"
+    assert cfg.last_content_head == ""
+    assert cfg.last_usage["completion_tokens"] == 512
+
+
+def test_stale_stamps_are_reset_before_the_call(_no_real_sleep):
+    """Штампы прошлого вызова не должны пережить неудачный следующий."""
+    cfg = _cfg()
+    cfg.last_finish_reason = "length"
+    cfg.last_usage = {"total_tokens": 1}
+    cfg.last_content_head = "старое"
+
+    with pytest.raises(GigaChatError):
+        asyncio.run(
+            complete_json(
+                [{"role": "user", "content": "?"}],
+                cfg,
+                transport=httpx.MockTransport(lambda r: httpx.Response(400, text="no")),
+            )
+        )
+
+    assert cfg.last_finish_reason is None
+    assert cfg.last_usage is None
+    assert cfg.last_content_head == ""
+    assert cfg.last_model == "GigaChat-Test"
+
+
+def test_usage_without_the_block_is_none_not_an_empty_dict():
+    cfg = _cfg()
+    asyncio.run(
+        complete_json(
+            [{"role": "user", "content": "?"}],
+            cfg,
+            transport=httpx.MockTransport(_traced('{"a": 1}')),
+        )
+    )
+    assert cfg.last_usage is None

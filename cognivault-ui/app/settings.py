@@ -13,6 +13,8 @@ This module is import-time validated: an invalid ``COGNIVAULT_UI_MODE`` raises a
 from __future__ import annotations
 
 import copy
+import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,8 @@ from .config import (
     deep_merge,
     load_config,
 )
+
+log = logging.getLogger("cognivault-ui.settings")
 
 _VALID_MODES = ("local", "server")
 
@@ -91,6 +95,27 @@ def _env_float(name: str, default: float) -> float:
         return float(val)
     except (TypeError, ValueError):
         return default
+
+
+def _env_json_object(name: str, default: dict[str, Any]) -> dict[str, Any]:
+    """A JSON object from the environment; anything else → ``default`` + WARNING.
+
+    Never raises: a typo in an operator-supplied JSON must not take the chat
+    down at startup — the log says what was ignored and the request goes out
+    without the extra fields, which is the behaviour before the key existed.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return dict(default)
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        log.warning("%s: не JSON (%s) — игнорирую", name, exc)
+        return dict(default)
+    if not isinstance(parsed, dict):
+        log.warning("%s: ожидался JSON-объект, получен %s — игнорирую", name, type(parsed).__name__)
+        return dict(default)
+    return parsed
 
 
 def _env_opt_float(name: str, default: float | None) -> float | None:
@@ -207,6 +232,12 @@ def server_config() -> dict[str, Any]:
             "grader_timeout": _env_float(
                 "RAG_GRADER_TIMEOUT", float(rag["grader_timeout"])
             ),
+            "grader_max_tokens": _env_int(
+                "RAG_GRADER_MAX_TOKENS", int(rag["grader_max_tokens"])
+            ),
+            "condense_max_tokens": _env_int(
+                "RAG_CONDENSE_MAX_TOKENS", int(rag["condense_max_tokens"])
+            ),
             "grader_enabled": _env_bool(
                 "RAG_GRADER_ENABLED", bool(rag["grader_enabled"])
             ),
@@ -249,6 +280,10 @@ def server_config() -> dict[str, Any]:
             "KITAI_MODULE_NAME", _gc_default("kitai_module_name")
         ),
         "kitai_profanity_check": _env_bool("KITAI_PROFANITY_CHECK", False),
+        # Строка JSON с объектом; кривое значение — WARNING и пустой объект.
+        "kitai_extra_body": _env_json_object(
+            "KITAI_EXTRA_BODY", DEFAULT_CONFIG["gigachat"]["kitai_extra_body"]
+        ),
         # Пусто = взять сертификат GigaChat (см. KitaiConfig.from_dict).
         "kitai_cert_path": os.path.expanduser(_env_str("KITAI_CERT_PATH", "")),
         "kitai_key_path": os.path.expanduser(_env_str("KITAI_KEY_PATH", "")),
@@ -309,6 +344,8 @@ USER_EDITABLE_KEYS: tuple[str, ...] = (
     "rag.grader_threshold",
     "rag.condense_timeout",
     "rag.grader_timeout",
+    "rag.grader_max_tokens",
+    "rag.condense_max_tokens",
     "rag.grader_keep_top",
     "rag.rerank_candidates",
     "prompts.system",
@@ -341,6 +378,9 @@ ADMIN_LOCKED_KEYS: tuple[str, ...] = (
     "gigachat.kitai_system_name",
     "gigachat.kitai_module_name",
     "gigachat.kitai_profanity_check",
+    # Поля запроса к платформе — это то, что уезжает на её сторону от нашего
+    # имени; пользователю их не отдаём.
+    "gigachat.kitai_extra_body",
     "gigachat.kitai_poll_timeout",
     "gigachat.kitai_poll_initial_delay",
     "gigachat.kitai_poll_delay",
@@ -531,6 +571,8 @@ def validate_user_overrides(
             ("max_context_chars", 500, 200000),
             ("file_full_chars", 100, 100000),
             ("section_max_chars", 100, 100000),
+            ("grader_max_tokens", 64, 65536),
+            ("condense_max_tokens", 64, 65536),
         ):
             if key in rag:
                 rag[key] = _int_in(f"rag.{key}", rag[key], low, high)

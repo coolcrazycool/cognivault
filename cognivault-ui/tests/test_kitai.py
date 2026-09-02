@@ -571,3 +571,155 @@ def test_upstream_503_reaches_the_operator_verbatim():
 
     assert "response_code=503" in (exc.value.detail or "")
     assert "connection termination" in (exc.value.detail or "")
+
+
+# --------------------------------------------------------------------------- #
+# Штампы вызова на конфиге (finish_reason / usage / голова ответа / модель)
+# --------------------------------------------------------------------------- #
+
+
+def test_complete_json_stamps_the_trace_on_the_callers_config():
+    """`timeout` делает копию конфига через `replace` — штампы обязаны лечь на
+    объект ВЫЗЫВАЮЩЕГО, иначе их никто не прочтёт."""
+    transport, _ = _recorder(_finished('{"grades": []}'))
+    cfg = _cfg()
+
+    asyncio.run(
+        kitai.complete_json(
+            [{"role": "user", "content": "?"}], cfg, timeout=5.0, transport=transport
+        )
+    )
+
+    assert cfg.last_finish_reason == "stop"
+    assert cfg.last_usage == {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
+    assert cfg.last_content_head == '{"grades": []}'
+    assert cfg.last_model == "glm-5.2"
+
+
+def test_complete_json_length_with_empty_content_is_traceable():
+    """Пустой ответ с `finish_reason: length` — бюджет ушёл на рассуждения."""
+    from app.llm_errors import GigaChatBadJSON
+
+    transport, _ = _recorder(_finished("", finish_reason="length"))
+    cfg = _cfg()
+
+    with pytest.raises(GigaChatBadJSON):
+        asyncio.run(
+            kitai.complete_json([{"role": "user", "content": "?"}], cfg, transport=transport)
+        )
+
+    assert cfg.last_finish_reason == "length"
+    assert cfg.last_content_head == ""
+    assert cfg.last_model == "glm-5.2"
+
+
+def test_failed_query_leaves_the_model_and_no_finish_reason():
+    """404 «No such model» (модель снята с платформы): штампы честно пустые,
+    но модель названа — это и есть ответ на вопрос «почему»."""
+    failed = {
+        "description": None,
+        "data": {
+            "query_status": "failed",
+            "is_final": True,
+            "error": {"status": 404, "message": "No such model"},
+            "response_code": 404,
+        },
+    }
+    transport, _ = _recorder(failed)
+    cfg = _cfg(kitai_model="glm-5.1")
+    cfg.last_finish_reason = "stop"  # от прошлого вызова
+
+    with pytest.raises(KitaiQueryFailed) as exc:
+        asyncio.run(
+            kitai.complete_json([{"role": "user", "content": "?"}], cfg, transport=transport)
+        )
+
+    assert "No such model" in (exc.value.detail or "")
+    assert cfg.last_model == "glm-5.1"
+    assert cfg.last_finish_reason is None
+    assert cfg.last_usage is None
+    assert cfg.last_content_head == ""
+
+
+def test_extract_tolerates_a_missing_or_malformed_usage_block():
+    body = _finished("x")
+    del body["data"]["response"]["usage"]
+    assert kitai._extract(body).usage is None
+
+    body = _finished("x")
+    body["data"]["response"]["usage"] = "garbage"
+    assert kitai._extract(body).usage is None
+
+
+def test_stream_chat_stamps_usage_too():
+    transport, _ = _recorder(_finished("целиком"))
+    cfg = _cfg()
+
+    async def drain():
+        async for _ in kitai.stream_chat([{"role": "user", "content": "?"}], cfg, transport=transport):
+            pass
+
+    asyncio.run(drain())
+    assert cfg.last_usage == {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
+    assert cfg.last_content_head == "целиком"
+
+
+# --------------------------------------------------------------------------- #
+# kitai_extra_body — параметры платформы поверх нашего DTO
+# --------------------------------------------------------------------------- #
+
+
+def test_extra_body_keys_are_added_but_ours_are_not_overridable(caplog):
+    """Оператор может выключить thinking; подменить модель или сообщения — нет."""
+    import logging
+
+    transport, seen = _recorder(_finished())
+    cfg = _cfg(
+        kitai_extra_body={
+            "enable_thinking": False,
+            "model_name": "чужая",
+            "messages": [],
+            "query_id": "x",
+            "max_tokens": 1,
+        }
+    )
+    kitai._announced_extra_keys.clear()
+
+    with caplog.at_level(logging.INFO, logger="cognivault-ui.kitai"):
+        _run(cfg, transport)
+
+    body = json.loads(seen[0].content)
+    assert body["enable_thinking"] is False
+    assert body["model_name"] == "glm-5.2"
+    assert body["messages"] == [{"role": "user", "content": "вопрос"}]
+    assert body["max_tokens"] == 1024
+    assert body["query_id"] != "x"
+    # В логе — только имена добавленных ключей, ни значений, ни отвергнутых.
+    announced = [r.message for r in caplog.records if "kitai_extra_body" in r.message]
+    assert announced == ["kitai: в запрос добавляются поля из kitai_extra_body: enable_thinking"]
+    assert "False" not in announced[0]
+
+    # Второй запрос с тем же набором — без повторного объявления.
+    with caplog.at_level(logging.INFO, logger="cognivault-ui.kitai"):
+        _run(cfg, transport)
+    assert sum("kitai_extra_body" in r.message for r in caplog.records) == 1
+
+
+def test_extra_body_accepts_a_json_string_and_ignores_garbage(caplog):
+    import logging
+
+    assert _cfg(kitai_extra_body='{"enable_thinking": false}').extra_body == {"enable_thinking": False}
+    assert _cfg().extra_body == {}
+    assert _cfg(kitai_extra_body="").extra_body == {}
+    with caplog.at_level(logging.WARNING, logger="cognivault-ui.kitai"):
+        assert _cfg(kitai_extra_body="{oops").extra_body == {}
+        assert _cfg(kitai_extra_body="[1]").extra_body == {}
+        assert _cfg(kitai_extra_body=42).extra_body == {}
+    assert "kitai_extra_body" in caplog.text
+
+    # Без дополнительных полей тело — ровно прежнее.
+    transport, seen = _recorder(_finished())
+    _run(_cfg(), transport)
+    assert set(json.loads(seen[0].content)) == {
+        "query_id", "model_name", "messages", "temperature", "max_tokens", "profanity_check",
+    }

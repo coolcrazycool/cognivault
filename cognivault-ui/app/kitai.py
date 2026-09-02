@@ -42,12 +42,12 @@ import logging
 import os
 import ssl
 import uuid
-from dataclasses import dataclass, replace
-from typing import Any, AsyncIterator
+from dataclasses import dataclass, field, replace
+from typing import Any, AsyncIterator, NamedTuple
 
 import httpx
 
-from . import mtls
+from . import llm_trace, mtls
 from .gigachat import extract_json
 from .llm_errors import (
     GigaChatBadJSON,
@@ -88,10 +88,14 @@ class KitaiConfig:
     poll_timeout: float
     poll_initial_delay: float
     poll_delay: float
+    # Дополнительные поля запроса к платформе (см. `_build_body`). Только
+    # добавляются; наши поля перекрыть нельзя.
+    extra_body: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, gc: dict[str, Any]) -> "KitaiConfig":
         return cls(
+            extra_body=_parse_extra_body(gc.get("kitai_extra_body")),
             host=str(gc.get("kitai_host", "")).rstrip("/"),
             model=str(gc.get("kitai_model", "") or gc.get("model", "")),
             **_resolve_cert(gc),
@@ -159,6 +163,30 @@ def _resolve_cert(gc: dict[str, Any]) -> dict[str, str]:
         "key_path": shared_key,
         "key_passphrase": shared_pass,
     }
+
+
+def _parse_extra_body(value: Any) -> dict[str, Any]:
+    """``kitai_extra_body`` as a dict: a dict as is, a JSON string parsed,
+    anything else (or invalid JSON) → ``{}`` with a warning, never an error."""
+    if value is None or value == "":
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError as exc:
+            log.warning("kitai_extra_body: не JSON (%s) — игнорирую", exc)
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    log.warning("kitai_extra_body: ожидался объект, получен %s — игнорирую", type(value).__name__)
+    return {}
+
+
+# Какие наборы дополнительных ключей уже объявлены в логе. Один раз на процесс
+# и на набор: значения не пишем никогда (это параметры платформы, а не наши).
+_announced_extra_keys: set[tuple[str, ...]] = set()
 
 
 def _headers(cfg: KitaiConfig) -> dict[str, str]:
@@ -229,6 +257,16 @@ def _build_body(messages: list[dict[str, Any]], cfg: KitaiConfig, query_id: str)
         "max_tokens": cfg.max_tokens,
         "profanity_check": cfg.profanity_check,
     }
+    # `kitai_extra_body` — параметры платформы, которых наш DTO не знает
+    # (например, выключение режима рассуждений у модели). Только те ключи,
+    # которых у нас нет: `query_id`, `model_name`, `messages` и остальное
+    # перекрыть нельзя, иначе оператор одной строкой ENV подменил бы запрос.
+    added = tuple(sorted(k for k in cfg.extra_body if k not in payload))
+    for key in added:
+        payload[key] = cfg.extra_body[key]
+    if added and added not in _announced_extra_keys:
+        _announced_extra_keys.add(added)
+        log.info("kitai: в запрос добавляются поля из kitai_extra_body: %s", ", ".join(added))
     return json.dumps(payload, ensure_ascii=False).encode()
 
 
@@ -257,10 +295,25 @@ def _failure_detail(data: dict[str, Any]) -> str | None:
     return "; ".join(parts)[:600] or None
 
 
-def _extract(result: dict[str, Any]) -> tuple[str, str | None]:
-    """``(content, finish_reason)`` out of a finished ``QueryResultPDto``."""
+class QueryResult(NamedTuple):
+    """What a finished query yields: the text plus the metadata around it.
+
+    ``usage`` is the upstream ``response.usage`` block when the platform passed
+    one through, else ``None`` — it is telemetry (see :mod:`app.llm_trace`),
+    never something the answer path depends on.
+    """
+
+    content: str
+    finish_reason: str | None
+    usage: dict[str, Any] | None
+
+
+def _extract(result: dict[str, Any]) -> QueryResult:
+    """``(content, finish_reason, usage)`` out of a finished ``QueryResultPDto``."""
     data = result.get("data") or {}
     response = data.get("response") or {}
+    if not isinstance(response, dict):
+        response = {}
     choices = response.get("choices") or []
     if not choices:
         raise KitaiQueryFailed(
@@ -270,7 +323,13 @@ def _extract(result: dict[str, Any]) -> tuple[str, str | None]:
         )
     first = choices[0] or {}
     message = first.get("message") or {}
-    return str(message.get("content") or ""), first.get("finish_reason")
+    finish = first.get("finish_reason")
+    usage = response.get("usage")
+    return QueryResult(
+        str(message.get("content") or ""),
+        str(finish) if finish not in (None, "") else None,
+        usage if isinstance(usage, dict) else None,
+    )
 
 
 async def _commit(client: httpx.AsyncClient, cfg: KitaiConfig, query_id: str) -> None:
@@ -301,7 +360,22 @@ async def _run_query(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> tuple[str, str | None]:
-    """Enqueue, poll to completion, commit. Returns ``(content, finish_reason)``."""
+    """Enqueue, poll to completion, commit. Returns ``(content, finish_reason)``.
+
+    The pair is the historical contract; :func:`_query` underneath also carries
+    ``usage`` for the callers that stamp telemetry.
+    """
+    result = await _query(messages, cfg, transport=transport)
+    return result.content, result.finish_reason
+
+
+async def _query(
+    messages: list[dict[str, Any]],
+    cfg: KitaiConfig,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> QueryResult:
+    """Enqueue, poll to completion, commit. Returns a :class:`QueryResult`."""
     if not cfg.host:
         raise GigaChatError(
             "KITAI_NOT_CONFIGURED", "Не задан адрес KitAI (KITAI_HOST)", None
@@ -349,9 +423,9 @@ async def _run_query(
             status = str(data.get("query_status") or "")
 
             if status == "finished":
-                content, finish_reason = _extract(body)
+                result = _extract(body)
                 await _commit(client, cfg, query_id)
-                return content, finish_reason
+                return result
 
             # `is_final` on a non-finished status means the platform gave up.
             if data.get("is_final"):
@@ -470,11 +544,16 @@ async def stream_chat(
     stream would only move the wait from the spinner into a fake typewriter. The
     caller reads ``cfg.last_finish_reason`` afterwards, same as for GigaChat.
     """
-    setattr(cfg, "last_finish_reason", None)
-    content, finish_reason = await _run_query(messages, cfg, transport=transport)
-    setattr(cfg, "last_finish_reason", finish_reason)
-    if content:
-        yield content
+    llm_trace.reset(cfg, cfg.model)
+    result = await _query(messages, cfg, transport=transport)
+    llm_trace.stamp(
+        cfg,
+        finish_reason=result.finish_reason,
+        usage=result.usage,
+        content=result.content,
+    )
+    if result.content:
+        yield result.content
 
 
 async def complete_json(
@@ -491,7 +570,14 @@ async def complete_json(
     ``timeout`` caps the polling budget for this call: the condense and grader
     steps sit on the critical path with 10 s / 20 s leashes of their own, and a
     240 s default would let one slow hidden call outlast the user's patience.
+
+    ``finish_reason``, ``usage``, the head of the raw text and the model are
+    stamped onto ``cfg`` (the CALLER's object, not the per-call copy below) —
+    see :mod:`app.llm_trace`. The stamps go on before ``extract_json`` runs, so
+    an answer cut off by ``max_tokens`` is reported as ``length`` rather than
+    as a bare «пустой ответ».
     """
+    llm_trace.reset(cfg, cfg.model)
     overrides: dict[str, Any] = {}
     if timeout is not None:
         overrides["poll_timeout"] = float(timeout)
@@ -501,9 +587,15 @@ async def complete_json(
         overrides["poll_delay"] = min(cfg.poll_delay, float(timeout))
     if max_tokens is not None:
         overrides["max_tokens"] = int(max_tokens)
-    # `replace` copies FIELDS only — `stream_chat` stamps `last_finish_reason`
-    # onto the instance, and a `**__dict__` copy would choke on it.
+    # `replace` copies FIELDS only — the trace stamps live on the instance, and
+    # a `**__dict__` copy would choke on them.
     call_cfg = replace(cfg, **overrides) if overrides else cfg
 
-    content, _ = await _run_query(messages, call_cfg, transport=transport)
-    return extract_json(content)
+    result = await _query(messages, call_cfg, transport=transport)
+    llm_trace.stamp(
+        cfg,
+        finish_reason=result.finish_reason,
+        usage=result.usage,
+        content=result.content,
+    )
+    return extract_json(result.content)

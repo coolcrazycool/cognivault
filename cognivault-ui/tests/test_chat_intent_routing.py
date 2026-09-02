@@ -478,3 +478,242 @@ def test_notice_branch_still_wins_over_sources(tmp_path, monkeypatch):
     assert rec["notice"] == "Поиск недоступен"
     assert rec["rag_used"] is False
     assert rec["intent"] == "kb_question"
+
+
+# --------------------------------------------------------------------------- #
+# Скрытые вызовы и пустой ответ в записи лога
+# --------------------------------------------------------------------------- #
+
+
+def _hidden_calls() -> dict:
+    return {
+        "condense": {
+            "status": "ok",
+            "error": None,
+            "detail": None,
+            "finish_reason": "stop",
+            "usage": {"prompt_tokens": 80, "completion_tokens": 20, "total_tokens": 100},
+            "model": "glm-5.1",
+            "ms": 1200.5,
+        },
+        "grader": {
+            "status": "failed",
+            "detail": None,
+            "ms": 900.0,
+            "batches": [
+                {
+                    "n": 1,
+                    "size": 2,
+                    "ids": [1, 2],
+                    "status": "failed",
+                    "error": "KitaiQueryFailed: KitAI завершил запрос со статусом «failed»",
+                    "detail": "error.status=404; No such model",
+                    "finish_reason": None,
+                    "usage": None,
+                    "model": "glm-5.1",
+                    "ms": 900.0,
+                    "graded": [],
+                    "omitted": [],
+                }
+            ],
+        },
+    }
+
+
+def test_log_records_hidden_calls_and_the_effective_model(tmp_path, monkeypatch):
+    """Почему реранкер молчал — в записи, а не только в логе пода."""
+    paths = _paths(tmp_path)
+    ctx = _kb_ctx()
+    ctx.hidden_calls = _hidden_calls()
+    _install(monkeypatch, paths, ctx, answer="ответ [Источник 1]")
+
+    with TestClient(create_app()) as client:
+        _post(client, [{"role": "user", "content": "как настроить ЕФС?"}])
+
+    rec = rag_log.read_records(paths)[0]
+    assert rec["hidden_calls"] == _hidden_calls()
+    assert rec["hidden_calls"]["grader"]["batches"][0]["error"].startswith("KitaiQueryFailed")
+    assert rec["empty_answer"] is False
+    assert rec["answer_finish_reason"] == rec["finish_reason"]
+    assert rec["settings"]["gigachat"]["provider"] == "gigachat"
+    assert "kitai_model" in rec["settings"]["gigachat"]
+    assert rec["settings"]["model_effective"] == {
+        "provider": "gigachat",
+        "model": rec["settings"]["gigachat"]["model"],
+    }
+
+
+def test_empty_answer_is_flagged_only_without_an_error(tmp_path, monkeypatch):
+    """Ни символа от модели без ошибки транспорта — это `length` на нуле
+    контента, а не обрыв; по `answer_chars: 0` их не различить."""
+    paths = _paths(tmp_path)
+    _install(monkeypatch, paths, _kb_ctx(), answer="   ")
+
+    with TestClient(create_app()) as client:
+        _post(client, [{"role": "user", "content": "как настроить ЕФС?"}])
+
+    rec = rag_log.read_records(paths)[0]
+    assert rec["empty_answer"] is True
+    assert rec["errored"] is False
+
+    # А вот обрыв транспорта — не «пустой ответ».
+    from app.llm_errors import GigaChatHTTP
+
+    async def broken(messages, gcfg):
+        raise GigaChatHTTP("GIGACHAT_HTTP_503", "GigaChat вернул HTTP 503", "down")
+        yield  # pragma: no cover — делает функцию генератором
+
+    monkeypatch.setattr(chat_routes.llm, "stream_chat", broken)
+    with TestClient(create_app()) as client:
+        _post(client, [{"role": "user", "content": "как настроить ЕФС?"}])
+
+    rec = rag_log.read_records(paths)[-1]
+    assert rec["errored"] is True
+    assert rec["empty_answer"] is False
+
+
+def test_hidden_calls_are_none_outside_rag_mode(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    _install(monkeypatch, paths, _kb_ctx())
+
+    with TestClient(create_app()) as client:
+        client.post("/api/chat", json={"messages": [{"role": "user", "content": "привет"}], "rag": False})
+
+    rec = rag_log.read_records(paths)[0]
+    assert rec["hidden_calls"] is None
+    assert rec["rag_used"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Пустой ответ при finish_reason=length: один повтор с бо́льшим бюджетом
+# --------------------------------------------------------------------------- #
+
+
+def _install_length_streams(monkeypatch, paths, answers: list[str]):
+    """`stream_chat`, отдающий по очереди `answers`; пустой = finish_reason=length."""
+    calls: list[dict] = []
+
+    async def fake_build_rag_context(query, *args, **kwargs):
+        return _kb_ctx()
+
+    async def fake_stream_chat(messages, gcfg):
+        text = answers[len(calls)]
+        calls.append({"max_tokens": gcfg.max_tokens, "messages": [dict(m) for m in messages]})
+        gcfg.last_finish_reason = "length" if not text.strip() else "stop"
+        if text:
+            yield text
+
+    monkeypatch.setattr(chat_routes, "resolve_paths", lambda request: paths)
+    monkeypatch.setattr(chat_routes.rag, "build_rag_context", fake_build_rag_context)
+    monkeypatch.setattr(chat_routes.llm, "stream_chat", fake_stream_chat)
+    monkeypatch.setattr(chat_routes.llm, "files_present", lambda gcfg: None)
+    return calls
+
+
+def test_empty_length_answer_is_retried_once_with_a_bigger_budget(tmp_path, monkeypatch):
+    """Модель рассуждала до исчерпания бюджета и не выдала ни символа.
+
+    Один повтор с удвоенным max_tokens — той же историей, тем же контекстом;
+    настройки пользователя не трогаются, запись в логе и в истории одна.
+    """
+    paths = _paths(tmp_path)
+    calls = _install_length_streams(monkeypatch, paths, ["", "ответ со второй попытки [Источник 1]"])
+
+    with TestClient(create_app()) as client:
+        resp = _post(client, [{"role": "user", "content": "как настроить ЕФС?"}], max_tokens=1000)
+
+    events = _parse_sse(resp.text)
+    assert [n for n, _ in events] == ["meta", "sources", "token", "done"]
+    assert dict(events)["done"]["finish_reason"] == "stop"
+    assert len(calls) == 2
+    assert calls[0]["max_tokens"] == 1000 and calls[1]["max_tokens"] == 2000
+    assert calls[0]["messages"] == calls[1]["messages"]
+
+    records = rag_log.read_records(paths)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["answer_retries"] == 1
+    assert rec["answer_retry_reason"] == "empty_length"
+    assert rec["empty_answer"] is False
+    assert rec["answer_text"] == "ответ со второй попытки [Источник 1]"
+    assert "retry" in rec["timings_ms"]
+    chat_id = dict(events)["meta"]["chat_id"]
+    saved = load_chat(chat_id, paths)["messages"]
+    assert [m["role"] for m in saved] == ["user", "assistant"]
+    assert saved[-1]["content"] == "ответ со второй попытки [Источник 1]"
+
+
+def _context_window(monkeypatch, tokens: int) -> None:
+    """Окно модели — админский ключ; подменяем действующий конфиг целиком."""
+    base = chat_routes._effective_config
+
+    def patched(paths):
+        cfg = base(paths)
+        cfg["gigachat"] = {**cfg.get("gigachat", {}), "model_context_tokens": tokens}
+        return cfg
+
+    monkeypatch.setattr(chat_routes, "_effective_config", patched)
+
+
+def test_retry_budget_is_capped_by_half_the_context_window(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    calls = _install_length_streams(monkeypatch, paths, ["", "ok"])
+    _context_window(monkeypatch, 8192)
+
+    with TestClient(create_app()) as client:
+        _post(client, [{"role": "user", "content": "как настроить ЕФС?"}], max_tokens=3000)
+
+    assert [c["max_tokens"] for c in calls] == [3000, 4096]
+
+
+def test_no_retry_when_the_budget_cannot_grow(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    calls = _install_length_streams(monkeypatch, paths, ["", "ok"])
+    _context_window(monkeypatch, 8192)
+
+    with TestClient(create_app()) as client:
+        resp = _post(client, [{"role": "user", "content": "как настроить ЕФС?"}], max_tokens=4096)
+
+    assert len(calls) == 1
+    rec = rag_log.read_records(paths)[0]
+    assert rec["answer_retries"] == 0 and rec["answer_retry_reason"] is None
+    assert rec["empty_answer"] is True
+    assert "notice" in _events(resp.text)
+
+
+def test_two_empty_answers_end_in_a_visible_notice(tmp_path, monkeypatch):
+    """Вместо пустого пузыря — уведомление; `empty_answer` остаётся true."""
+    paths = _paths(tmp_path)
+    calls = _install_length_streams(monkeypatch, paths, ["", "  "])
+
+    with TestClient(create_app()) as client:
+        resp = _post(client, [{"role": "user", "content": "как настроить ЕФС?"}])
+
+    assert len(calls) == 2
+    events = _parse_sse(resp.text)
+    names = [n for n, _ in events]
+    assert names == ["meta", "sources", "token", "notice", "done"]
+    notice = dict(events)["notice"]["message"]
+    assert notice.startswith("Модель не вернула текст: бюджет ответа исчерпан (finish_reason=length)")
+    assert dict(events)["done"]["finish_reason"] == "length"
+
+    records = rag_log.read_records(paths)
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["empty_answer"] is True
+    assert rec["answer_retries"] == 1
+    assert rec["answer_retry_reason"] == "empty_length"
+    assert rec["notice"] == notice
+    assert rec["finish_reason"] == "length"
+
+
+def test_a_normal_answer_is_never_retried(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    calls = _install_length_streams(monkeypatch, paths, ["сразу ответ", "лишний"])
+
+    with TestClient(create_app()) as client:
+        _post(client, [{"role": "user", "content": "как настроить ЕФС?"}])
+
+    assert len(calls) == 1
+    rec = rag_log.read_records(paths)[0]
+    assert rec["answer_retries"] == 0

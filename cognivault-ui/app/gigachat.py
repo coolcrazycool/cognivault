@@ -21,11 +21,11 @@ import os
 import random
 import ssl
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable, NamedTuple
 
 import httpx
 
-from . import mtls
+from . import llm_trace, mtls
 from .llm_errors import (  # re-exported: callers import these from here today
     GigaChatBadJSON,
     GigaChatCertMissing,
@@ -401,8 +401,22 @@ def _backoff(attempt: int) -> float:
     return min(delay, JSON_MAX_BACKOFF_SECONDS)
 
 
-def _first_choice_text(resp: httpx.Response) -> str:
-    """Pull ``choices[0].message.content`` out of an OpenAI-shaped response."""
+class _Completion(NamedTuple):
+    """The parts of an OpenAI-shaped completion the callers care about."""
+
+    content: str
+    finish_reason: str | None
+    usage: dict[str, Any] | None
+
+
+def _parse_completion(resp: httpx.Response) -> _Completion:
+    """``choices[0]`` plus ``usage`` out of an OpenAI-shaped response.
+
+    ``finish_reason`` and ``usage`` used to be read and thrown away here, which
+    made an empty answer with ``finish_reason == "length"`` (the model spent the
+    whole ``max_tokens`` budget on reasoning) indistinguishable from a model
+    that had nothing to say.
+    """
     try:
         data = resp.json()
     except ValueError as exc:
@@ -418,8 +432,15 @@ def _first_choice_text(resp: httpx.Response) -> str:
             "GigaChat вернул ответ без choices",
             _clip(resp.text),
         )
-    message = (choices[0] or {}).get("message") or {}
-    return str(message.get("content", "") or "")
+    first = choices[0] or {}
+    message = first.get("message") or {}
+    finish = first.get("finish_reason")
+    usage = data.get("usage") if isinstance(data, dict) else None
+    return _Completion(
+        str(message.get("content", "") or ""),
+        str(finish) if finish not in (None, "") else None,
+        usage if isinstance(usage, dict) else None,
+    )
 
 
 def _make_json_client(
@@ -475,7 +496,14 @@ async def complete_json(
     :class:`GigaChatTLS`, :class:`GigaChatDNS`, :class:`GigaChatHTTP`,
     :class:`GigaChatStreamDropped` (connection lost mid-answer) and
     :class:`GigaChatBadJSON`.
+
+    What the call left behind (``finish_reason``, ``usage``, the head of the
+    raw text, the model) is stamped onto ``gcfg`` — see :mod:`app.llm_trace`.
+    The stamps are written BEFORE the text is parsed, so a reply that fails
+    ``extract_json`` still says why (typically ``finish_reason == "length"``
+    with an empty ``content_head``).
     """
+    llm_trace.reset(gcfg, gcfg.model)
     try:
         client = _make_json_client(gcfg, timeout, transport)
     except ssl.SSLError as exc:
@@ -519,7 +547,14 @@ async def complete_json(
 
             status = resp.status_code
             if status == 200:
-                return extract_json(_first_choice_text(resp))
+                completion = _parse_completion(resp)
+                llm_trace.stamp(
+                    gcfg,
+                    finish_reason=completion.finish_reason,
+                    usage=completion.usage,
+                    content=completion.content,
+                )
+                return extract_json(completion.content)
 
             last_error = GigaChatHTTP(
                 f"GIGACHAT_HTTP_{status}",

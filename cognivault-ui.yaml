@@ -22,6 +22,10 @@ data:
   COGNIVAULT_BASE_URL: "http://cognivault:3000"
   UI_PORT: "8787"
   UI_DATA_DIR: "/data"
+  # Уровень логов самого приложения (логгеры cognivault-ui.*). INFO показывает
+  # второй проход грейдера, пропущенные фрагменты и query_id KitAI — без этого
+  # деградация конвейера в логе пода не видна. DEBUG на время разбора инцидента.
+  UI_LOG_LEVEL: "INFO"
   GIGACHAT_BASE_URL: "https://gigachat-ift.sberdevices.delta.sbrf.ru/v1"
   GIGACHAT_MODEL: "GigaChat-3-Ultra-preview"
   GIGACHAT_CERT_PATH: "/certs/client_crt.crt"
@@ -38,11 +42,21 @@ data:
   CHAT_PROVIDER: "kitai"
   # Без /v1 — версия зашита в пути (/api/v1/query/...).
   KITAI_HOST: "https://hcscr-ift.delta.sbrf.ru"
+  # 2026-09-02: платформа отвечает на glm-5.1 «404 No such model». Рабочее имя
+  # выставляется в UI (Модель → kitai_model) и живёт в config.json пользователя
+  # на emptyDir, то есть ПОСЛЕ КАЖДОГО ПЕРЕЗАПУСКА ПОДА его надо выставить заново,
+  # пока сюда не вписано живое имя. Список моделей: /api/config/models или
+  # deploy/dropapp/kitai-check.py.
   KITAI_MODEL: "glm-5.1"
   # Уезжает в x-identification-system / x-identification-module.
   KITAI_SYSTEM_NAME: "csp_lab"
   KITAI_MODULE_NAME: "csp_lab_antifraud_edge"
   KITAI_PROFANITY_CHECK: "false"
+  # Дополнительные поля запроса к платформе (JSON-объект), например выключить
+  # режим рассуждений модели без пересборки образа. Только добавляет ключи —
+  # query_id/model_name/messages перекрыть нельзя. Кривой JSON → WARNING и
+  # игнор, чат не падает. Ключи попадают в лог (INFO), значения — никогда.
+  # KITAI_EXTRA_BODY: '{"enable_thinking": false}'
   # Отдельный клиентский сертификат KitAI: он живёт на другом контуре, и общая
   # с GigaChat пара — частный случай, а не правило.
   #
@@ -82,6 +96,13 @@ data:
   # растёт. На KitAI стриминга всё равно нет, ждать приходится в любом случае.
   RAG_CONDENSE_TIMEOUT: "45"
   RAG_GRADER_TIMEOUT: "90"
+  # Бюджет ВЫВОДА скрытых вызовов (был зашит: 1024 и 512). Рассуждающая модель
+  # (qwen в режиме thinking) тратит тот же max_tokens сначала на рассуждения —
+  # на JSON не оставалось ничего: «GigaChat вернул пустой ответ»,
+  # finish_reason=length, реранкер мёртв на каждом ходе. Значения совпадают с
+  # дефолтами кода (`app/config.py`) — за этим следит тест.
+  RAG_GRADER_MAX_TOKENS: "4096"
+  RAG_CONDENSE_MAX_TOKENS: "2048"
   RAG_GRADER_THRESHOLD: "4"
   # Волна 0: 2 → 0. Добор двух верхних по сырому рангу шёл в контекст мимо
   # грейдера, даже с оценкой 1 — это 40% контекста без фильтрации, и именно

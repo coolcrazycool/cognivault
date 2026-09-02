@@ -8,10 +8,10 @@ by ``(chat_id, message_index)``.
 
 Deliberate choices:
 
-* **Not the ``logging`` module.** The UI never calls ``logging.basicConfig``, so
-  the root logger sits at WARNING and ``log.info`` output would go nowhere. The
-  log is a data artefact for eval runs, not operator noise — a file write is the
-  honest implementation.
+* **Not the ``logging`` module.** The log is a data artefact for eval runs, not
+  operator noise — a file write is the honest implementation. (Operator lines do
+  reach the pod log: ``app.main._configure_logging`` puts a handler on the
+  ``cognivault-ui`` logger at ``UI_LOG_LEVEL``, INFO by default.)
 * **No atomic temp-file + ``os.replace``** (unlike ``history.py``/``config.py``).
   Records are appended, never rewritten: a single ``write()`` of one short line
   to a file opened in ``"a"`` mode is effectively atomic on POSIX, and a partial
@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .config import AppPaths
+from .llm import DEFAULT_PROVIDER, PROVIDERS
 
 LOG_NAME = "rag_log.jsonl"
 
@@ -264,11 +265,45 @@ _RAG_SNAPSHOT_KEYS = (
     # не отработал на 41 ходе из 46.
     "condense_timeout",
     "grader_timeout",
+    # Бюджеты вывода скрытых вызовов: `finish_reason=length` у грейдера
+    # читается только рядом с тем, сколько ему было позволено.
+    "grader_max_tokens",
+    "condense_max_tokens",
 )
 
 #: GigaChat knobs. Whitelisted rather than filtered: the section also holds
 #: ``cert_path``/``key_path``/``key_passphrase``, which must never be logged.
-_GIGA_SNAPSHOT_KEYS = ("model", "temperature", "max_tokens", "model_context_tokens")
+#: ``provider`` and ``kitai_model`` are here because the record used to name
+#: ``model`` alone — and with ``provider: kitai`` that is NOT the model that
+#: answered (``KitaiConfig`` reads ``kitai_model`` first). A report built from
+#: the log named the wrong model.
+_GIGA_SNAPSHOT_KEYS = (
+    "provider",
+    "model",
+    "kitai_model",
+    "temperature",
+    "max_tokens",
+    "model_context_tokens",
+)
+
+
+def model_effective(gcfg: dict[str, Any] | None) -> dict[str, Any]:
+    """``{"provider", "model"}`` — which backend answered, with which model.
+
+    Mirrors the resolution the transports do (:func:`app.llm.provider_of`,
+    ``KitaiConfig.from_dict``) without the warning ``provider_of`` logs on an
+    unknown value: the snapshot describes, it does not complain. Kept next to
+    the whitelist so the harness never has to know that KitAI keeps its model
+    under a different key.
+    """
+    giga_cfg = gcfg if isinstance(gcfg, dict) else {}
+    provider = str(giga_cfg.get("provider", "") or DEFAULT_PROVIDER).strip().lower()
+    if provider not in PROVIDERS:
+        provider = DEFAULT_PROVIDER
+    model = giga_cfg.get("model")
+    if provider == "kitai":
+        model = giga_cfg.get("kitai_model") or model
+    return {"provider": provider, "model": model or None}
 
 
 def _prompt_fingerprint(value: Any) -> str | None:
@@ -299,6 +334,7 @@ def settings_snapshot(
     return {
         "rag": {k: rag_cfg.get(k) for k in _RAG_SNAPSHOT_KEYS if k in rag_cfg},
         "gigachat": {k: giga_cfg.get(k) for k in _GIGA_SNAPSHOT_KEYS if k in giga_cfg},
+        "model_effective": model_effective(giga_cfg),
         "prompts": {
             key: _prompt_fingerprint(prompt_cfg.get(key))
             for key in ("system", "context_reminder")

@@ -1485,3 +1485,338 @@ def test_timeout_failure_names_the_exception_type(monkeypatch, caplog):
 
     assert grades == [None]
     assert "TimeoutError" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Отчёты скрытых вызовов: что именно сделал грейдер / condense
+# --------------------------------------------------------------------------- #
+
+_GCFG = {"model": "GigaChat-Test"}
+
+
+def _install_traced(monkeypatch, handler, *, finish_reason="stop", usage=None, content=""):
+    """Как `_install_complete_json`, но со штампами провайдера на конфиге.
+
+    `handler` может вернуть исключение — тогда оно бросается ПОСЛЕ штампов,
+    как делает настоящий `complete_json` (штампы до `extract_json`).
+    """
+
+    async def fake(messages, cfg, **kwargs):
+        cfg.last_model = getattr(cfg, "model", None)
+        cfg.last_finish_reason = finish_reason
+        cfg.last_usage = usage
+        cfg.last_content_head = content
+        result = handler(messages[-1]["content"])
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr(rag_pipeline.llm, "complete_json", fake, raising=False)
+
+
+def _grade_report(*args):
+    return asyncio.run(rag_pipeline.grade_with_report(*args))
+
+
+def test_batch_outcome_ok(monkeypatch):
+    usage = {"prompt_tokens": 500, "completion_tokens": 40, "total_tokens": 540}
+    _install_traced(
+        monkeypatch,
+        lambda p: {"grades": [{"id": 1, "score": 5}, {"id": 2, "score": 3}]},
+        usage=usage,
+        content='{"grades": [',
+    )
+
+    grades, report = _grade_report("вопрос", [_frag(1), _frag(2)], {}, _GCFG)
+
+    assert grades == [5, 3]
+    assert report["status"] == "ok"
+    [batch] = report["batches"]
+    assert batch["n"] == 1 and batch["size"] == 2 and batch["ids"] == [1, 2]
+    assert batch["status"] == "ok"
+    assert batch["error"] is None and batch["detail"] is None
+    assert batch["finish_reason"] == "stop"
+    assert batch["usage"] == usage
+    assert batch["model"] == "GigaChat-Test"
+    assert batch["ms"] >= 0
+    assert batch["graded"] == [1, 2] and batch["omitted"] == []
+
+
+def test_batch_outcome_failed_names_the_exception_and_the_platform_detail(monkeypatch, caplog):
+    """`KitaiQueryFailed … 404 "No such model"` — то, что видели на проде."""
+    from app.llm_errors import KitaiQueryFailed
+
+    boom = KitaiQueryFailed(
+        "KITAI_QUERY_FAILED",
+        "KitAI завершил запрос со статусом «failed» (модель glm-5.1)",
+        "error.status=404; No such model; response_code=404",
+    )
+    _install_traced(monkeypatch, lambda p: boom, finish_reason=None)
+
+    with caplog.at_level(logging.WARNING, logger="cognivault-ui.rag_pipeline"):
+        grades, report = _grade_report("вопрос", [_frag(1), _frag(2)], {}, _GCFG)
+
+    assert grades == [None, None]
+    assert report["status"] == "failed"
+    [batch] = report["batches"]
+    assert batch["status"] == "failed"
+    assert batch["error"].startswith("KitaiQueryFailed: KitAI завершил запрос")
+    assert "No such model" in batch["detail"]
+    assert batch["finish_reason"] is None
+    assert batch["model"] == "GigaChat-Test"
+    assert batch["graded"] == [] and batch["omitted"] == []
+    # В логе пода — номер батча и модель.
+    assert "батч 1" in caplog.text and "GigaChat-Test" in caplog.text
+
+
+def test_truncated_batch_is_unknown_not_omitted(monkeypatch, caplog):
+    """Обрубок JSON: `extract_json` выуживает из него `{"id": 1, "score": 5}`.
+
+    Раньше в таком словаре не было `grades`, все id считались пропущенными и
+    весь батч получал `_OMITTED_GRADE` — ниже обоих порогов, то есть выбрасывался
+    целиком. `length` теперь означает «оценки неизвестны».
+    """
+    _install_traced(
+        monkeypatch,
+        lambda p: {"id": 1, "score": 5},
+        finish_reason="length",
+        content='{"grades": [{"id": 1, "score": 5}, {"id": 2, "sc',
+    )
+
+    with caplog.at_level(logging.WARNING, logger="cognivault-ui.rag_pipeline"):
+        grades, report = _grade_report("вопрос", [_frag(1), _frag(2)], {}, _GCFG)
+
+    assert grades == [None, None]
+    assert report["status"] == "failed"
+    [batch] = report["batches"]
+    assert batch["status"] == "truncated"
+    assert batch["finish_reason"] == "length"
+    assert batch["error"] is None
+    assert batch["detail"].startswith('{"grades": [')
+    assert "length" in caplog.text
+
+
+def test_truncated_batch_that_also_failed_to_parse_is_truncated(monkeypatch):
+    from app.llm_errors import GigaChatBadJSON
+
+    _install_traced(
+        monkeypatch,
+        lambda p: GigaChatBadJSON("GIGACHAT_BAD_JSON", "GigaChat вернул пустой ответ"),
+        finish_reason="length",
+        content="",
+    )
+
+    grades, report = _grade_report("вопрос", [_frag(1)], {}, _GCFG)
+
+    assert grades == [None]
+    [batch] = report["batches"]
+    assert batch["status"] == "truncated"
+    assert batch["error"] == "GigaChatBadJSON: GigaChat вернул пустой ответ"
+    assert batch["detail"] is None
+
+
+def test_partial_batch_lists_the_omitted_ids(monkeypatch):
+    _install_traced(monkeypatch, lambda p: {"grades": [{"id": 2, "score": 4}]})
+
+    grades, report = _grade_report("вопрос", [_frag(1), _frag(2), _frag(3)], {}, _GCFG)
+
+    assert grades == [rag_pipeline._OMITTED_GRADE, 4, rag_pipeline._OMITTED_GRADE]
+    assert report["status"] == "ok"  # судья работал — просто поленился
+    [batch] = report["batches"]
+    assert batch["status"] == "partial"
+    assert batch["graded"] == [2] and batch["omitted"] == [1, 3]
+
+
+def test_grade_report_on_forty_candidates_has_four_ordered_batches(monkeypatch):
+    _install_traced(monkeypatch, lambda p: {"grades": [{"id": i, "score": 4} for i in range(1, 11)]})
+
+    grades, report = _grade_report("вопрос", [_frag(i) for i in range(40)], {}, _GCFG)
+
+    assert grades == [4] * 40
+    assert report["status"] == "ok"
+    assert [b["n"] for b in report["batches"]] == [1, 2, 3, 4]
+    assert [b["size"] for b in report["batches"]] == [10, 10, 10, 10]
+    # Раздача round-robin: ids батча — глобальные, те же, что `grades[].id`.
+    assert report["batches"][0]["ids"] == list(range(1, 41, 4))
+    assert sorted(i for b in report["batches"] for i in b["ids"]) == list(range(1, 41))
+    assert report["batches"][1]["graded"] == report["batches"][1]["ids"]
+
+
+def test_grade_report_is_degraded_when_only_some_batches_die(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(prompt):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return RuntimeError("нет связи")
+        return {"grades": [{"id": i, "score": 4} for i in range(1, 11)]}
+
+    _install_traced(monkeypatch, handler)
+
+    grades, report = _grade_report("вопрос", [_frag(i) for i in range(40)], {}, _GCFG)
+
+    assert report["status"] == "degraded"
+    assert sorted(b["status"] for b in report["batches"]) == ["failed", "ok", "ok", "ok"]
+    dead = next(b for b in report["batches"] if b["status"] == "failed")
+    assert [grades[i - 1] for i in dead["ids"]] == [None] * 10
+
+
+def test_grade_report_skipped_when_disabled_or_empty(monkeypatch):
+    _install_traced(monkeypatch, lambda p: {"grades": []})
+
+    grades, report = _grade_report("вопрос", [_frag(1)], {"grader_enabled": False}, _GCFG)
+    assert grades == [None]
+    assert report["status"] == "skipped" and report["batches"] == []
+    assert "grader_enabled" in report["detail"]
+
+    grades, report = _grade_report("вопрос", [], {}, _GCFG)
+    assert grades == [] and report["status"] == "skipped"
+
+
+def test_grade_still_returns_the_bare_list(monkeypatch):
+    """Старый вход остаётся: `grade` = `grade_with_report` без отчёта."""
+    _install_traced(monkeypatch, lambda p: {"grades": [{"id": 1, "score": 5}]})
+    assert asyncio.run(rag_pipeline.grade("вопрос", [_frag(1)], {}, _GCFG)) == [5]
+
+
+def test_condense_report_skipped_says_why(monkeypatch):
+    _install_traced(monkeypatch, lambda p: {"intent": "kb_question"})
+
+    _, report = asyncio.run(
+        rag_pipeline.condense_with_report("в", _history(), {"condense_enabled": False}, _GCFG)
+    )
+    assert report["status"] == "skipped"
+    assert "condense_enabled" in report["detail"]
+    assert report["model"] is None and report["finish_reason"] is None
+
+    _, report = asyncio.run(rag_pipeline.condense_with_report("первый", None, {}, _GCFG))
+    assert report["status"] == "skipped"
+    assert "condense_first_turn" in report["detail"]
+
+
+def test_condense_report_ok(monkeypatch):
+    usage = {"prompt_tokens": 80, "completion_tokens": 20, "total_tokens": 100}
+    _install_traced(
+        monkeypatch,
+        lambda p: {"intent": "kb_question", "standalone_question": "как настроить SberOSC"},
+        usage=usage,
+    )
+
+    condensed, report = asyncio.run(
+        rag_pipeline.condense_with_report("а как его настроить", _history(), {}, _GCFG)
+    )
+
+    assert condensed.question == "как настроить SberOSC"
+    assert report == {
+        "status": "ok",
+        "error": None,
+        "detail": None,
+        "finish_reason": "stop",
+        "usage": usage,
+        "model": "GigaChat-Test",
+        "ms": report["ms"],
+    }
+    assert report["ms"] >= 0
+
+
+def test_condense_report_failed(monkeypatch):
+    _install_traced(monkeypatch, lambda p: RuntimeError("нет связи"), finish_reason=None)
+
+    condensed, report = asyncio.run(
+        rag_pipeline.condense_with_report("а как его настроить", _history(), {}, _GCFG)
+    )
+
+    assert condensed == ("kb_question", "а как его настроить", "document", "fact")
+    assert report["status"] == "failed"
+    assert report["error"] == "RuntimeError: нет связи"
+    assert report["model"] == "GigaChat-Test"
+
+
+def test_condense_report_truncated_falls_back(monkeypatch):
+    _install_traced(
+        monkeypatch,
+        lambda p: {"intent": "kb_question", "standalone_question": "обрубок"},
+        finish_reason="length",
+        content='{"intent": "kb_question", "standalone_question": "обрубок',
+    )
+
+    condensed, report = asyncio.run(
+        rag_pipeline.condense_with_report("а как его настроить", _history(), {}, _GCFG)
+    )
+
+    assert condensed.question == "а как его настроить"  # обрубку не верим
+    assert report["status"] == "truncated"
+    assert report["finish_reason"] == "length"
+
+
+def test_hidden_call_config_is_fresh_per_call(monkeypatch):
+    """Батчи идут параллельно — общий объект конфига смешал бы их штампы."""
+    seen: list = []  # сами объекты, а не id: id освобождённого объекта переиспользуется
+
+    async def fake(messages, cfg, **kwargs):
+        seen.append(cfg)
+        return {"grades": []}
+
+    monkeypatch.setattr(rag_pipeline.llm, "complete_json", fake, raising=False)
+    asyncio.run(rag_pipeline.grade("вопрос", [_frag(i) for i in range(40)], {}, _GCFG))
+
+    assert len(seen) == 4 and len({id(c) for c in seen}) == 4
+
+
+def test_hidden_calls_reach_the_rag_context(monkeypatch):
+    """`_build_auto` кладёт оба отчёта в `RagContext.hidden_calls`."""
+    _install_retrieval(monkeypatch, [_frag(1), _frag(2)])
+
+    def handler(prompt):
+        if _is_condense(prompt):
+            return {"intent": "kb_question", "standalone_question": "вопрос"}
+        return RuntimeError("судья недоступен")
+
+    _install_traced(monkeypatch, handler)
+    ctx = _build("а какой вопрос?", [*_history()[:2], {"role": "user", "content": "а какой вопрос?"}])
+
+    assert ctx.hidden_calls["condense"]["status"] == "ok"
+    assert ctx.hidden_calls["grader"]["status"] == "failed"
+    assert ctx.hidden_calls["grader"]["batches"][0]["error"] == "RuntimeError: судья недоступен"
+    assert rag.RagContext().hidden_calls == {"condense": None, "grader": None}
+
+
+# --------------------------------------------------------------------------- #
+# Бюджеты вывода и запрет рассуждений в промптах
+# --------------------------------------------------------------------------- #
+
+_ONLY_JSON = "Отвечай только JSON, без рассуждений и пояснений до или после него."
+
+
+def test_both_prompts_forbid_reasoning_around_the_json(monkeypatch):
+    calls = _install_complete_json(
+        monkeypatch,
+        lambda p: {"intent": "kb_question"} if _is_condense(p) else {"grades": []},
+    )
+    asyncio.run(rag_pipeline.condense("а как его настроить", _history(), {}, {}))
+    asyncio.run(rag_pipeline.grade("вопрос", [_frag(1)], {}, {}))
+
+    assert len(calls) == 2
+    for prompt in calls:
+        assert prompt.rstrip().endswith(_ONLY_JSON)
+
+
+def test_hidden_call_budgets_come_from_config(monkeypatch):
+    """1024/512 были зашиты; рассуждающая модель съедала их до первого символа JSON."""
+    seen: list[int] = []
+
+    async def fake(messages, cfg, **kwargs):
+        seen.append(kwargs["max_tokens"])
+        return {"intent": "kb_question"} if _is_condense(messages[-1]["content"]) else {"grades": []}
+
+    monkeypatch.setattr(rag_pipeline.llm, "complete_json", fake, raising=False)
+
+    asyncio.run(rag_pipeline.condense("а как его настроить", _history(), {}, {}))
+    asyncio.run(rag_pipeline.grade("вопрос", [_frag(1)], {}, {}))
+    assert seen == [rag_pipeline._CONDENSE_MAX_TOKENS, rag_pipeline._GRADE_MAX_TOKENS] == [2048, 4096]
+
+    seen.clear()
+    rcfg = {"condense_max_tokens": 3000, "grader_max_tokens": 8000}
+    asyncio.run(rag_pipeline.condense("а как его настроить", _history(), rcfg, {}))
+    asyncio.run(rag_pipeline.grade("вопрос", [_frag(1)], rcfg, {}))
+    assert seen == [3000, 8000]

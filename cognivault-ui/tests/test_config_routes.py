@@ -534,13 +534,25 @@ def test_prod_configmap_matches_the_code_defaults_for_tuned_keys():
 
     from app.config import DEFAULT_CONFIG
 
-    manifest = pathlib.Path(__file__).resolve().parents[2] / "deploy" / "dropapp" / "03-configmap-ui.yaml"
-    if not manifest.exists():
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    # Два манифеста с одним содержимым: продовый и корневой (dev-стенд).
+    manifests = [
+        repo / "deploy" / "dropapp" / "03-configmap-ui.yaml",
+        repo / "cognivault-ui.yaml",
+    ]
+    if not any(m.exists() for m in manifests):
         pytest.skip("манифест недоступен")
     data = {}
-    for doc in yaml.safe_load_all(manifest.read_text(encoding="utf-8")):
-        if doc and doc.get("kind") == "ConfigMap":
-            data.update(doc.get("data") or {})
+    for manifest in manifests:
+        if not manifest.exists():
+            continue
+        for doc in yaml.safe_load_all(manifest.read_text(encoding="utf-8")):
+            if doc and doc.get("kind") == "ConfigMap":
+                for env, value in (doc.get("data") or {}).items():
+                    assert data.get(env, value) == value, (
+                        f"{env}: манифесты разошлись между собой ({data.get(env)!r} vs {value!r})"
+                    )
+                    data[env] = value
 
     tuned = {
         "RAG_SECTION_MAX_CHARS": "section_max_chars",
@@ -553,7 +565,13 @@ def test_prod_configmap_matches_the_code_defaults_for_tuned_keys():
         # ConfigMap до пода не доехал, и реранкера в пайплайне не было.
         "RAG_GRADER_TIMEOUT": "grader_timeout",
         "RAG_CONDENSE_TIMEOUT": "condense_timeout",
+        # Бюджеты вывода скрытых вызовов: с прежними зашитыми 1024/512
+        # рассуждающая модель отдавала пустой JSON.
+        "RAG_GRADER_MAX_TOKENS": "grader_max_tokens",
+        "RAG_CONDENSE_MAX_TOKENS": "condense_max_tokens",
     }
+    for env in tuned:
+        assert env in data, f"{env} нет в манифесте"
     def same(manifest_value, default_value) -> bool:
         """Сравнение по значению, а не по написанию: `"90"` == `90.0`.
 
@@ -572,3 +590,59 @@ def test_prod_configmap_matches_the_code_defaults_for_tuned_keys():
         if env in data and not same(data[env], DEFAULT_CONFIG["rag"][key])
     }
     assert not mismatched, f"манифест разошёлся с дефолтами кода: {mismatched}"
+
+
+# --------------------------------------------------------------------------- #
+# Бюджеты вывода скрытых вызовов и kitai_extra_body
+# --------------------------------------------------------------------------- #
+
+
+def test_hidden_call_budgets_have_defaults_and_env(monkeypatch):
+    from app.config import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["rag"]["grader_max_tokens"] == 4096
+    assert DEFAULT_CONFIG["rag"]["condense_max_tokens"] == 2048
+    assert "rag.grader_max_tokens" in settings.USER_EDITABLE_KEYS
+    assert "rag.condense_max_tokens" in settings.USER_EDITABLE_KEYS
+
+    cfg = settings.server_config()
+    assert cfg["rag"]["grader_max_tokens"] == 4096
+    assert cfg["rag"]["condense_max_tokens"] == 2048
+
+    monkeypatch.setenv("RAG_GRADER_MAX_TOKENS", "8192")
+    monkeypatch.setenv("RAG_CONDENSE_MAX_TOKENS", "1024")
+    cfg = settings.server_config()
+    assert cfg["rag"]["grader_max_tokens"] == 8192
+    assert cfg["rag"]["condense_max_tokens"] == 1024
+
+
+def test_hidden_call_budgets_are_validated_as_integers():
+    from app.settings import ConfigValueError
+
+    ok = settings.validate_user_overrides({"rag": {"grader_max_tokens": 2048}}, {})
+    assert ok["rag"]["grader_max_tokens"] == 2048
+    with pytest.raises(ConfigValueError):
+        settings.validate_user_overrides({"rag": {"condense_max_tokens": 0}}, {})
+    with pytest.raises(ConfigValueError):
+        settings.validate_user_overrides({"rag": {"grader_max_tokens": "много"}}, {})
+
+
+def test_kitai_extra_body_env_is_a_json_object_or_ignored(monkeypatch, caplog):
+    """Кривой JSON от оператора не должен ронять чат на старте."""
+    assert settings.server_config()["gigachat"]["kitai_extra_body"] == {}
+    assert "gigachat.kitai_extra_body" in settings.ADMIN_LOCKED_KEYS
+    assert "gigachat.kitai_extra_body" not in settings.USER_EDITABLE_KEYS
+
+    monkeypatch.setenv("KITAI_EXTRA_BODY", '{"enable_thinking": false, "top_p": 0.9}')
+    assert settings.server_config()["gigachat"]["kitai_extra_body"] == {
+        "enable_thinking": False,
+        "top_p": 0.9,
+    }
+
+    import logging
+
+    for bad in ("{not json", "[1, 2]", '"строка"'):
+        monkeypatch.setenv("KITAI_EXTRA_BODY", bad)
+        with caplog.at_level(logging.WARNING, logger="cognivault-ui.settings"):
+            assert settings.server_config()["gigachat"]["kitai_extra_body"] == {}
+        assert "KITAI_EXTRA_BODY" in caplog.text

@@ -7,6 +7,7 @@ import logging
 import re
 import secrets
 import time
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, AsyncIterator
 
@@ -50,6 +51,39 @@ _SSE_HEADERS = {
 # грейдер не оставил ни одного пригодного фрагмента, GigaChat в этом ходе не
 # вызывался — значит подставить его `last_finish_reason` нечем, код наш.
 _NO_CONTEXT_FINISH_REASON = "no_context"
+
+# Причина повтора генерации в записи лога (`answer_retry_reason`).
+_EMPTY_LENGTH_RETRY_REASON = "empty_length"
+
+# Показывается кадром `notice` (он отрисовывается в пузыре и тостом — см.
+# `static/app.js`), когда и повтор не дал ни символа.
+_EMPTY_COMPLETION_NOTICE = (
+    "Модель не вернула текст: бюджет ответа исчерпан (finish_reason=length). "
+    "Попробуйте переформулировать или сократить вопрос."
+)
+
+
+def _retry_config(cfg: Any, giga_dict: dict[str, Any]) -> Any:
+    """Copy of the answer config with a doubled output budget, or ``None``.
+
+    ``min(max_tokens * 2, model_context_tokens // 2)`` — the doubling is the
+    cheapest thing that can help a reasoning model that spent the whole budget
+    before its first visible character; the ceiling keeps the request inside
+    the model's window. ``None`` when the ceiling leaves no room to grow: a
+    retry with the same budget would only repeat the failure. A copy, never
+    the stored settings — this is one request's problem.
+    """
+    try:
+        ctx = int(giga_dict.get("model_context_tokens") or 0)
+    except (TypeError, ValueError):
+        ctx = 0
+    if ctx <= 0:
+        ctx = 32768
+    budget = min(int(cfg.max_tokens) * 2, ctx // 2)
+    if budget <= int(cfg.max_tokens):
+        return None
+    return replace(cfg, max_tokens=budget)
+
 
 # Заголовок блока источников в отрендеренном user-сообщении
 # (`rag._render_context_message`). Сам блок идёт сразу за ним и имеет ровно
@@ -393,6 +427,13 @@ async def chat(request: Request) -> Any:
 
     async def generator() -> AsyncIterator[str]:
         full_text = ""
+        # Повтор генерации на пустом ответе с `finish_reason=length` (см.
+        # `_retry_config`). Конфиг ответа подменяется на копию с бо́льшим
+        # бюджетом; `finish_reason` в конце читается с того объекта, который
+        # отвечал последним.
+        answer_cfg = gcfg
+        answer_retries = 0
+        answer_retry_reason: str | None = None
         sources: list[dict[str, Any]] = []
         context_chars = 0
         context_text = ""
@@ -419,6 +460,10 @@ async def chat(request: Request) -> Any:
         # логу нельзя сказать, доехало ли дерево разделов до модели вообще.
         head_block_kind: str | None = None
         head_block_chars: int = 0
+        # Отчёты двух скрытых вызовов (condense, грейдер по батчам): статус,
+        # ошибка, finish_reason, usage, модель. `grades: null` говорит лишь, что
+        # реранкер не сработал; это — почему.
+        hidden_calls: dict[str, Any] | None = None
         # Стадии конвейера. `condense`/`search`/`grade`/`content` приходят из
         # инструментированных seams (см. верх модуля), остальное меряем здесь.
         turn_started = time.perf_counter()
@@ -462,6 +507,7 @@ async def chat(request: Request) -> Any:
                     hedge = getattr(ctx, "hedge", None)
                     head_block_kind = getattr(ctx, "head_block_kind", None)
                     head_block_chars = getattr(ctx, "head_block_chars", 0)
+                    hidden_calls = getattr(ctx, "hidden_calls", None)
 
                     if answer_override:
                         # Ответ уже готов (шаблонный отказ: ни один кандидат не
@@ -547,6 +593,37 @@ async def chat(request: Request) -> Any:
                     yield format_sse("token", {"text": delta})
                 stages["stream"] = _elapsed_ms(stream_started)
 
+                # Пустой ответ при `finish_reason=length`: модель потратила весь
+                # бюджет вывода до первого символа (режим рассуждений считает в
+                # тот же max_tokens). Наблюдалось на проде — четыре пустых пузыря.
+                # Один повтор с удвоенным бюджетом; настройки не трогаем, это
+                # копия конфига на один запрос. Если и он пуст — честное
+                # уведомление вместо пустого пузыря.
+                if (
+                    getattr(answer_cfg, "last_finish_reason", None) == "length"
+                    and not full_text.strip()
+                ):
+                    retry_cfg = _retry_config(gcfg, giga_dict)
+                    if retry_cfg is not None:
+                        answer_retries = 1
+                        answer_retry_reason = _EMPTY_LENGTH_RETRY_REASON
+                        log.warning(
+                            "chat %s: пустой ответ при finish_reason=length "
+                            "(max_tokens=%s) — повтор с max_tokens=%s",
+                            chat_id,
+                            gcfg.max_tokens,
+                            retry_cfg.max_tokens,
+                        )
+                        retry_started = time.perf_counter()
+                        answer_cfg = retry_cfg
+                        async for delta in llm.stream_chat(send, retry_cfg):
+                            full_text += delta
+                            yield format_sse("token", {"text": delta})
+                        stages["retry"] = _elapsed_ms(retry_started)
+                    if not full_text.strip():
+                        notice = _EMPTY_COMPLETION_NOTICE
+                        yield format_sse("notice", {"message": notice})
+
                 # Оговорка по концентрации доказательств (шаг 2в): вопрос был
                 # про базу целиком, а все выбранные фрагменты пришли из одного
                 # документа. Дописывается ПОСЛЕ ответа — она его уточняет, а не
@@ -578,7 +655,7 @@ async def chat(request: Request) -> Any:
                         len(sources),
                     )
 
-                finish_reason = getattr(gcfg, "last_finish_reason", None)
+                finish_reason = getattr(answer_cfg, "last_finish_reason", None)
                 yield format_sse(
                     "done", {"chat_id": chat_id, "finish_reason": finish_reason}
                 )
@@ -668,6 +745,27 @@ async def chat(request: Request) -> Any:
                         # `length` здесь = ответ обрезан лимитом модели; раньше
                         # вычислялось и выбрасывалось, обрыв был невидим.
                         "finish_reason": finish_reason,
+                        # То же значение под именем, которое не спутать с
+                        # `finish_reason` скрытых вызовов в `hidden_calls`.
+                        "answer_finish_reason": finish_reason,
+                        # Пустой ответ без ошибки транспорта и без обрыва
+                        # клиентом: модель отработала и не выдала ни символа
+                        # (типично — `finish_reason: length`, бюджет ушёл на
+                        # рассуждения). По `answer_chars: 0` это не отличить от
+                        # оборванного соединения.
+                        "empty_answer": (
+                            not errored and not truncated and not full_text.strip()
+                        ),
+                        # Повтор генерации: сколько раз и почему (`empty_length`
+                        # — пустой ответ при finish_reason=length). Запись одна
+                        # на ход: повтор идёт внутри того же генератора.
+                        "answer_retries": answer_retries,
+                        "answer_retry_reason": answer_retry_reason,
+                        # Что сделали скрытые вызовы: condense и грейдер по
+                        # батчам — статус, ошибка, finish_reason, usage, модель.
+                        # `None` вне RAG-режима; внутри — словарь с двумя
+                        # ключами, каждый из которых `None`, если шаг не дошёл.
+                        "hidden_calls": hidden_calls,
                         "invalid_citations": invalid_citations,
                         "rag_used": rag_used,
                         "notice": notice,

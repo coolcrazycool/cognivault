@@ -234,8 +234,36 @@ def test_settings_snapshot_tolerates_missing_sections():
     assert rag_log.settings_snapshot(None, None, None) == {
         "rag": {},
         "gigachat": {},
+        "model_effective": {"provider": "gigachat", "model": None},
         "prompts": {"system": None, "context_reminder": None},
     }
+
+
+def test_settings_snapshot_names_the_model_that_actually_answered():
+    """С `provider: kitai` отвечает `kitai_model`, а не `model`.
+
+    Запись называла `model` и только его — отчёт по логу прогона на KitAI
+    приписывал результат не той модели. `model_effective` снимает с харнесса
+    знание о том, что у KitAI модель лежит под другим ключом.
+    """
+    kitai = {"provider": "kitai", "model": "GigaChat-2-Max", "kitai_model": "glm-5.1"}
+    snapshot = rag_log.settings_snapshot({}, kitai, None)
+    assert snapshot["gigachat"]["provider"] == "kitai"
+    assert snapshot["gigachat"]["kitai_model"] == "glm-5.1"
+    assert snapshot["gigachat"]["model"] == "GigaChat-2-Max"
+    assert snapshot["model_effective"] == {"provider": "kitai", "model": "glm-5.1"}
+
+    giga = {"provider": "gigachat", "model": "GigaChat-2-Max", "kitai_model": "glm-5.1"}
+    assert rag_log.settings_snapshot({}, giga, None)["model_effective"] == {
+        "provider": "gigachat",
+        "model": "GigaChat-2-Max",
+    }
+    # Неизвестный провайдер разрешается так же, как в `llm.provider_of`.
+    odd = {"provider": "openai", "model": "GigaChat-2-Max"}
+    assert rag_log.settings_snapshot({}, odd, None)["model_effective"]["provider"] == "gigachat"
+    # KitAI без своего ключа берёт общий `model` — как `KitaiConfig.from_dict`.
+    bare = {"provider": "kitai", "model": "GigaChat-2-Max"}
+    assert rag_log.settings_snapshot({}, bare, None)["model_effective"]["model"] == "GigaChat-2-Max"
 
 
 # --------------------------------------------------------------------------- #
@@ -324,3 +352,12 @@ def test_instrument_wraps_a_coroutine_once():
     assert value == "результат q"  # поведение не изменилось
     assert "search" in stages
     assert module.search.__name__ == "search"
+
+
+def test_settings_snapshot_records_the_hidden_call_budgets():
+    """`finish_reason=length` у грейдера читается только рядом с бюджетом."""
+    snapshot = rag_log.settings_snapshot(
+        {"grader_max_tokens": 4096, "condense_max_tokens": 2048}, {}, {}
+    )
+    assert snapshot["rag"]["grader_max_tokens"] == 4096
+    assert snapshot["rag"]["condense_max_tokens"] == 2048

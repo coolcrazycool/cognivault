@@ -22,9 +22,10 @@ import asyncio
 import logging
 import math
 import re
+import time
 from typing import Any, NamedTuple
 
-from . import corpus_scope, llm
+from . import corpus_scope, llm, llm_trace
 
 log = logging.getLogger("cognivault-ui.rag_pipeline")
 
@@ -42,6 +43,14 @@ log = logging.getLogger("cognivault-ui.rag_pipeline")
 # `rag.grader_timeout`).
 _CONDENSE_TIMEOUT = 10.0
 _GRADE_TIMEOUT = 20.0
+
+# Бюджет ВЫВОДА скрытых вызовов — тоже дефолты, правятся из конфига
+# (`rag.condense_max_tokens`, `rag.grader_max_tokens`). Прежние 512/1024 были
+# зашиты в код и рассчитаны на модель, которая отдаёт один JSON. Рассуждающая
+# модель (thinking mode) тратит тот же бюджет сначала на рассуждения — на проде
+# это пустой ответ с `finish_reason=length` и мёртвый реранкер.
+_CONDENSE_MAX_TOKENS = 2048
+_GRADE_MAX_TOKENS = 4096
 
 # Dialogue turns fed to the condenser (after history trimming upstream).
 _HISTORY_TURNS = 6
@@ -133,6 +142,18 @@ DEFAULT_SHAPE = "fact"
 
 _ROLE_LABELS = {"user": "Пользователь", "assistant": "Ассистент"}
 
+# Кап на `detail` в отчёте о скрытом вызове (исключение или голова сырого
+# ответа). Запись хода и так ~30 КБ; ещё один полный ответ судьи ей не нужен.
+_OUTCOME_DETAIL_CHARS = 500
+
+# `finish_reason`, означающий «модель упёрлась в max_tokens». Обрезанный JSON
+# грейдера — отдельный сбой, а не «судья пропустил id»: `extract_json`
+# вытаскивает из обрубка первый же сбалансированный объект (`{"id": 1,
+# "score": 5}`), в нём нет ключа `grades`, и весь батч молча получал
+# `_OMITTED_GRADE`. Наблюдалось на проде вместе с пустым ответом (модель
+# потратила бюджет на рассуждения и не выдала ни одного символа).
+_FINISH_LENGTH = "length"
+
 
 # --------------------------------------------------------------------------- #
 # Prompts (verbatim from RAG_QUALITY_PLAN.md §2.1 / §2.2)
@@ -161,7 +182,8 @@ _CONDENSE_TASKS = """
   "fact" — всё остальное (одно значение, определение, сравнение, да/нет).
   При сомнении выбирай "fact".
 
-Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null, "scope": "document" | "corpus", "answer_shape": "fact" | "list" | "procedure"}"""
+Ответ строго в JSON: {"intent": "...", "standalone_question": "..." | null, "scope": "document" | "corpus", "answer_shape": "fact" | "list" | "procedure"}
+Отвечай только JSON, без рассуждений и пояснений до или после него."""
 
 _GRADE_SCALE = """
 Оцени КАЖДЫЙ фрагмент по шкале:
@@ -171,7 +193,8 @@ _GRADE_SCALE = """
 2 — смежная тема, конкретной пользы нет
 1 — не связан с вопросом
 
-Ответ строго в JSON: {"grades": [{"id": 1, "score": 5}, ...]}"""
+Ответ строго в JSON: {"grades": [{"id": 1, "score": 5}, ...]}
+Отвечай только JSON, без рассуждений и пояснений до или после него."""
 
 
 def _condense_prompt(question: str, history: list[dict[str, Any]]) -> str:
@@ -219,6 +242,7 @@ async def _call(
     *,
     timeout: float,
     max_tokens: int,
+    trace: dict[str, Any] | None = None,
 ) -> Any:
     """Run one hidden call under a hard wall-clock deadline.
 
@@ -227,17 +251,67 @@ async def _call(
     the budget. Both hidden calls block the first token, so the step as a whole
     gets the deadline the plan specifies; a breach raises ``TimeoutError`` and
     degrades through the caller's usual fallback.
+
+    ``trace`` (out-parameter) receives what the provider stamped on the config
+    — ``finish_reason``, ``usage``, ``content_head``, ``model`` — whether the
+    call returned or raised (see :mod:`app.llm_trace`). The config object is
+    built HERE, fresh for every call: grader batches run concurrently through
+    ``asyncio.gather``, and a shared object would let one batch overwrite
+    another's stamps. Keep it that way.
     """
-    return await asyncio.wait_for(
-        llm.complete_json(
-            [{"role": "user", "content": prompt}],
-            llm.config_for(gcfg or {}),
+    cfg = llm.config_for(gcfg or {})
+    try:
+        return await asyncio.wait_for(
+            llm.complete_json(
+                [{"role": "user", "content": prompt}],
+                cfg,
+                timeout=timeout,
+                temperature=0.0,
+                max_tokens=max_tokens,
+            ),
             timeout=timeout,
-            temperature=0.0,
-            max_tokens=max_tokens,
-        ),
-        timeout=timeout,
-    )
+        )
+    finally:
+        if trace is not None:
+            trace.update(llm_trace.read(cfg))
+
+
+def _error_text(exc: BaseException) -> str:
+    """``"<Type>: <message>"`` — the type first, because ``asyncio.TimeoutError``
+    has an empty ``str()`` and «вызов не удался ()» told nobody anything."""
+    return f"{type(exc).__name__}: {exc or 'без текста'}"
+
+
+def _error_detail(exc: BaseException | None, trace: dict[str, Any]) -> str | None:
+    """The typed error's ``detail`` (KitAI's «error.status=404; No such model»),
+    else the head of whatever text came back; ``None`` when there is neither."""
+    detail = getattr(exc, "detail", None) if exc is not None else None
+    text = str(detail) if detail else str(trace.get("content_head") or "")
+    return text[:_OUTCOME_DETAIL_CHARS] or None
+
+
+def _outcome(
+    status: str,
+    trace: dict[str, Any],
+    started: float,
+    *,
+    error: str | None = None,
+    detail: str | None = None,
+) -> dict[str, Any]:
+    """The common part of a hidden-call report — one shape for both calls."""
+    return {
+        "status": status,
+        "error": error,
+        "detail": detail,
+        "finish_reason": trace.get("finish_reason"),
+        "usage": trace.get("usage"),
+        "model": trace.get("model"),
+        "ms": round((time.perf_counter() - started) * 1000.0, 1),
+    }
+
+
+def _truncated(trace: dict[str, Any]) -> bool:
+    return trace.get("finish_reason") == _FINISH_LENGTH
 
 
 def _strip_indexer_prefix(text: str, section_path: str) -> str:
@@ -569,36 +643,85 @@ async def condense(
     about («что ты знаешь?») is handled with no call at all by
     :func:`app.corpus_scope.match_meta`.
     """
+    condensed, _ = await condense_with_report(question, messages, rcfg, gcfg)
+    return condensed
+
+
+async def condense_with_report(
+    question: str,
+    messages: list[dict[str, Any]] | None,
+    rcfg: dict[str, Any],
+    gcfg: dict[str, Any] | None,
+) -> tuple[Condensed, dict[str, Any]]:
+    """:func:`condense` plus a report of what the hidden call did.
+
+    The report is ``{"status", "error", "detail", "finish_reason", "usage",
+    "model", "ms"}``; ``status`` is ``ok`` / ``skipped`` (feature off, or first
+    turn without ``condense_first_turn`` — ``detail`` says which) / ``failed``
+    / ``truncated`` (the model hit ``max_tokens``; the reply is not trusted even
+    if a JSON object could be scavenged from it). It goes into the turn record
+    so a run can tell a dead condense step from one that agreed with the
+    question — the verdicts look identical from the outside.
+    """
+    started = time.perf_counter()
     if not bool(rcfg.get("condense_enabled", True)):
-        return _fallback(question)
+        return _fallback(question), _outcome(
+            "skipped", {}, started, detail="condense_enabled=false"
+        )
 
     history = _history_turns(messages, question)
     first_turn = not history
     if first_turn and not bool(rcfg.get("condense_first_turn", False)):
-        return _fallback(question)
+        return _fallback(question), _outcome(
+            "skipped", {}, started, detail="первая реплика без condense_first_turn"
+        )
 
+    trace: dict[str, Any] = {}
     try:
         data = await _call(
             _condense_prompt(question, history),
             gcfg,
             timeout=float(rcfg.get("condense_timeout") or _CONDENSE_TIMEOUT),
-            max_tokens=512,
+            max_tokens=int(rcfg.get("condense_max_tokens") or _CONDENSE_MAX_TOKENS),
+            trace=trace,
         )
     except Exception as exc:  # noqa: BLE001 — any failure => raw question
         log.warning(
-            "condense: вызов не удался (%s: %s) — вопрос идёт как есть",
-            type(exc).__name__, exc or "без текста",
+            "condense (модель %s): вызов не удался (%s: %s) — вопрос идёт как есть",
+            trace.get("model") or "?",
+            type(exc).__name__,
+            exc or "без текста",
         )
-        return _fallback(question)
+        return _fallback(question), _outcome(
+            "truncated" if _truncated(trace) else "failed",
+            trace,
+            started,
+            error=_error_text(exc),
+            detail=_error_detail(exc, trace),
+        )
 
     if not isinstance(data, dict):
-        log.warning("condense: ответ не объект — вопрос идёт как есть")
-        return _fallback(question)
+        log.warning(
+            "condense (модель %s): ответ не объект — вопрос идёт как есть",
+            trace.get("model") or "?",
+        )
+        return _fallback(question), _outcome(
+            "failed", trace, started, error="TypeError: ответ не объект"
+        )
+    if _truncated(trace):
+        log.warning(
+            "condense (модель %s): ответ обрезан лимитом токенов "
+            "(finish_reason=length) — вопрос идёт как есть",
+            trace.get("model") or "?",
+        )
+        return _fallback(question), _outcome(
+            "truncated", trace, started, detail=_error_detail(None, trace)
+        )
 
     parsed = _parse_condense(data, question)
     if first_turn:
-        return Condensed(_DEFAULT_INTENT, question, parsed.scope, parsed.shape)
-    return parsed
+        parsed = Condensed(_DEFAULT_INTENT, question, parsed.scope, parsed.shape)
+    return parsed, _outcome("ok", trace, started)
 
 
 # --------------------------------------------------------------------------- #
@@ -633,52 +756,156 @@ def _grade_timeout(rcfg: dict[str, Any] | None) -> float:
     return float((rcfg or {}).get("grader_timeout") or _GRADE_TIMEOUT)
 
 
+def _grade_max_tokens(rcfg: dict[str, Any] | None) -> int:
+    return int((rcfg or {}).get("grader_max_tokens") or _GRADE_MAX_TOKENS)
+
+
 async def _grade_batch(
     question: str,
     fragments: list[dict[str, Any]],
     gcfg: dict[str, Any] | None,
     rcfg: dict[str, Any] | None = None,
-) -> list[int | None]:
-    """Grade one batch.
+    *,
+    ordinal: int = 1,
+    ids: list[int] | None = None,
+) -> tuple[list[int | None], dict[str, Any]]:
+    """Grade one batch. Returns ``(grades, outcome)``.
 
     A **failed** batch degrades to ``None`` grades — genuinely unknown, and
     :func:`select` keeps those by search rank so one dead batch cannot cause a
-    refusal. A **successful** batch that simply omitted some ids is a different
-    thing: the judge saw those fragments and did not rate them, so they are
-    scored ``_OMITTED_GRADE`` rather than left unknown.
+    refusal. A **truncated** batch (``finish_reason == "length"``) is treated
+    the same way, whatever ``extract_json`` managed to scavenge from the cut-off
+    text — see :data:`_FINISH_LENGTH`. A **successful** batch that simply
+    omitted some ids is a different thing: the judge saw those fragments and
+    did not rate them, so they are scored ``_OMITTED_GRADE`` rather than left
+    unknown.
+
+    ``outcome`` is what reaches the turn record: ``n`` (``ordinal``, 1-based),
+    ``size``, ``ids`` (the candidates' global 1-based ids — the same numbers as
+    ``grades[].id`` in the record, so batches join to candidates), ``status``
+    (``ok`` / ``partial`` / ``failed`` / ``truncated``), ``error``, ``detail``,
+    ``finish_reason``, ``usage``, ``model``, ``ms``, ``graded`` and ``omitted``
+    (ids the judge scored / skipped).
     """
+    count = len(fragments)
+    batch_ids = list(ids) if ids is not None else list(range(1, count + 1))
+    started = time.perf_counter()
+    trace: dict[str, Any] = {}
+
+    def finish(
+        status: str,
+        grades: list[int | None],
+        *,
+        error: str | None = None,
+        detail: str | None = None,
+        graded: list[int] | None = None,
+        omitted: list[int] | None = None,
+    ) -> tuple[list[int | None], dict[str, Any]]:
+        outcome = {
+            "n": ordinal,
+            "size": count,
+            "ids": batch_ids,
+            **_outcome(status, trace, started, error=error, detail=detail),
+            "graded": graded or [],
+            "omitted": omitted or [],
+        }
+        return grades, outcome
+
     try:
         data = await _call(
             _grade_prompt(question, fragments),
             gcfg,
             timeout=_grade_timeout(rcfg),
-            max_tokens=1024,
+            max_tokens=_grade_max_tokens(rcfg),
+            trace=trace,
         )
     except Exception as exc:  # noqa: BLE001 — grading is best-effort
         # Тип, а не только текст: у `asyncio.TimeoutError` пустой `str()`, и в
         # логе получалось «вызов не удался ()» — сообщение, по которому нельзя
         # отличить таймаут от обрыва связи. Наблюдалось на прогоне оценки.
         log.warning(
-            "grader: вызов не удался (%s: %s) — отбор пропущен",
-            type(exc).__name__, exc or "без текста",
+            "grader: батч %d (модель %s): вызов не удался (%s: %s) — отбор пропущен",
+            ordinal,
+            trace.get("model") or "?",
+            type(exc).__name__,
+            exc or "без текста",
         )
-        return [None] * len(fragments)
+        return finish(
+            "truncated" if _truncated(trace) else "failed",
+            [None] * count,
+            error=_error_text(exc),
+            detail=_error_detail(exc, trace),
+        )
     if not isinstance(data, dict):
-        log.warning("grader: ответ не объект — отбор пропущен")
-        return [None] * len(fragments)
+        log.warning(
+            "grader: батч %d (модель %s): ответ не объект — отбор пропущен",
+            ordinal,
+            trace.get("model") or "?",
+        )
+        return finish("failed", [None] * count, error="TypeError: ответ не объект")
+    if _truncated(trace):
+        # Обрубок JSON — не «судья пропустил id». Оценки батча неизвестны, и
+        # `select` протащит его кандидатов по рангу поиска, а не выбросит все
+        # разом как `_OMITTED_GRADE`.
+        log.warning(
+            "grader: батч %d (модель %s): ответ обрезан лимитом токенов "
+            "(finish_reason=length, %d фрагментов) — оценки батча неизвестны",
+            ordinal,
+            trace.get("model") or "?",
+            count,
+        )
+        return finish(
+            "truncated", [None] * count, detail=_error_detail(None, trace)
+        )
 
-    grades = _parse_grades(data, len(fragments))
+    grades = _parse_grades(data, count)
     omitted = [i for i, g in enumerate(grades) if g is None]
     if omitted:
         log.info(
-            "grader: батч оценён, но %d из %d фрагментов не упомянуты — считаем их %d",
+            "grader: батч %d (модель %s) оценён, но %d из %d фрагментов не "
+            "упомянуты — считаем их %d",
+            ordinal,
+            trace.get("model") or "?",
             len(omitted),
-            len(fragments),
+            count,
             _OMITTED_GRADE,
         )
         for i in omitted:
             grades[i] = _OMITTED_GRADE
-    return grades
+    omitted_set = set(omitted)
+    return finish(
+        "partial" if omitted else "ok",
+        grades,
+        graded=[batch_ids[i] for i in range(count) if i not in omitted_set],
+        omitted=[batch_ids[i] for i in omitted],
+    )
+
+
+def _grade_report(
+    batches: list[dict[str, Any]], started: float, *, detail: str | None = None
+) -> dict[str, Any]:
+    """Roll the batch outcomes up into one verdict for the grader step.
+
+    ``ok`` — every batch answered (``partial`` counts: the judge worked, it just
+    skipped ids); ``degraded`` — some batches died; ``failed`` — all of them
+    did; ``skipped`` — the step never ran. The harness reads ``status`` first
+    and ``batches`` only when it is not ``ok``.
+    """
+    dead = sum(1 for b in batches if b["status"] in ("failed", "truncated"))
+    if not batches:
+        status = "skipped"
+    elif dead == 0:
+        status = "ok"
+    elif dead == len(batches):
+        status = "failed"
+    else:
+        status = "degraded"
+    return {
+        "status": status,
+        "batches": batches,
+        "detail": detail,
+        "ms": round((time.perf_counter() - started) * 1000.0, 1),
+    }
 
 
 async def grade(
@@ -704,13 +931,36 @@ async def grade(
     the search order is preserved, and the ``id → candidate`` mapping is restored
     positionally, so the prompt is unchanged in shape.
     """
+    grades, _ = await grade_with_report(question, candidates, rcfg, gcfg)
+    return grades
+
+
+async def grade_with_report(
+    question: str,
+    candidates: list[dict[str, Any]],
+    rcfg: dict[str, Any],
+    gcfg: dict[str, Any] | None,
+) -> tuple[list[int | None], dict[str, Any]]:
+    """:func:`grade` plus a per-batch report for the turn record.
+
+    ``report = {"status": "ok" | "degraded" | "failed" | "skipped", "batches":
+    [outcome, …], "detail", "ms"}`` — see :func:`_grade_batch` for the outcome
+    shape. Grades that are ``None`` used to be all a run could see of a dead
+    reranker; the report says which batch died, of what, on which model.
+    """
+    started = time.perf_counter()
     if not candidates:
-        return []
+        return [], _grade_report([], started, detail="нет кандидатов")
     if not bool(rcfg.get("grader_enabled", True)):
-        return [None] * len(candidates)
+        return [None] * len(candidates), _grade_report(
+            [], started, detail="grader_enabled=false"
+        )
 
     if len(candidates) <= _BATCH_THRESHOLD:
-        return await _grade_batch(question, candidates, gcfg, rcfg)
+        grades, outcome = await _grade_batch(
+            question, candidates, gcfg, rcfg, ordinal=1
+        )
+        return grades, _grade_report([outcome], started)
 
     n_batches = int(math.ceil(len(candidates) / _BATCH_SIZE))
     batches: list[list[dict[str, Any]]] = [[] for _ in range(n_batches)]
@@ -720,13 +970,23 @@ async def grade(
         origins[i % n_batches].append(i)
 
     results = await asyncio.gather(
-        *(_grade_batch(question, batch, gcfg, rcfg) for batch in batches)
+        *(
+            _grade_batch(
+                question,
+                batch,
+                gcfg,
+                rcfg,
+                ordinal=n + 1,
+                ids=[i + 1 for i in origins[n]],
+            )
+            for n, batch in enumerate(batches)
+        )
     )
     out: list[int | None] = [None] * len(candidates)
-    for indices, part in zip(origins, results):
+    for indices, (part, _) in zip(origins, results):
         for origin, score in zip(indices, part):
             out[origin] = score
-    return out
+    return out, _grade_report([outcome for _, outcome in results], started)
 
 
 # --------------------------------------------------------------------------- #

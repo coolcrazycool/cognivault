@@ -315,7 +315,14 @@ class RagContext:
       structural head block opened ``user_message`` (:func:`_head_block`) and how
       big it was. Telemetry only, never read back into the answer path: the
       block itself sits outside the logged ``context_text``, so without this pair
-      a finished run cannot say whether the section tree was there at all.
+      a finished run cannot say whether the section tree was there at all;
+    * ``hidden_calls`` — ``{"condense": report | None, "grader": report | None}``,
+      what the two hidden LLM calls did (see
+      :func:`app.rag_pipeline.condense_with_report` /
+      :func:`app.rag_pipeline.grade_with_report`). ``None`` for a step that was
+      never reached — a meta turn, or a turn that ended before retrieval.
+      Telemetry only: ``grades`` of ``None`` already tell the answer path the
+      reranker was dead, this says WHY (which batch, which error, which model).
     """
 
     system_message: dict[str, Any] | None = None
@@ -332,6 +339,9 @@ class RagContext:
     hedge: str | None = None
     head_block_kind: str | None = None
     head_block_chars: int = 0
+    hidden_calls: dict[str, Any] = field(
+        default_factory=lambda: {"condense": None, "grader": None}
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -878,7 +888,12 @@ async def _build_auto(
             return meta
 
     # 0b. Hidden call 1: route the turn and rewrite it into a standalone query.
-    condensed = await rag_pipeline.condense(query, messages, rcfg, gcfg)
+    # Отчёты обоих скрытых вызовов уезжают в запись хода одним словарём; он
+    # общий для всех `RagContext` ниже, поэтому грейдер дописывает в него же.
+    condensed, condense_report = await rag_pipeline.condense_with_report(
+        query, messages, rcfg, gcfg
+    )
+    hidden: dict[str, Any] = {"condense": condense_report, "grader": None}
     intent, rq, scope, shape = condensed
 
     # Route on the SHAPE of the answer the user asked for. A five-fragment top-k
@@ -923,6 +938,7 @@ async def _build_auto(
             intent=intent,
             standalone_question=rq,
             scope=scope,
+            hidden_calls=hidden,
         )
 
     # 1. Retrieve with hybrid search, graceful fallback to semantic.
@@ -956,6 +972,7 @@ async def _build_auto(
             intent=intent,
             standalone_question=rq,
             scope=scope,
+            hidden_calls=hidden,
         )
 
     fragments = _norm_semantic(raw.get("results") or [])
@@ -963,7 +980,9 @@ async def _build_auto(
         f for f in fragments if _passes_min_score(f.get("score"), min_score)
     ]
     if not fragments:
-        return RagContext(intent=intent, standalone_question=rq, scope=scope)
+        return RagContext(
+            intent=intent, standalone_question=rq, scope=scope, hidden_calls=hidden
+        )
 
     candidates = [
         {
@@ -985,7 +1004,9 @@ async def _build_auto(
     # 1b. Hidden call 2: grade every candidate, then select. Runs BEFORE
     # grouping and smart expansion so whole-file/section expansion only ever
     # happens for fragments the judge kept.
-    grade_list = await rag_pipeline.grade(rq, fragments, rcfg, gcfg)
+    grade_list, hidden["grader"] = await rag_pipeline.grade_with_report(
+        rq, fragments, rcfg, gcfg
+    )
     for f, g in zip(fragments, grade_list):
         f["grade"] = g
     graded = any(g is not None for g in grade_list)
@@ -1012,6 +1033,7 @@ async def _build_auto(
             grades=grades_meta,
             answer_override=_NO_ANSWER,
             scope=scope,
+            hidden_calls=hidden,
         )
 
     # 2-4. Group by file, rank files by their best hit: the grader's verdict
@@ -1141,6 +1163,7 @@ async def _build_auto(
             candidates=candidates,
             grades=grades_meta,
             scope=scope,
+            hidden_calls=hidden,
         )
 
     # Structural head block — the section tree, or the footprint. Fetched only
@@ -1188,6 +1211,7 @@ async def _build_auto(
         hedge=hedge_text,
         head_block_kind=head_kind,
         head_block_chars=len(corpus or ""),
+        hidden_calls=hidden,
     )
 
 
